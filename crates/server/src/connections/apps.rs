@@ -71,6 +71,19 @@ pub(super) async fn app_config_tx(
         .ok_or_else(|| ApiError::bad("Set up this provider app first"))?;
     decode_app(state, row)
 }
+pub(super) async fn locked_app_config_tx(
+    state: &AppState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    provider: &str,
+) -> Result<AppConfig> {
+    let row =
+        sqlx::query("SELECT id,encrypted_config FROM provider_apps WHERE provider=$1 FOR SHARE")
+            .bind(provider)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(|| ApiError::bad("Set up this provider app first"))?;
+    decode_app(state, row)
+}
 fn decode_app(state: &AppState, row: sqlx::postgres::PgRow) -> Result<AppConfig> {
     let plain =
         crypto::decrypt(key(state)?, row.get("id"), row.get("encrypted_config")).map_err(|_| {

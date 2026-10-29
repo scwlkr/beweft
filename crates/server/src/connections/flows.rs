@@ -83,7 +83,7 @@ pub async fn callback(
                 .find_map(|p| p.trim().strip_prefix("beweft_oauth="))
         })
         .ok_or_else(|| ApiError::bad("Connection browser session expired; start again"))?;
-    let row=sqlx::query("UPDATE connection_flows f SET consumed_at=now() WHERE state_hash=$1 AND correlation_hash=$2 AND provider=$3 AND expires_at>now() AND consumed_at IS NULL AND EXISTS(SELECT 1 FROM sessions s WHERE s.token_hash=f.session_hash AND s.owner_id=f.owner_id AND s.expires_at>now()) RETURNING id,encrypted_verifier,encrypted_app").bind(crypto::digest(&state_value)).bind(crypto::digest(correlation)).bind(&provider).fetch_optional(&state.db).await?.ok_or_else(||ApiError::bad("Connection expired or was already used; start again"))?;
+    let row=sqlx::query("UPDATE connection_flows f SET consumed_at=now() WHERE state_hash=$1 AND correlation_hash=$2 AND provider=$3 AND expires_at>now() AND consumed_at IS NULL AND EXISTS(SELECT 1 FROM sessions s WHERE s.token_hash=f.session_hash AND s.owner_id=f.owner_id AND s.expires_at>now()) RETURNING id,encrypted_verifier,encrypted_app,oauth_generation").bind(crypto::digest(&state_value)).bind(crypto::digest(correlation)).bind(&provider).fetch_optional(&state.db).await?.ok_or_else(||ApiError::bad("Connection expired or was already used; start again"))?;
     if query.error.is_some() {
         return Ok(Redirect::to("/settings?connection_error=consent_declined").into_response());
     }
@@ -107,32 +107,43 @@ pub async fn callback(
         .map_err(ApiError::internal)?,
     )
     .map_err(ApiError::internal)?;
-    if !app.same_grant_authority(&app_config(&state, &provider).await?) {
+    // Serialize the entire external exchange with disconnect and manual removal.
+    // Old or pre-upgrade flows must fail before contacting the provider.
+    let mut tx = state.db.begin().await?;
+    let generation = super::apps::require_open_oauth_gate(
+        super::apps::oauth_gate(&mut tx, &provider, false).await?,
+    )?;
+    if row.get::<Option<i64>, _>("oauth_generation") != Some(generation) {
+        return Err(ApiError::conflict(
+            "Provider access changed during authorization; start again",
+        ));
+    }
+    if !app
+        .same_grant_authority(&super::apps::locked_app_config_tx(&state, &mut tx, &provider).await?)
+    {
         return Err(ApiError::bad(
             "Provider configuration changed during authorization; start again",
         ));
     }
 
-    let adapter = adapter_for(&app).await?;
-    let tokens = adapter
-        .exchange(
-            &app,
-            &code,
-            &format!(
-                "{}/api/v1/connections/{provider}/callback",
-                state.config.public_url
-            ),
-            &verifier,
-        )
-        .await
-        .map_err(provider_error)?;
-    let candidates = adapter
-        .identities(&app, &tokens)
-        .await
-        .map_err(provider_error)?;
+    let candidates = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let adapter = adapter_for(&app).await?;
+        let tokens = adapter
+            .exchange(
+                &app,
+                &code,
+                &format!("{}/api/v1/connections/{provider}/callback", state.config.public_url),
+                &verifier,
+            )
+            .await
+            .map_err(|error| ApiError::bad(format!("{} If access was granted remotely, remove it at the provider before starting again.", error.message)))?;
+        adapter.identities(&app, &tokens).await.map_err(|error| ApiError::bad(format!("{} Authorization may have granted access; remove it at the provider before starting again.", error.message)))
+    })
+    .await
+    .map_err(|_| ApiError::conflict("Provider authorization timed out and its outcome is unknown. Check and remove any app access at the provider before starting again."))??;
     if candidates.is_empty() {
         return Err(ApiError::bad(
-            "No eligible destination was returned. Check Page access, channel ownership, account type and permissions.",
+            "No eligible destination was returned. Check account eligibility and permissions; if access was granted, remove it at the provider before starting again.",
         ));
     }
     let encrypted = crypto::encrypt(
@@ -144,8 +155,9 @@ pub async fn callback(
     sqlx::query("UPDATE connection_flows SET encrypted_candidates=$2 WHERE id=$1")
         .bind(id)
         .bind(encrypted)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     let mut response = Redirect::to(&format!("/settings?connection_flow={id}")).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
@@ -219,7 +231,7 @@ pub async fn complete(
     }
     if !candidate
         .app
-        .same_grant_authority(&super::apps::app_config_tx(&state, &mut tx, &provider).await?)
+        .same_grant_authority(&super::apps::locked_app_config_tx(&state, &mut tx, &provider).await?)
     {
         return Err(ApiError::bad(
             "Provider configuration changed; authorize again",

@@ -19,6 +19,13 @@ struct Provider {
     sync_requests: AtomicUsize,
     sync_started: Notify,
     sync_release: Notify,
+    exchange_block: AtomicUsize,
+    exchange_requests: AtomicUsize,
+    exchange_started: Notify,
+    exchange_release: Notify,
+    identity_block: AtomicUsize,
+    identity_started: Notify,
+    identity_release: Notify,
 }
 async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
     let path = r.uri().path().to_owned();
@@ -27,6 +34,13 @@ async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
             let body = to_bytes(r.into_body(), 10000).await.unwrap();
             let form: std::collections::HashMap<String, String> =
                 url::form_urlencoded::parse(&body).into_owned().collect();
+            if form.get("grant_type").map(String::as_str) == Some("authorization_code") {
+                s.exchange_requests.fetch_add(1, Ordering::SeqCst);
+                if s.exchange_block.load(Ordering::SeqCst) != 0 {
+                    s.exchange_started.notify_one();
+                    s.exchange_release.notified().await;
+                }
+            }
             if s.strict_refresh.load(Ordering::SeqCst)
                 && form.get("grant_type").map(String::as_str) == Some("refresh_token")
             {
@@ -104,7 +118,13 @@ async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
             s.revoke_requests.fetch_add(1, Ordering::SeqCst);
             StatusCode::OK.into_response()
         }
-        "/youtube/v3/channels" => Json(json!({"items":[{"id":"destination","snippet":{"title":"Fixture"}}]})).into_response(),
+        "/youtube/v3/channels" => {
+            if s.identity_block.load(Ordering::SeqCst) != 0 {
+                s.identity_started.notify_one();
+                s.identity_release.notified().await;
+            }
+            Json(json!({"items":[{"id":"destination","snippet":{"title":"Fixture"}}]})).into_response()
+        }
         "/youtube/v3/commentThreads" => {
             s.sync_requests.fetch_add(1, Ordering::SeqCst);
             if s.sync_mode.load(Ordering::SeqCst) != 0 {
