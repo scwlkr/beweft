@@ -15,6 +15,7 @@ upload's temporary reservation and partial file are cleaned up asynchronously:
 | 400 | `missing_posting_schedule` | A queued channel has no posting rules. |
 | 409 | `posting_slots_unavailable` | No posting-rule slot is free in the next 60 days. |
 | 409 | `post_version_conflict` | The submitted post version is stale. |
+| 409 | `schedule_request_conflict` | A request UUID already identifies another scheduling intent for this owner. |
 | 400 | `invalid_cursor` | A list cursor is malformed or incompatible with its filters or scope. |
 | 400 | `invalid_page_limit` | A parsed unsigned 32-bit list limit is outside 1–10. |
 
@@ -47,13 +48,14 @@ list order and response shape remain unchanged for the web application.
 - `/publications` additionally accepts `group=queue|history`, `view=summary`,
   and `id=UUID`. Queue means queued/sending; history means every other state.
   The summary is `{id,post_id,brand_id,channel_id,channel_name,provider,post_version,scheduled_at,scheduling_mode,state,created_at,updated_at}`;
-  payload and external/error fields are omitted. GET
-  `/publications?id=UUID&limit=1` without `view=summary` reads one full,
-  authorized record in the usual `data` array.
+  payload and external/error fields are omitted. In every publication summary,
+  including schedule responses and request recovery, `channel_name` is truncated
+  to 100 Unicode characters and `provider` to 64. UUIDs and request identity are
+  unchanged. GET `/publications?id=UUID&limit=1` without `view=summary` reads one
+  full, authorized record, including its original channel name and provider.
 
-The generated OpenAPI and TypeScript query annotations for these additions
-will be refreshed with the core integration; this prose and the running routes
-describe the current change.
+The generated OpenAPI and TypeScript include the optional filters, compact
+projections, and paged response envelopes.
 
 ## Authentication
 - GET `/auth/status` → `{initialized:boolean}`.
@@ -94,7 +96,8 @@ describe the current change.
 ## Scheduling and outcomes
 - GET `/schedules?channel_id=UUID` → posting rules array.
 - POST `/schedules` `{channel_id,days:[1,2,3,4,5],time:"09:00",timezone:"America/Chicago"}` → rule. Monday=1, Sunday=7. DELETE `/schedules/:id`. Each rule `{id,channel_id,days,time,timezone,created_at}`.
-- POST `/posts/:id/schedule` `{version:number,channel_ids:[UUID],scheduled_at?:RFC3339}` → publication array. Version must match the locked draft; a stale version returns 409 without scheduling. Omit scheduled_at to reserve each channel's next available posting-rule slot. Requires `publishing:write`. Exact dates must be future (up to five seconds grace); all variants snapshot atomically. Optional query `view=summary` returns the same publication summary fields described under bounded list inspection, omitting payload and external/error fields; the default response retains full publications. An unsupported view is rejected before scheduling. The view selects response representation and is not part of scheduling intent.
+- POST `/posts/:id/schedule` `{version:number,channel_ids:[UUID],scheduled_at?:RFC3339|null,request_id?:UUID}` → publication array. Requires `publishing:write`. New clients should generate and persist a request UUID before sending and reuse it for that exact intent; omission remains supported for legacy clients. Channels must be unique and are normalized in UUID order. An exact time accepts at most six fractional-second digits, rejects leap seconds and higher precision, and is normalized to UTC microseconds; omit or pass null to reserve each channel's next posting-rule slot. For a new intent, the locked draft version must match and the exact time must be future (up to five seconds grace); all variants, the normalized request and original publication IDs commit atomically. Replaying the same owner/request UUID and normalized intent returns the original publication identities, with their current states, even after cancellation, replacement, archive, a draft edit or the time passing. Reusing it for a different post, version, channels or exact time returns `schedule_request_conflict` (409). A competing same-key request is rejected promptly with `schedule_request_in_progress` (409); the original outcome remains unresolved, so check status or retry the same UUID after it finishes. Optional `?view=summary` returns bounded publication summaries; the default returns full publications. View is not part of intent.
+- GET `/schedule-requests/:request_id` → `{request_id,post_id,brand_id,request:{version,channel_ids,scheduled_at},publications:[PublicationSummary]}`. The stored request timestamp is null or a UTC RFC3339 string with exactly six fractional digits. Publications are the original IDs in channel order with their current row states; full detail is available separately through `/publications?id=UUID&limit=1`. Owner and brand restrictions apply. Missing and unauthorized IDs both return 404; a 404 while a POST is in flight is inconclusive and does not prove it failed. Preserve the intent until the committed result is known; never infer from a missing lookup that it is safe to create a different UUID.
 - GET `/publications?brand_id=UUID&channel_id=UUID` → publication array, earliest first. Optional filters.
 - Publication `{id,post_id,brand_id,channel_id,channel_name,provider,post_version,scheduled_at,scheduling_mode,state,payload,external_id,external_url,last_error,created_at,updated_at}`. `payload` contains immutable `{text,media_ids,title,options}`. States: queued, sending, manual_required, published, failed, uncertain, canceled. Fixture success uses `fixture_complete`, never published.
 - GET `/publications/:id/attempts` → durable attempts array with state and errors.

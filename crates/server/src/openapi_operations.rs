@@ -54,6 +54,13 @@ pub(crate) const OPERATIONS: &[(&str, &str, &str, &str, bool)] = &[
         "Publication",
         true,
     ),
+    (
+        "get",
+        "/schedule-requests/{request_id}",
+        "",
+        "ScheduleRequestResult",
+        false,
+    ),
     ("get", "/media", "", "Media", true),
     ("post", "/media", "multipart", "Media", false),
     ("get", "/media/limits", "", "MediaLimits", false),

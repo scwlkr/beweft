@@ -93,6 +93,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/posts/{id}/schedule", post(schedules::schedule_post))
         .route(
+            "/schedule-requests/{request_id}",
+            get(schedules::get_schedule_request),
+        )
+        .route(
             "/media",
             get(media::list)
                 .post(media::upload)

@@ -26,6 +26,7 @@ import uuid
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[3]
+TARGET = Path(os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target"))).resolve()
 CONTAINER = os.environ.get("BEWEFT_TEST_POSTGRES_CONTAINER", "beweft-dev-postgres")
 DB = "beweft_test_" + uuid.uuid4().hex[:12]
 DB_PORT = os.environ.get("BEWEFT_TEST_DB_PORT", "55439")
@@ -46,7 +47,7 @@ def run():
     with tempfile.TemporaryDirectory(prefix="beweft-integration-") as temporary:
         env = dict(os.environ, DATABASE_URL=f"postgres://{DB_USER}:{DB_PASSWORD}@localhost:{DB_PORT}/{DB}", BEWEFT_PUBLIC_URL=origin, BEWEFT_BIND=f"127.0.0.1:{port}", BEWEFT_MEDIA_DIR=temporary, BEWEFT_SETUP_SECRET="isolated-integration-setup-secret", BEWEFT_ENABLE_FIXTURES="true", BEWEFT_MAX_UPLOAD_BYTES=str(32*1024*1024), BEWEFT_MEDIA_QUOTA_BYTES=str(33*1024*1024), BEWEFT_FIXTURE_DELAY_MS="15000" if "--workflows-only" in sys.argv else "0")
         for name in ["beweft-server", "beweft-worker"]:
-            processes.append(subprocess.Popen([str(ROOT / "target/debug" / name)], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            processes.append(subprocess.Popen([str(TARGET / "debug" / name)], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
         schema_document = None
@@ -217,7 +218,7 @@ def run():
         crash_job = call(f"/posts/{crash_post['id']}/schedule", {"version": crash_post["version"], "channel_ids": [fixture["id"]], "scheduled_at": dt.datetime.now(dt.timezone.utc).isoformat()})[0]
         time.sleep(0.5)
         assert next(p for p in call("/publications") if p["id"] == crash_job["id"])["state"] == "queued"
-        slow_worker = subprocess.Popen([str(ROOT / "target/debug/beweft-worker")], cwd=ROOT, env=dict(env, BEWEFT_FIXTURE_DELAY_MS="60000"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        slow_worker = subprocess.Popen([str(TARGET / "debug/beweft-worker")], cwd=ROOT, env=dict(env, BEWEFT_FIXTURE_DELAY_MS="60000"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         processes.append(slow_worker)
         wait_state(crash_job, "sending")
         heartbeat_before = call("/jobs/health")["worker_last_seen"]
@@ -230,7 +231,7 @@ def run():
         # Accelerate only the lease clock rather than waiting five minutes after the actual crash.
         sql(f"UPDATE publications SET lease_until=now()-interval '1 second' WHERE id='{crash_job['id']}';")
         for _ in range(2):
-            processes.append(subprocess.Popen([str(ROOT / "target/debug/beweft-worker")], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            processes.append(subprocess.Popen([str(TARGET / "debug/beweft-worker")], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         wait_state(crash_job, "uncertain")
         assert len(call(f"/publications/{crash_job['id']}/attempts")) == 1, "Restart must not create a second ambiguous attempt"
         batch = []
@@ -281,12 +282,12 @@ def run():
         aba_channel = call("/channels", {"brand_id": brand["id"], "name": "Attempt identity race", "provider": "fixture"})
         aba_post = call("/posts", {"brand_id": brand["id"], "text": "Old attempt must never complete a new retry"})
         aba_job = call(f"/posts/{aba_post['id']}/schedule", {"version": aba_post["version"], "channel_ids": [aba_channel["id"]], "scheduled_at": dt.datetime.now(dt.timezone.utc).isoformat()})[0]
-        worker_a = subprocess.Popen([str(ROOT / "target/debug/beweft-worker")], cwd=ROOT, env=dict(env, BEWEFT_FIXTURE_DELAY_MS="6000"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        worker_a = subprocess.Popen([str(TARGET / "debug/beweft-worker")], cwd=ROOT, env=dict(env, BEWEFT_FIXTURE_DELAY_MS="6000"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         processes.append(worker_a)
         wait_state(aba_job, "sending")
         attempt_a = next(a for a in call(f"/publications/{aba_job['id']}/attempts") if a["state"] == "sending")
         sql(f"UPDATE publications SET lease_until=now()-interval '1 second' WHERE id='{aba_job['id']}';")
-        worker_b = subprocess.Popen([str(ROOT / "target/debug/beweft-worker")], cwd=ROOT, env=dict(env, BEWEFT_FIXTURE_DELAY_MS="15000"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        worker_b = subprocess.Popen([str(TARGET / "debug/beweft-worker")], cwd=ROOT, env=dict(env, BEWEFT_FIXTURE_DELAY_MS="15000"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         processes.append(worker_b)
         wait_state(aba_job, "uncertain")
         call(f"/publications/{aba_job['id']}/reconcile", {"resolution": "not_published", "note": "Fixture A has no external publication; deliberate attempt fencing reproduction"})
