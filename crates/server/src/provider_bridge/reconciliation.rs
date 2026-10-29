@@ -2,6 +2,38 @@ use super::delivery::save_checkpoint_tx;
 use super::preparation::{checkpoint, checkpoint_on, load_publication_on};
 use super::*;
 
+/// A definite private-upload rejection can be restarted only by the explicit
+/// retry transaction after that exact sender has durably finished as rejected.
+pub(crate) async fn prepare_bluesky_video_retry_tx(
+    state: &AppState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: Uuid,
+) -> Result<()> {
+    let Some(mut cp) = checkpoint_on(state, tx, id).await? else {
+        return Ok(());
+    };
+    if cp["stage"] != "bsky_video_upload_rejected" {
+        return Ok(());
+    }
+    let attempt = cp["attempt_id"]
+        .as_str()
+        .and_then(|value| value.parse::<Uuid>().ok())
+        .ok_or_else(|| {
+            ApiError::conflict("The Bluesky rejection has no valid originating attempt")
+        })?;
+    let confirmed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM provider_delivery_checkpoints cp JOIN publication_attempts a ON a.id=cp.attempt_id AND a.publication_id=cp.publication_id WHERE cp.publication_id=$1 AND cp.attempt_id=$2 AND a.state='failed' AND a.error=$3 AND a.receipt->>'verification'='rejected')")
+        .bind(id).bind(attempt).bind(providers::BLUESKY_VIDEO_RATE_LIMIT)
+        .fetch_one(&mut **tx).await?;
+    if !confirmed {
+        return Err(ApiError::conflict(
+            "The original Bluesky upload attempt has no completed rejection. Inspect its outcome before recovery.",
+        ));
+    }
+    cp["stage"] = json!("bsky_video_preflight");
+    save_checkpoint_tx(tx, state, id, &cp).await?;
+    Ok(())
+}
+
 /// Legacy X image checkpoints predate the public-write boundary. Their
 /// database identities make them observable without a new provider request.
 pub(crate) async fn x_checkpoint_on(
@@ -182,6 +214,14 @@ pub async fn reconcile(
         }
         Ok(Some(Step::Checkpoint(next))) => {
             save_checkpoint_tx(&mut tx, &state, id, &next).await?;
+            if channel.app.provider == "bluesky" {
+                let processing = next["stage"] == "bsky_video_processing";
+                sqlx::query("UPDATE provider_delivery_checkpoints SET not_before=CASE WHEN $2 THEN clock_timestamp()+interval '2 seconds' ELSE NULL END,expires_at=CASE WHEN $2 THEN clock_timestamp()+interval '30 minutes' ELSE NULL END WHERE publication_id=$1")
+                    .bind(id)
+                    .bind(processing)
+                    .execute(&mut *tx)
+                    .await?;
+            }
             (
                 "queued",
                 json!({"offset":next["offset"],"resuming_existing_session":true}),
@@ -265,7 +305,8 @@ pub async fn provider_status(
         .fetch_one(&state.db)
         .await?;
     auth.brand(row.get("brand_id"))?;
-    let cp = if row.get::<String, _>("provider") == "x" {
+    let provider: String = row.get("provider");
+    let cp = if provider == "x" {
         let mut db = state.db.acquire().await?;
         x_checkpoint_on(&state, &mut db, id).await?
     } else {
@@ -276,7 +317,7 @@ pub async fn provider_status(
     let expired = timed_expired || cp.as_ref().is_some_and(|v| v["expired"] == true);
     let attested: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM publication_attempts a JOIN provider_delivery_checkpoints cp ON cp.publication_id=a.publication_id WHERE a.publication_id=$1 AND a.state='failed' AND a.receipt->>'verification'='owner_attestation' AND a.receipt->'detail'->>'resolution'='not_published' AND a.finished_at>=cp.updated_at AND NOT EXISTS(SELECT 1 FROM publication_attempts later WHERE later.publication_id=a.publication_id AND later.started_at>a.finished_at AND later.state IN ('sending','uncertain','published')))").bind(id).fetch_one(&state.db).await?;
     let current: String = row.get("state");
-    let x_upload = if row.get::<String, _>("provider") == "x" {
+    let x_upload = if provider == "x" {
         cp.as_ref().filter(|cp| cp["stage"].as_str().is_some_and(|s| s.starts_with("x_"))).map(|cp| {
             let (attempt, checkpoint) = x_identity(cp)?;
             let public = x_public_boundary(cp);
@@ -299,6 +340,6 @@ pub async fn provider_status(
         None
     };
     Ok(data(
-        json!({"session_expired":expired,"reset_allowed":expired && attested && current == "failed","reason":if expired && x_upload.is_none() {Some("Inspect YouTube Studio, record not-published reconciliation, then reset this expired upload before retrying.")}else{None},"x_upload":x_upload}),
+        json!({"session_expired":expired,"reset_allowed":provider == "youtube" && expired && attested && current == "failed","reason":if expired && provider == "bluesky" {Some("The Bluesky processing window ended. Reconcile the saved video job before continuing.")} else if expired && provider == "youtube" {Some("Inspect YouTube Studio, record not-published reconciliation, then reset this expired upload before retrying.")}else{None},"x_upload":x_upload}),
     ))
 }

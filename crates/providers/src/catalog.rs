@@ -75,12 +75,12 @@ pub fn capabilities() -> Vec<Capabilities> {
         Capabilities {
             id: "bluesky",
             name: "Bluesky",
-            formats: &["text", "image"],
+            formats: &["text", "image", "video"],
             oauth: false,
             analytics: true,
             inbox: true,
             reply: false,
-            reason: "Connect using an app password. Video and replies use manual handoff in this release.",
+            reason: "Configure the account's PDS origin and connect with an app password. Video eligibility and daily limits apply; replies use manual handoff.",
         },
         Capabilities {
             id: "linkedin",

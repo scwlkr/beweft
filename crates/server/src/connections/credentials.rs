@@ -42,7 +42,7 @@ pub(super) async fn store_channel(
     caps["verification"] = json!("identity_verified_publishing_unverified");
     update_grant_capabilities(&mut caps, channel);
     let row:Value=sqlx::query_scalar("INSERT INTO channels(id,brand_id,name,provider,timezone,capabilities,encrypted_credentials,connection_identity,connection_status,connected_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'connected',now()) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,capabilities=EXCLUDED.capabilities,encrypted_credentials=EXCLUDED.encrypted_credentials,connection_status='connected',connection_error=NULL,connected_at=now() RETURNING to_jsonb(channels.*)-'encrypted_credentials'").bind(id).bind(brand).bind(&channel.identity.name).bind(&channel.app.provider).bind(timezone).bind(caps).bind(encrypted).bind(channel.destination_key()).fetch_one(&mut **tx).await?;
-    Ok(crate::manual_channels::decorate(row))
+    Ok(crate::catalog::decorate_channel(row))
 }
 
 async fn check_bluesky_reconnect(

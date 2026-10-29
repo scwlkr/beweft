@@ -2,6 +2,7 @@ use crate::*;
 use reqwest::multipart::{Form, Part};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
+pub const BLUESKY_VIDEO_RATE_LIMIT: &str = "Bluesky video limit reached. Wait before retrying.";
 #[derive(Clone)]
 pub enum MediaSource {
     Bytes(Vec<u8>),
