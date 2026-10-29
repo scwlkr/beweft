@@ -6,25 +6,38 @@ pub(super) async fn oauth_gate(
     provider: &str,
     wait: bool,
 ) -> Result<Option<(i64, Option<Uuid>)>> {
+    fn gate_error(error: sqlx::Error) -> ApiError {
+        if matches!(&error, sqlx::Error::Database(db) if db.code().as_deref() == Some("55P03")) {
+            ApiError::conflict(
+                "Provider revocation or another connection operation is in progress; try again",
+            )
+        } else {
+            error.into()
+        }
+    }
+    sqlx::query("SET LOCAL lock_timeout = '5s'")
+        .execute(&mut **tx)
+        .await
+        .map_err(gate_error)?;
     let query = if wait {
-        "SELECT oauth_generation,revocation_id FROM provider_apps WHERE provider=$1 FOR UPDATE"
+        "SELECT oauth_generation,revocation_id FROM provider_oauth_fences WHERE provider=$1 FOR UPDATE"
     } else {
-        "SELECT oauth_generation,revocation_id FROM provider_apps WHERE provider=$1 FOR UPDATE NOWAIT"
+        "SELECT oauth_generation,revocation_id FROM provider_oauth_fences WHERE provider=$1 FOR UPDATE NOWAIT"
     };
-    let row = sqlx::query(query)
+    let mut row = sqlx::query(query)
         .bind(provider)
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|error| {
-            if matches!(&error, sqlx::Error::Database(db) if db.code().as_deref() == Some("55P03"))
-            {
-                ApiError::conflict(
-                    "Provider revocation or another connection operation is in progress; try again",
-                )
-            } else {
-                error.into()
-            }
-        })?;
+        .map_err(gate_error)?;
+    if row.is_none() {
+        sqlx::query("INSERT INTO provider_oauth_fences(provider) VALUES($1) ON CONFLICT(provider) DO NOTHING")
+            .bind(provider).execute(&mut **tx).await.map_err(gate_error)?;
+        row = sqlx::query(query)
+            .bind(provider)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(gate_error)?;
+    }
     Ok(row.map(|row| (row.get("oauth_generation"), row.get("revocation_id"))))
 }
 

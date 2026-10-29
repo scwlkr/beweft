@@ -26,6 +26,15 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
             scopes_known: false,
         },
     };
+    assert!(
+        !connections::adapter_for(&credentials.app)
+            .await
+            .unwrap()
+            .revoke(&credentials)
+            .await
+            .unwrap()
+    );
+    assert_eq!(h.provider.revoke_requests.load(Ordering::SeqCst), 0);
     let encrypted = crypto::encrypt(
         &[13; 32],
         channel,
@@ -202,9 +211,12 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
         .await
         .unwrap();
 
-    // A sync on another YouTube channel must finish before revocation can start.
+    // The target is unhealthy and its grant is unreadable; this must still fence
+    // the provider and mark other channels before the owner removes Google access.
+    sqlx::query("UPDATE channels SET connection_status='reconnect_required',encrypted_credentials='unreadable fixture' WHERE id=$1")
+        .bind(channel).execute(&h.state.db).await.unwrap();
+    // A sync on another YouTube channel must finish before disconnect can commit.
     h.provider.sync_mode.store(1, Ordering::SeqCst);
-    h.provider.revoke_mode.store(1, Ordering::SeqCst);
     let sync = tokio::spawn(
         client
             .post(format!("{base}/sync/{other_channel}"))
@@ -231,7 +243,7 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
         revoke_count
     );
     let mut probe = h.state.db.begin().await.unwrap();
-    sqlx::query("SELECT id FROM provider_apps WHERE provider='youtube' FOR UPDATE")
+    sqlx::query("SELECT provider FROM provider_oauth_fences WHERE provider='youtube' FOR UPDATE")
         .fetch_one(&mut *probe)
         .await
         .unwrap();
@@ -254,9 +266,19 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
     );
     h.provider.sync_release.notify_one();
     assert_eq!(sync.await.unwrap().unwrap().status(), StatusCode::OK);
-    tokio::time::timeout(Duration::from_secs(3), h.provider.revoke_started.notified())
-        .await
-        .unwrap();
+    let outcome: Value = disconnect.await.unwrap().unwrap().json().await.unwrap();
+    assert_eq!(outcome["data"]["provider_revoked"], false);
+    assert_eq!(outcome["data"]["channels_requiring_reconnection"], 1);
+    assert!(
+        outcome["data"]["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("confirm")
+    );
+    assert_eq!(
+        h.provider.revoke_requests.load(Ordering::SeqCst),
+        revoke_count
+    );
     assert_eq!(
         complete(&stale).send().await.unwrap().status(),
         StatusCode::CONFLICT
@@ -270,8 +292,8 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
         StatusCode::CONFLICT
     );
     assert_eq!(
-        ack(true).send().await.unwrap().status(),
-        StatusCode::CONFLICT
+        ack(false).send().await.unwrap().status(),
+        StatusCode::BAD_REQUEST
     );
     let status: (String, bool) = sqlx::query_as(
         "SELECT connection_status,encrypted_credentials IS NULL FROM channels WHERE id=$1",
@@ -352,16 +374,7 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
     assert_eq!(queued, "queued");
     assert_eq!(h.provider.refreshes.load(Ordering::SeqCst), refreshes);
     assert_eq!(h.provider.sync_requests.load(Ordering::SeqCst), syncs);
-    h.provider.revoke_release.notify_one();
-    let outcome: Value = disconnect.await.unwrap().unwrap().json().await.unwrap();
-    assert_eq!(outcome["data"]["provider_revoked"], true);
-    assert_eq!(outcome["data"]["channels_requiring_reconnection"], 1);
-    assert!(
-        outcome["data"]["next_action"]
-            .as_str()
-            .unwrap()
-            .contains("Reconnect")
-    );
+    assert_eq!(ack(true).send().await.unwrap().status(), StatusCode::OK);
     assert_eq!(
         complete(&stale).send().await.unwrap().status(),
         StatusCode::CONFLICT
@@ -408,32 +421,39 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
         StatusCode::CONFLICT
     );
 
-    // An uncertain remote outcome stays fenced until explicit manual confirmation.
-    h.provider.revoke_mode.store(2, Ordering::SeqCst);
-    let disconnect = tokio::spawn(
-        client
-            .post(format!("{base}/disconnect/{channel}"))
-            .header(header::COOKIE, &session)
-            .header("x-beweft-request", "1")
-            .send(),
-    );
-    tokio::time::timeout(Duration::from_secs(3), h.provider.revoke_started.notified())
+    // A missing app configuration and absent local ciphertext also cannot
+    // establish that Google no longer has the previously authorized grant.
+    sqlx::query("DELETE FROM provider_apps WHERE provider='youtube'")
+        .execute(&h.state.db)
         .await
         .unwrap();
-    assert_eq!(
-        ack(true).send().await.unwrap().status(),
-        StatusCode::CONFLICT
-    );
-    h.provider.revoke_release.notify_one();
-    let outcome: Value = disconnect.await.unwrap().unwrap().json().await.unwrap();
-    assert_eq!(outcome["data"]["provider_revoked"], false);
+    sqlx::query("UPDATE channels SET encrypted_credentials=NULL,connection_status='reconnect_required' WHERE id=$1")
+        .bind(channel).execute(&h.state.db).await.unwrap();
+    let result = client
+        .post(format!("{base}/disconnect/{channel}"))
+        .header(header::COOKIE, &session)
+        .header("x-beweft-request", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(result.status(), StatusCode::OK);
+    let pending: Option<Uuid> = sqlx::query_scalar(
+        "SELECT revocation_id FROM provider_oauth_fences WHERE provider='youtube'",
+    )
+    .fetch_one(&h.state.db)
+    .await
+    .unwrap();
+    assert!(pending.is_some());
+    let sibling: String = sqlx::query_scalar("SELECT connection_status FROM channels WHERE id=$1")
+        .bind(other_channel)
+        .fetch_one(&h.state.db)
+        .await
+        .unwrap();
+    assert_eq!(sibling, "reconnect_required");
+    h.app("youtube", "revocation-client", None).await;
     assert_eq!(
         start(request.clone()).send().await.unwrap().status(),
         StatusCode::CONFLICT
-    );
-    assert_eq!(
-        ack(false).send().await.unwrap().status(),
-        StatusCode::BAD_REQUEST
     );
     assert_eq!(ack(true).send().await.unwrap().status(), StatusCode::OK);
     let recovered = authorize(&client, &base, start(request).send().await.unwrap()).await;
@@ -441,43 +461,15 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
         complete(&recovered).send().await.unwrap().status(),
         StatusCode::OK
     );
-
-    // A cancelled server task must leave its already-committed fence in place.
-    h.provider.revoke_mode.store(1, Ordering::SeqCst);
-    let state = h.state.clone();
-    let mut auth = h.auth.clone();
-    auth.brand_ids = vec![brand];
-    let interrupted =
-        tokio::spawn(
-            async move { connections::disconnect(State(state), auth, Path(channel)).await },
-        );
-    tokio::time::timeout(Duration::from_secs(3), h.provider.revoke_started.notified())
-        .await
-        .unwrap();
-    interrupted.abort();
-    assert!(interrupted.await.unwrap_err().is_cancelled());
-    let mut probe = h.state.db.begin().await.unwrap();
-    let pending: Option<Uuid> = sqlx::query_scalar(
-        "SELECT revocation_id FROM provider_apps WHERE provider='youtube' FOR UPDATE",
-    )
-    .fetch_one(&mut *probe)
-    .await
-    .unwrap();
-    assert!(pending.is_some());
-    probe.commit().await.unwrap();
     assert_eq!(
-        start(json!({"brand_id":brand,"reconnect_channel_id":channel}))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::CONFLICT
+        h.provider.revoke_requests.load(Ordering::SeqCst),
+        revoke_count
     );
-    assert_eq!(ack(true).send().await.unwrap().status(), StatusCode::OK);
     server.abort();
-    h.provider.revoke_mode.store(0, Ordering::SeqCst);
     h.provider.sync_mode.store(0, Ordering::SeqCst);
-    println!("PASS HTTP/PostgreSQL revoke/reconnect generation fence and manual recovery");
+    println!(
+        "PASS Google manual removal fence, unhealthy/missing grants, and HTTP/PostgreSQL reconnect recovery"
+    );
 }
 
 async fn populated_oauth_fence_upgrade(h: &Harness) {
@@ -507,6 +499,7 @@ async fn populated_oauth_fence_upgrade(h: &Harness) {
     let brand = Uuid::new_v4();
     let channel = Uuid::new_v4();
     let flow = Uuid::new_v4();
+    let orphan_channel = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO owners(id,email,password_hash) VALUES($1,'upgrade@example.invalid','hash')",
     )
@@ -521,6 +514,7 @@ async fn populated_oauth_fence_upgrade(h: &Harness) {
         .unwrap();
     sqlx::query("INSERT INTO provider_apps(id,provider,client_id,encrypted_config) VALUES($1,'youtube','client','config')").bind(Uuid::new_v4()).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO channels(id,brand_id,name,provider,encrypted_credentials,connection_status) VALUES($1,$2,'Existing','youtube','credentials','connected')").bind(channel).bind(brand).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO channels(id,brand_id,name,provider,encrypted_credentials,connection_status) VALUES($1,$2,'Orphan','mastodon','credentials','reconnect_required')").bind(orphan_channel).bind(brand).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO connection_flows(id,provider,owner_id,brand_id,session_hash,state_hash,correlation_hash,encrypted_verifier,encrypted_candidates,expires_at) VALUES($1,'youtube',$2,$3,'session','state','correlation','verifier','candidate',now()+interval '10 minutes')").bind(flow).bind(owner).bind(brand).execute(&mut *tx).await.unwrap();
     sqlx::raw_sql(include_str!(
         "../../../../migrations/0008_oauth_revocation_fence.sql"
@@ -528,7 +522,7 @@ async fn populated_oauth_fence_upgrade(h: &Harness) {
     .execute(&mut *tx)
     .await
     .unwrap();
-    let app: (String, i64, Option<Uuid>) = sqlx::query_as("SELECT encrypted_config,oauth_generation,revocation_id FROM provider_apps WHERE provider='youtube'").fetch_one(&mut *tx).await.unwrap();
+    let app: (String, i64, Option<Uuid>) = sqlx::query_as("SELECT a.encrypted_config,f.oauth_generation,f.revocation_id FROM provider_apps a JOIN provider_oauth_fences f USING(provider) WHERE a.provider='youtube'").fetch_one(&mut *tx).await.unwrap();
     let old_flow: (String, Option<i64>) = sqlx::query_as(
         "SELECT encrypted_candidates,oauth_generation FROM connection_flows WHERE id=$1",
     )
@@ -545,6 +539,16 @@ async fn populated_oauth_fence_upgrade(h: &Harness) {
     assert_eq!(app, ("config".into(), 0, None));
     assert_eq!(old_flow, ("candidate".into(), None));
     assert_eq!(credentials, "credentials");
+    let orphan_fence: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM provider_oauth_fences WHERE provider='mastodon')",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert!(
+        orphan_fence,
+        "a stored grant must be fenced even if its app configuration is missing"
+    );
     tx.rollback().await.unwrap();
     println!("PASS populated provider migration preserves grants and fences old flows");
 }

@@ -187,10 +187,12 @@ pub async fn disconnect(
     for channel_id in &affected {
         crate::schedules::lock_channel(&mut tx, *channel_id).await?;
     }
-    sqlx::query("SELECT id FROM channels WHERE id=$1 FOR UPDATE")
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let has_grant: bool = sqlx::query_scalar(
+        "SELECT encrypted_credentials IS NOT NULL FROM channels WHERE id=$1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
     // Provider HTTP calls have a 60-second timeout. A crashed reply remains uncertain,
     // never retried automatically; it must not block disconnect forever.
     sqlx::query("UPDATE provider_replies r SET state='uncertain',error='Reply process stopped; inspect the network before a new reply',updated_at=now() FROM provider_inbox i WHERE i.id=r.inbox_id AND i.channel_id=ANY($1) AND r.state='sending' AND r.delivery_deadline<clock_timestamp()").bind(&affected).execute(&mut *tx).await?;
@@ -205,8 +207,14 @@ pub async fn disconnect(
             "A delivery is in progress. Wait for its outcome before disconnecting.",
         ));
     }
-    let channel = load_stored_channel_tx(&state, &mut tx, id).await.ok();
-    let revocation_id = channel.as_ref().and(gate.map(|_| Uuid::new_v4()));
+    // Readiness, decryptability and app configuration do not establish whether
+    // the provider still holds a grant. Google removal is always owner-managed.
+    let channel = if provider == "youtube" || !has_grant {
+        None
+    } else {
+        load_stored_channel_tx(&state, &mut tx, id).await.ok()
+    };
+    let revocation_id = (provider == "youtube" || has_grant).then(Uuid::new_v4);
     let affected_channels = if provider == "youtube" && revocation_id.is_some() {
         sqlx::query("UPDATE channels SET connection_status='reconnect_required',connection_error='Google grant may have been revoked; reconnect this channel' WHERE provider='youtube' AND id<>$1 AND connection_status='connected'")
             .bind(id).execute(&mut *tx).await?.rows_affected()
@@ -214,7 +222,7 @@ pub async fn disconnect(
         0
     };
     if gate.is_some() {
-        sqlx::query("UPDATE provider_apps SET oauth_generation=oauth_generation+1,revocation_id=$2 WHERE provider=$1")
+        sqlx::query("UPDATE provider_oauth_fences SET oauth_generation=oauth_generation+1,revocation_id=$2 WHERE provider=$1")
             .bind(&provider)
             .bind(revocation_id)
             .execute(&mut *tx)
@@ -240,7 +248,7 @@ pub async fn disconnect(
             false
         };
         if revoked {
-            sqlx::query("UPDATE provider_apps SET revocation_id=NULL WHERE provider=$1 AND revocation_id=$2")
+            sqlx::query("UPDATE provider_oauth_fences SET revocation_id=NULL WHERE provider=$1 AND revocation_id=$2")
                 .bind(&provider)
                 .bind(revocation_id)
                 .execute(&mut *revoke_tx)
@@ -286,7 +294,7 @@ pub async fn acknowledge_revocation(
             "There is no unresolved provider revocation",
         ));
     }
-    sqlx::query("UPDATE provider_apps SET oauth_generation=oauth_generation+1,revocation_id=NULL WHERE provider=$1")
+    sqlx::query("UPDATE provider_oauth_fences SET oauth_generation=oauth_generation+1,revocation_id=NULL WHERE provider=$1")
         .bind(&provider)
         .execute(&mut *tx)
         .await?;

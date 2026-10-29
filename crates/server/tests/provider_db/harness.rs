@@ -14,9 +14,6 @@ struct Provider {
     reply_release: Notify,
     probe_started: Notify,
     probe_release: Notify,
-    revoke_mode: AtomicUsize,
-    revoke_started: Notify,
-    revoke_release: Notify,
     revoke_requests: AtomicUsize,
     sync_mode: AtomicUsize,
     sync_requests: AtomicUsize,
@@ -105,16 +102,7 @@ async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
         }
         "/revoke" => {
             s.revoke_requests.fetch_add(1, Ordering::SeqCst);
-            let mode = s.revoke_mode.load(Ordering::SeqCst);
-            if mode != 0 {
-                s.revoke_started.notify_one();
-                s.revoke_release.notified().await;
-            }
-            if mode == 2 {
-                StatusCode::SERVICE_UNAVAILABLE.into_response()
-            } else {
-                StatusCode::OK.into_response()
-            }
+            StatusCode::OK.into_response()
         }
         "/youtube/v3/channels" => Json(json!({"items":[{"id":"destination","snippet":{"title":"Fixture"}}]})).into_response(),
         "/youtube/v3/commentThreads" => {

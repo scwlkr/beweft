@@ -1,4 +1,5 @@
 use super::*;
+use sqlx::Acquire;
 pub async fn sync(
     State(state): State<AppState>,
     auth: Auth,
@@ -7,19 +8,28 @@ pub async fn sync(
 ) -> Result<Json<Value>> {
     auth.scope("publishing:write")?;
     auth.brand(catalog::channel_brand(&state, id).await?)?;
-    // Commit a rotated grant before subsequent fallible work, then reacquire the
-    // channel row for the full sync so disconnect cannot revoke a grant in use.
-    connections::load_channel(&state, id).await?;
-    // Bound network work and avoid overlapping polling requests for one account.
-    let mut guard = state.db.begin().await?;
+    // Keep the nonblocking sync lock across the separately committed refresh and
+    // the downstream sync, using one pool connection throughout. A cancelled
+    // query may have acquired a session lock before its result was received, so
+    // close this connection on every exit instead of returning a lock to the pool.
+    let mut db = state.db.acquire().await?;
+    db.close_on_drop();
     let lock: i64 = id.as_u128() as i64;
-    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
         .bind(lock)
-        .fetch_one(&mut *guard)
+        .fetch_one(&mut *db)
         .await?;
     if !acquired {
         return Err(ApiError::conflict("This channel is already syncing"));
     }
+    let mut refresh = db.begin().await?;
+    let refreshed = connections::load_channel_tx(&state, &mut refresh, id, None).await;
+    refresh.commit().await?;
+    refreshed?;
+
+    // Reacquire the channel row for the full sync so disconnect cannot revoke
+    // a grant in use; downstream failures cannot roll back a rotated token.
+    let mut guard = db.begin().await?;
     let c = connections::load_stored_channel_tx(&state, &mut guard, id).await?;
     if c.app.provider == "x" && body["allow_metered"].as_bool() != Some(true) {
         return Err(ApiError::bad(
@@ -32,7 +42,6 @@ pub async fn sync(
     )
     .await
     .map_err(|_| ApiError::conflict("Provider sync timed out; try again"))?;
-    // Transaction advisory locks are released on commit or cancellation/rollback.
     guard.commit().await?;
     result
 }
