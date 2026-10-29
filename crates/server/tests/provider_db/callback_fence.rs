@@ -98,7 +98,9 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
         assert!(message.contains("in progress"));
         assert!(message.contains("outcome is unknown if interrupted"));
         assert!(message.contains("access may already have been granted"));
-        assert!(message.contains("check and remove any app access"));
+        assert!(message.contains("First inspect your connected channels"));
+        assert!(message.contains("If it did not connect"));
+        assert!(message.contains("remove only orphaned access"));
         assert!(message.contains("before starting a new authorization"));
     }
     async fn assert_missing_recovery(response: reqwest::Response, secrets: &[&str]) {
@@ -109,8 +111,9 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
         }
         let value: Value = serde_json::from_str(&body).unwrap();
         let message = value["error"]["message"].as_str().unwrap();
-        assert!(message.contains("If an authorization was interrupted"));
-        assert!(message.contains("check and remove any app access"));
+        assert!(message.contains("First inspect your connected channels"));
+        assert!(message.contains("If it did not connect"));
+        assert!(message.contains("remove only orphaned access"));
         assert!(message.contains("before starting a new authorization"));
     }
     let callback = |state: &str, cookie: &str| {
@@ -201,7 +204,8 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
     assert_eq!(busy.status(), StatusCode::CONFLICT);
     let body: Value = busy.json().await.unwrap();
     let message = body["error"]["message"].as_str().unwrap();
-    assert!(message.contains("consumed") && message.contains("start a new authorization"));
+    assert!(message.contains("consumed") && message.contains("starting a new authorization"));
+    assert!(message.contains("First inspect your connected channels"));
     assert_eq!(
         callback(&busy_state, &busy_cookie)
             .send()
@@ -323,8 +327,108 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
             .unwrap()
             .contains("already completed")
     );
+    // The completion response may be lost. Even after expiry its durable row
+    // still says completed; once cleanup removes it, guide the owner to inspect
+    // connected channels before considering orphaned access.
+    sqlx::query("UPDATE connection_flows SET expires_at=now()-interval '1 second' WHERE id=$1")
+        .bind(Uuid::parse_str(&fresh).unwrap())
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+    for response in [
+        callback(&fresh_state, &fresh_cookie).send().await.unwrap(),
+        destinations(&fresh).send().await.unwrap(),
+        complete(&fresh).send().await.unwrap(),
+    ] {
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let value: Value = response.json().await.unwrap();
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("already completed"));
+        assert!(!message.contains("remove"));
+    }
+    let (candidate_flow, candidate_state, candidate_cookie) =
+        start(&client, &base, &session, brand, channel).await;
+    let completed_secrets = [
+        "fixture-code",
+        "rotated",
+        "rotated-refresh",
+        &h.session,
+        &fresh_state,
+        fresh_cookie.split_once('=').unwrap().1,
+    ];
+    for response in [
+        callback(&fresh_state, &fresh_cookie).send().await.unwrap(),
+        destinations(&fresh).send().await.unwrap(),
+        complete(&fresh).send().await.unwrap(),
+    ] {
+        assert_missing_recovery(response, &completed_secrets).await;
+    }
+    let connected: bool =
+        sqlx::query_scalar("SELECT connection_status='connected' FROM channels WHERE id=$1")
+            .bind(channel)
+            .fetch_one(&h.state.db)
+            .await
+            .unwrap();
+    assert!(connected);
+    assert_eq!(
+        callback(&candidate_state, &candidate_cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    let returned = destinations(&candidate_flow).send().await.unwrap();
+    assert_eq!(returned.status(), StatusCode::OK);
+    let returned: Value = returned.json().await.unwrap();
+    assert_eq!(returned["data"]["destinations"][0]["id"], "destination");
+    let replay = callback(&candidate_state, &candidate_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+    let replay: Value = replay.json().await.unwrap();
+    assert!(
+        replay["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("continue connection setup")
+    );
+    sqlx::query("UPDATE connection_flows SET expires_at=now()-interval '1 second' WHERE id=$1")
+        .bind(Uuid::parse_str(&candidate_flow).unwrap())
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+    let candidate_secrets = [
+        "fixture-code",
+        "rotated",
+        "rotated-refresh",
+        &h.session,
+        &candidate_state,
+        candidate_cookie.split_once('=').unwrap().1,
+    ];
+    for response in [
+        callback(&candidate_state, &candidate_cookie)
+            .send()
+            .await
+            .unwrap(),
+        destinations(&candidate_flow).send().await.unwrap(),
+        complete(&candidate_flow).send().await.unwrap(),
+    ] {
+        assert_missing_recovery(response, &candidate_secrets).await;
+    }
     let (legacy, legacy_state, legacy_cookie) =
         start(&client, &base, &session, brand, channel).await;
+    for response in [
+        callback(&candidate_state, &candidate_cookie)
+            .send()
+            .await
+            .unwrap(),
+        destinations(&candidate_flow).send().await.unwrap(),
+        complete(&candidate_flow).send().await.unwrap(),
+    ] {
+        assert_missing_recovery(response, &candidate_secrets).await;
+    }
     sqlx::query("UPDATE connection_flows SET oauth_generation=NULL WHERE id=$1")
         .bind(Uuid::parse_str(&legacy).unwrap())
         .execute(&h.state.db)
@@ -346,18 +450,199 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
         .execute(&h.state.db)
         .await
         .unwrap();
-    assert_eq!(
+    let expired_secrets = [
+        "fixture-code",
+        "rotated",
+        "rotated-refresh",
+        &h.session,
+        &expired_state,
+        expired_cookie.split_once('=').unwrap().1,
+    ];
+    for response in [
         callback(&expired_state, &expired_cookie)
             .send()
             .await
-            .unwrap()
-            .status(),
-        StatusCode::BAD_REQUEST
-    );
+            .unwrap(),
+        destinations(&expired).send().await.unwrap(),
+        complete(&expired).send().await.unwrap(),
+    ] {
+        assert_missing_recovery(response, &expired_secrets).await;
+    }
     assert_eq!(
         h.provider.exchange_requests.load(Ordering::SeqCst),
         exchanges
     );
+
+    // A different provider's start must not clean up a callback that expires
+    // during its exchange, and an expired callback must not redirect to a
+    // nonexistent destination picker.
+    h.app("x", "other-provider", None).await;
+    let (near_expiry, near_state, near_cookie) =
+        start(&client, &base, &session, brand, channel).await;
+    for response in [
+        callback(&expired_state, &expired_cookie)
+            .send()
+            .await
+            .unwrap(),
+        destinations(&expired).send().await.unwrap(),
+        complete(&expired).send().await.unwrap(),
+    ] {
+        assert_missing_recovery(response, &expired_secrets).await;
+    }
+    h.provider.exchange_block.store(1, Ordering::SeqCst);
+    let near_callback = tokio::spawn(callback(&near_state, &near_cookie).send());
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        h.provider.exchange_started.notified(),
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE connection_flows SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+    )
+    .bind(Uuid::parse_str(&near_expiry).unwrap())
+    .execute(&h.state.db)
+    .await
+    .unwrap();
+    let other_start = client
+        .post(format!("{base}/start/x"))
+        .header(header::COOKIE, &session)
+        .header("x-beweft-request", "1")
+        .json(&json!({"brand_id":brand}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other_start.status(), StatusCode::OK);
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM connection_flows WHERE id=$1)")
+            .bind(Uuid::parse_str(&near_expiry).unwrap())
+            .fetch_one(&h.state.db)
+            .await
+            .unwrap();
+    assert!(
+        exists,
+        "another provider must not delete an active callback"
+    );
+    let near_secrets = [
+        "fixture-code",
+        "rotated",
+        &h.session,
+        &near_state,
+        near_cookie.split_once('=').unwrap().1,
+    ];
+    for response in [
+        callback(&near_state, &near_cookie).send().await.unwrap(),
+        destinations(&near_expiry).send().await.unwrap(),
+        complete(&near_expiry).send().await.unwrap(),
+    ] {
+        assert_uncertain(response, &near_secrets).await;
+    }
+    h.provider.exchange_block.store(0, Ordering::SeqCst);
+    h.provider.exchange_release.notify_one();
+    let response = near_callback.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(response.headers().get(header::LOCATION).is_none());
+    let value: Value = response.json().await.unwrap();
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(message.contains("First inspect your connected channels"));
+    assert!(message.contains("remove only orphaned access"));
+    let stored: bool = sqlx::query_scalar(
+        "SELECT encrypted_candidates IS NOT NULL FROM connection_flows WHERE id=$1",
+    )
+    .bind(Uuid::parse_str(&near_expiry).unwrap())
+    .fetch_one(&h.state.db)
+    .await
+    .unwrap();
+    assert!(!stored);
+    for response in [
+        callback(&near_state, &near_cookie).send().await.unwrap(),
+        destinations(&near_expiry).send().await.unwrap(),
+        complete(&near_expiry).send().await.unwrap(),
+    ] {
+        assert_uncertain(response, &near_secrets).await;
+    }
+
+    // Even if a flow is removed by another database actor during the exchange,
+    // a zero-row candidate update cannot produce a success redirect.
+    let (removed, removed_state, removed_cookie) =
+        start(&client, &base, &session, brand, channel).await;
+    for response in [
+        callback(&near_state, &near_cookie).send().await.unwrap(),
+        destinations(&near_expiry).send().await.unwrap(),
+        complete(&near_expiry).send().await.unwrap(),
+    ] {
+        assert_missing_recovery(response, &near_secrets).await;
+    }
+    h.provider.exchange_block.store(1, Ordering::SeqCst);
+    let removed_callback = tokio::spawn(callback(&removed_state, &removed_cookie).send());
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        h.provider.exchange_started.notified(),
+    )
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM connection_flows WHERE id=$1")
+        .bind(Uuid::parse_str(&removed).unwrap())
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+    h.provider.exchange_block.store(0, Ordering::SeqCst);
+    h.provider.exchange_release.notify_one();
+    let response = removed_callback.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(response.headers().get(header::LOCATION).is_none());
+    let value: Value = response.json().await.unwrap();
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("First inspect your connected channels")
+    );
+
+    // A session can expire or be revoked while the provider exchange runs.
+    // Neither outcome permits a saved candidate or a success redirect.
+    for revoked in [false, true] {
+        let (flow, state, cookie) = start(&client, &base, &session, brand, channel).await;
+        h.provider.exchange_block.store(1, Ordering::SeqCst);
+        let request = tokio::spawn(callback(&state, &cookie).send());
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            h.provider.exchange_started.notified(),
+        )
+        .await
+        .unwrap();
+        if revoked {
+            sqlx::query("DELETE FROM sessions WHERE token_hash=$1")
+                .bind(crypto::digest(&h.session))
+                .execute(&h.state.db)
+                .await
+                .unwrap();
+        } else {
+            sqlx::query("UPDATE sessions SET expires_at=clock_timestamp()-interval '1 second' WHERE token_hash=$1").bind(crypto::digest(&h.session)).execute(&h.state.db).await.unwrap();
+        }
+        h.provider.exchange_block.store(0, Ordering::SeqCst);
+        h.provider.exchange_release.notify_one();
+        let response = request.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(response.headers().get(header::LOCATION).is_none());
+        let value: Value = response.json().await.unwrap();
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("First inspect your connected channels")
+        );
+        let stored: bool = sqlx::query_scalar(
+            "SELECT encrypted_candidates IS NOT NULL FROM connection_flows WHERE id=$1",
+        )
+        .bind(Uuid::parse_str(&flow).unwrap())
+        .fetch_one(&h.state.db)
+        .await
+        .unwrap();
+        assert!(!stored);
+        sqlx::query("INSERT INTO sessions(token_hash,owner_id,expires_at) VALUES($1,$2,now()+interval '1 hour') ON CONFLICT(token_hash) DO UPDATE SET expires_at=EXCLUDED.expires_at")
+            .bind(crypto::digest(&h.session)).bind(h.auth.owner_id).execute(&h.state.db).await.unwrap();
+    }
 
     // A canceled callback does not persist a candidate. A remote token may still
     // have been minted, so remove provider access before confirming the boundary.

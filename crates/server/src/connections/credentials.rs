@@ -36,25 +36,58 @@ pub(super) async fn store_channel(
     let row:Value=sqlx::query_scalar("INSERT INTO channels(id,brand_id,name,provider,timezone,capabilities,encrypted_credentials,connection_identity,connection_status,connected_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'connected',now()) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,capabilities=EXCLUDED.capabilities,encrypted_credentials=EXCLUDED.encrypted_credentials,connection_status='connected',connection_error=NULL,connected_at=now() RETURNING to_jsonb(channels.*)-'encrypted_credentials'").bind(id).bind(brand).bind(&channel.identity.name).bind(&channel.app.provider).bind(timezone).bind(caps).bind(encrypted).bind(channel.destination_key()).fetch_one(&mut **tx).await?;
     Ok(row)
 }
+
+async fn check_bluesky_reconnect(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: Uuid,
+    brand: Uuid,
+    lock: bool,
+) -> Result<()> {
+    let query = if lock {
+        "SELECT brand_id,provider FROM channels WHERE id=$1 FOR UPDATE"
+    } else {
+        "SELECT brand_id,provider FROM channels WHERE id=$1"
+    };
+    let target = sqlx::query(query)
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| ApiError::bad("Reconnect target is missing"))?;
+    if target.get::<Uuid, _>("brand_id") != brand
+        || target.get::<String, _>("provider") != "bluesky"
+    {
+        return Err(ApiError::bad(
+            "Reconnect target must match the brand and provider",
+        ));
+    }
+    Ok(())
+}
+
+fn bluesky_after_session_error(error: ApiError) -> ApiError {
+    ApiError(
+        error.0,
+        error.1,
+        super::flows::recovery(&format!(
+            "{} The provider session may have been created.",
+            error.2
+        )),
+    )
+}
+
 pub async fn bluesky(
     State(state): State<AppState>,
     auth: Auth,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>> {
     auth.owner_session()?;
     let brand = uuid(&body, "brand_id")?;
     auth.brand(brand)?;
-    let app = app_config(&state, "bluesky").await?;
     let identifier = required(&body, "identifier")?;
     let password = required(&body, "app_password")?;
     if identifier.len() > 512 || password.len() > 512 {
         return Err(ApiError::bad("Credentials are too long"));
     }
-    let channel = adapter_for(&app)
-        .await?
-        .connect_bluesky(&app, &identifier, &password)
-        .await
-        .map_err(provider_error)?;
     let reconnect = body["reconnect_channel_id"]
         .as_str()
         .map(|s| {
@@ -64,9 +97,65 @@ pub async fn bluesky(
         .transpose()?;
     let timezone = body["timezone"].as_str().unwrap_or("UTC");
     catalog::validate_timezone(timezone)?;
+    let browser_session = session_hash(&headers)?;
     let mut tx = state.db.begin().await?;
-    let result = store_channel(&state, &mut tx, brand, reconnect, timezone, &channel).await?;
-    tx.commit().await?;
+    // Keep the open generation and app authority locked across session creation
+    // and storage, so a disconnect/configuration change cannot cross them.
+    super::apps::require_open_oauth_gate(
+        super::apps::oauth_gate(&mut tx, "bluesky", false).await?,
+    )?;
+    // Check before the remote write, then serialize and recheck after it.
+    // An archive can therefore finish while the provider is slow; it wins
+    // and prevents the new session from being stored.
+    check_active_brand(&mut tx, brand).await?;
+    let app = super::apps::locked_app_config_tx(&state, &mut tx, "bluesky").await?;
+    if let Some(id) = reconnect {
+        check_bluesky_reconnect(&mut tx, id, brand, false).await?;
+    }
+    let channel = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        adapter_for(&app)
+            .await?
+            .connect_bluesky(&app, &identifier, &password)
+            .await
+            .map_err(provider_error)
+    })
+    .await
+    .map_err(|_| {
+        ApiError::conflict(super::flows::recovery(
+            "Bluesky session creation timed out and its outcome is unknown.",
+        ))
+    })?
+    .map_err(|error| ApiError::bad(super::flows::recovery(&error.2)))?;
+    lock_active_brand(&mut tx, brand)
+        .await
+        .map_err(bluesky_after_session_error)?;
+    if let Some(id) = reconnect {
+        crate::schedules::lock_channel(&mut tx, id)
+            .await
+            .map_err(bluesky_after_session_error)?;
+        check_bluesky_reconnect(&mut tx, id, brand, true)
+            .await
+            .map_err(bluesky_after_session_error)?;
+    }
+    let result = store_channel(&state, &mut tx, brand, reconnect, timezone, &channel)
+        .await
+        .map_err(bluesky_after_session_error)?;
+    let session_is_live: Option<i32> = sqlx::query_scalar("SELECT 1 FROM sessions WHERE token_hash=$1 AND owner_id=$2 AND expires_at>clock_timestamp() FOR SHARE")
+        .bind(browser_session)
+        .bind(auth.owner_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| ApiError::conflict(super::flows::recovery("Bluesky session creation finished, but the browser session could not be verified.")))?;
+    if session_is_live.is_none() {
+        return Err(ApiError::conflict(super::flows::recovery(
+            "The browser session ended before this connection could be saved.",
+        )));
+    }
+    tx.commit().await.map_err(|_| {
+        ApiError::conflict(super::flows::recovery(
+            "Bluesky session creation finished, but saving the connection could not be confirmed.",
+        ))
+    })?;
     Ok(data(result))
 }
 /// Serialize refresh under a channel row lock. Rotated tokens commit atomically.

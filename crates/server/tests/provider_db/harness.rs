@@ -26,6 +26,10 @@ struct Provider {
     identity_block: AtomicUsize,
     identity_started: Notify,
     identity_release: Notify,
+    bluesky_session_requests: AtomicUsize,
+    bluesky_session_block: AtomicUsize,
+    bluesky_session_started: Notify,
+    bluesky_session_release: Notify,
 }
 async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
     let path = r.uri().path().to_owned();
@@ -123,7 +127,16 @@ async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
                 s.identity_started.notify_one();
                 s.identity_release.notified().await;
             }
-            Json(json!({"items":[{"id":"destination","snippet":{"title":"Fixture"}}]})).into_response()
+            Json(json!({"items":[{"id":"destination","snippet":{"title":"Fixture"}}]}))
+                .into_response()
+        }
+        "/xrpc/com.atproto.server.createSession" => {
+            s.bluesky_session_requests.fetch_add(1, Ordering::SeqCst);
+            if s.bluesky_session_block.load(Ordering::SeqCst) != 0 {
+                s.bluesky_session_started.notify_one();
+                s.bluesky_session_release.notified().await;
+            }
+            Json(json!({"did":"did:plc:fixture", "handle":"fixture.bsky.social", "accessJwt":"bluesky-access-fixture", "refreshJwt":"bluesky-refresh-fixture"})).into_response()
         }
         "/youtube/v3/commentThreads" => {
             s.sync_requests.fetch_add(1, Ordering::SeqCst);

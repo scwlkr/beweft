@@ -1,6 +1,16 @@
 use super::*;
 
-const UNCERTAIN_AUTHORIZATION: &str = "Provider authorization is in progress, or its outcome is unknown if interrupted. Provider access may already have been granted. If it was interrupted, check and remove any app access at the provider before starting a new authorization.";
+const RECOVERY_GUIDANCE: &str = "Wait for any authorization still in progress to finish. First inspect your connected channels for this destination. If it did not connect, check provider access and remove only orphaned access before starting a new authorization; shared access may serve other channels.";
+
+pub(super) fn recovery(message: &str) -> String {
+    format!("{message} {RECOVERY_GUIDANCE}")
+}
+
+fn uncertain_authorization() -> String {
+    recovery(
+        "Provider authorization is in progress, or its outcome is unknown if interrupted. Provider access may already have been granted.",
+    )
+}
 
 pub async fn start(
     State(state): State<AppState>,
@@ -38,6 +48,7 @@ pub async fn start(
     let generation = super::apps::require_open_oauth_gate(
         super::apps::oauth_gate(&mut tx, &provider, false).await?,
     )?;
+    lock_active_brand(&mut tx, brand).await?;
     let app = super::apps::app_config_tx(&state, &mut tx, &provider).await?;
     let redirect = format!(
         "{}/api/v1/connections/{provider}/callback",
@@ -52,7 +63,10 @@ pub async fn start(
         &serde_json::to_string(&app).map_err(ApiError::internal)?,
     )
     .map_err(ApiError::internal)?;
-    sqlx::query("DELETE FROM connection_flows WHERE expires_at<now()")
+    // The provider gate also covers callbacks. Never delete a different
+    // provider's in-flight callback while its exchange is still running.
+    sqlx::query("DELETE FROM connection_flows WHERE provider=$1 AND expires_at<clock_timestamp()")
+        .bind(&provider)
         .execute(&mut *tx)
         .await?;
     sqlx::query("INSERT INTO connection_flows(id,provider,owner_id,brand_id,session_hash,state_hash,correlation_hash,encrypted_verifier,encrypted_app,reconnect_channel_id,oauth_generation,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now()+interval '10 minutes')").bind(id).bind(&provider).bind(auth.owner_id).bind(brand).bind(session_hash(&headers)?).bind(crypto::digest(&state_token)).bind(crypto::digest(&correlation)).bind(encrypted).bind(encrypted_app).bind(reconnect).bind(generation).execute(&mut *tx).await?;
@@ -74,10 +88,11 @@ pub async fn callback(
     Path(provider): Path<String>,
     Query(query): Query<Callback>,
 ) -> Result<Response> {
-    let state_value = query
-        .state
-        .filter(|s| s.len() <= 256)
-        .ok_or_else(|| ApiError::bad("Missing OAuth state. If an authorization was interrupted, check and remove any app access at the provider before starting a new authorization; otherwise, start a new authorization."))?;
+    let state_value = query.state.filter(|s| s.len() <= 256).ok_or_else(|| {
+        ApiError::bad(recovery(
+            "Missing OAuth state; the authorization outcome may be unknown.",
+        ))
+    })?;
     let correlation = headers
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
@@ -85,7 +100,11 @@ pub async fn callback(
             s.split(';')
                 .find_map(|p| p.trim().strip_prefix("beweft_oauth="))
         })
-        .ok_or_else(|| ApiError::bad("Connection browser session expired. If an authorization was interrupted, check and remove any app access at the provider before starting a new authorization; otherwise, start a new authorization."))?;
+        .ok_or_else(|| {
+            ApiError::bad(recovery(
+                "Connection browser session expired; the authorization outcome may be unknown.",
+            ))
+        })?;
     let state_hash = crypto::digest(&state_value);
     let correlation_hash = crypto::digest(correlation);
     let row=sqlx::query("UPDATE connection_flows f SET consumed_at=now() WHERE state_hash=$1 AND correlation_hash=$2 AND provider=$3 AND expires_at>now() AND consumed_at IS NULL AND EXISTS(SELECT 1 FROM sessions s WHERE s.token_hash=f.session_hash AND s.owner_id=f.owner_id AND s.expires_at>now()) RETURNING id,encrypted_verifier,encrypted_app,oauth_generation").bind(&state_hash).bind(&correlation_hash).bind(&provider).fetch_optional(&state.db).await?;
@@ -96,20 +115,20 @@ pub async fn callback(
             .bind(&state_hash).bind(&correlation_hash).bind(&provider).fetch_optional(&state.db).await?;
         let message = if let Some(previous) = previous {
             if previous.get::<bool, _>("completed") {
-                "This connection was already completed."
+                "This connection was already completed.".to_owned()
             } else if previous.get::<bool, _>("consumed")
                 && !previous.get::<bool, _>("has_candidates")
             {
-                UNCERTAIN_AUTHORIZATION
+                uncertain_authorization()
             } else if previous.get::<bool, _>("has_candidates")
                 && previous.get::<bool, _>("unexpired")
             {
-                "This authorization has already returned; continue connection setup."
+                "This authorization has already returned; continue connection setup.".to_owned()
             } else {
-                "Connection expired; start a new authorization."
+                recovery("Connection expired; provider consent or access may exist.")
             }
         } else {
-            "Connection expired or was already used. If an authorization was interrupted, check and remove any app access at the provider before starting a new authorization."
+            recovery("Connection expired or is unavailable; its outcome may be unknown.")
         };
         return Err(ApiError::bad(message));
     };
@@ -144,7 +163,7 @@ pub async fn callback(
         .and_then(super::apps::require_open_oauth_gate)
         .map_err(|error| {
             if error.0 == axum::http::StatusCode::CONFLICT {
-                ApiError::conflict("This authorization was consumed. If provider access removal is pending, complete and confirm it; otherwise wait for the current operation to finish, then start a new authorization.")
+                ApiError::conflict(recovery("This authorization was consumed. If provider access removal is pending, complete and confirm it; otherwise wait for the current operation to finish."))
             } else {
                 error
             }
@@ -168,19 +187,29 @@ pub async fn callback(
             .exchange(
                 &app,
                 &code,
-                &format!("{}/api/v1/connections/{provider}/callback", state.config.public_url),
+                &format!(
+                    "{}/api/v1/connections/{provider}/callback",
+                    state.config.public_url
+                ),
                 &verifier,
             )
             .await
-            .map_err(|error| ApiError::bad(format!("{} If access was granted remotely, remove it at the provider before starting again.", error.message)))?;
-        adapter.identities(&app, &tokens).await.map_err(|error| ApiError::bad(format!("{} Authorization may have granted access; remove it at the provider before starting again.", error.message)))
+            .map_err(|error| ApiError::bad(recovery(&error.message)))?;
+        adapter
+            .identities(&app, &tokens)
+            .await
+            .map_err(|error| ApiError::bad(recovery(&error.message)))
     })
     .await
-    .map_err(|_| ApiError::conflict("Provider authorization timed out and its outcome is unknown. Check and remove any app access at the provider before starting again."))??;
+    .map_err(|_| {
+        ApiError::conflict(recovery(
+            "Provider authorization timed out and its outcome is unknown.",
+        ))
+    })??;
     if candidates.is_empty() {
-        return Err(ApiError::bad(
-            "No eligible destination was returned. Check account eligibility and permissions; if access was granted, remove it at the provider before starting again.",
-        ));
+        return Err(ApiError::bad(recovery(
+            "No eligible destination was returned. Check account eligibility and permissions.",
+        )));
     }
     let encrypted = crypto::encrypt(
         key(&state)?,
@@ -188,12 +217,34 @@ pub async fn callback(
         &serde_json::to_string(&candidates).map_err(ApiError::internal)?,
     )
     .map_err(ApiError::internal)?;
-    sqlx::query("UPDATE connection_flows SET encrypted_candidates=$2 WHERE id=$1")
+    let stored = sqlx::query("UPDATE connection_flows f SET encrypted_candidates=$2 WHERE id=$1 AND expires_at>clock_timestamp() AND completed_at IS NULL AND EXISTS(SELECT 1 FROM sessions s WHERE s.token_hash=f.session_hash AND s.owner_id=f.owner_id AND s.expires_at>clock_timestamp())")
         .bind(id)
         .bind(encrypted)
         .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
+        .await?
+        .rows_affected();
+    if stored != 1 {
+        return Err(ApiError::conflict(recovery(
+            "Provider authorization finished, but its flow or browser session expired or became unavailable before the destination could be saved.",
+        )));
+    }
+    // Keep session revocation ordered with the candidate commit as well as
+    // checking wall-clock expiry after the provider call.
+    let session_is_live: Option<i32> = sqlx::query_scalar("SELECT 1 FROM sessions s JOIN connection_flows f ON f.session_hash=s.token_hash AND f.owner_id=s.owner_id WHERE f.id=$1 AND f.expires_at>clock_timestamp() AND s.expires_at>clock_timestamp() FOR SHARE OF s")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| ApiError::conflict(recovery("Provider authorization finished, but its browser session could not be verified.")))?;
+    if session_is_live.is_none() {
+        return Err(ApiError::conflict(recovery(
+            "Provider authorization finished, but its flow or browser session expired or became unavailable before the destination could be saved.",
+        )));
+    }
+    tx.commit().await.map_err(|_| {
+        ApiError::conflict(recovery(
+            "Provider authorization finished, but saving its destination could not be confirmed.",
+        ))
+    })?;
     let mut response = Redirect::to(&format!("/settings?connection_flow={id}")).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
@@ -210,7 +261,7 @@ async fn flow(
     id: Uuid,
 ) -> Result<(sqlx::postgres::PgRow, Vec<Channel>)> {
     auth.owner_session()?;
-    let row=sqlx::query("SELECT *,expires_at>now() AS unexpired FROM connection_flows WHERE id=$1 AND owner_id=$2 AND session_hash=$3").bind(id).bind(auth.owner_id).bind(session_hash(headers)?).fetch_optional(&state.db).await?.ok_or_else(||ApiError::bad("Connection flow expired or is unavailable. If an authorization was interrupted, check and remove any app access at the provider before starting a new authorization."))?;
+    let row=sqlx::query("SELECT *,expires_at>clock_timestamp() AS unexpired FROM connection_flows WHERE id=$1 AND owner_id=$2 AND session_hash=$3").bind(id).bind(auth.owner_id).bind(session_hash(headers)?).fetch_optional(&state.db).await?.ok_or_else(||ApiError::bad(recovery("Connection flow expired or is unavailable; its outcome may be unknown.")))?;
     let encrypted: Option<String> = row.get("encrypted_candidates");
     if row
         .get::<Option<chrono::DateTime<chrono::Utc>>, _>("completed_at")
@@ -223,10 +274,12 @@ async fn flow(
             .get::<Option<chrono::DateTime<chrono::Utc>>, _>("consumed_at")
             .is_some()
     {
-        return Err(ApiError::bad(UNCERTAIN_AUTHORIZATION));
+        return Err(ApiError::bad(uncertain_authorization()));
     }
     if !row.get::<bool, _>("unexpired") {
-        return Err(ApiError::bad("Connection flow expired; start again"));
+        return Err(ApiError::bad(recovery(
+            "Connection flow expired; provider consent or access may exist.",
+        )));
     }
     let plain = crypto::decrypt(
         key(state)?,
@@ -276,6 +329,7 @@ pub async fn complete(
     let generation = super::apps::require_open_oauth_gate(
         super::apps::oauth_gate(&mut tx, &provider, false).await?,
     )?;
+    lock_active_brand(&mut tx, brand).await?;
     if row.get::<Option<i64>, _>("oauth_generation") != Some(generation) {
         return Err(ApiError::conflict(
             "Provider access changed during authorization; start again",
@@ -289,13 +343,29 @@ pub async fn complete(
             "Provider configuration changed; authorize again",
         ));
     }
-    let changed=sqlx::query("UPDATE connection_flows SET completed_at=now(),encrypted_candidates=NULL WHERE id=$1 AND completed_at IS NULL AND expires_at>now()").bind(id).execute(&mut *tx).await?.rows_affected();
+    let changed=sqlx::query("UPDATE connection_flows SET completed_at=now(),encrypted_candidates=NULL WHERE id=$1 AND completed_at IS NULL AND expires_at>clock_timestamp()").bind(id).execute(&mut *tx).await?.rows_affected();
     if changed != 1 {
-        return Err(ApiError::conflict(
-            "This connection was completed or expired",
-        ));
+        return Err(ApiError::conflict(recovery(
+            "This connection was completed or expired.",
+        )));
     }
     let result = store_channel(&state, &mut tx, brand, reconnect, timezone, &candidate).await?;
-    tx.commit().await?;
+    let session_is_live: Option<i32> = sqlx::query_scalar("SELECT 1 FROM sessions s JOIN connection_flows f ON f.session_hash=s.token_hash AND f.owner_id=s.owner_id WHERE s.token_hash=$1 AND s.owner_id=$2 AND f.id=$3 AND s.expires_at>clock_timestamp() AND f.expires_at>clock_timestamp() FOR SHARE OF s")
+        .bind(session_hash(&headers)?)
+        .bind(auth.owner_id)
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| ApiError::conflict(recovery("The browser session could not be verified while completing the connection.")))?;
+    if session_is_live.is_none() {
+        return Err(ApiError::conflict(recovery(
+            "The flow or browser session expired before the connection could be completed.",
+        )));
+    }
+    tx.commit().await.map_err(|_| {
+        ApiError::conflict(recovery(
+            "Completing the connection could not be confirmed.",
+        ))
+    })?;
     Ok(data(result))
 }

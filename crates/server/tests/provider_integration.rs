@@ -33,6 +33,7 @@ include!("provider_db/reply_deadline.rs");
 include!("provider_db/revocation.rs");
 include!("provider_db/sync_pool.rs");
 include!("provider_db/callback_fence.rs");
+include!("provider_db/bluesky_fence.rs");
 #[path = "../../providers/tests/support/mod.rs"]
 mod media_fixture;
 #[tokio::test]
@@ -41,6 +42,7 @@ async fn provider_database_security_and_recovery() {
     let h = Harness::new().await;
     overlapping_syncs_preserve_pool_and_rotated_tokens(&h).await;
     callback_exchange_respects_removal_boundary(&h).await;
+    bluesky_connection_obeys_provider_and_brand_fences(&h).await;
     oauth_revocation_fences_reconnects(&h).await;
     populated_oauth_fence_upgrade(&h).await;
     oauth_replay_session_binding_and_config_change(&h).await;

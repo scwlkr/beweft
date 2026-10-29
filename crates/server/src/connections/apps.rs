@@ -171,6 +171,10 @@ pub async fn save_app(
         return Err(ApiError::bad("Provider is unavailable or manual-only"));
     }
     let mut tx = state.db.begin().await?;
+    // Do not queue configuration writes behind an exchange holding the app
+    // row; the same gate rejects concurrent edits promptly and preserves the
+    // stored revocation fence even when configuration is changed.
+    oauth_gate(&mut tx, &provider, false).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
         .bind(format!("provider-app:{provider}"))
         .execute(&mut *tx)
@@ -207,7 +211,9 @@ pub async fn save_app(
         instance_url: instance,
     };
     if matches!(provider.as_str(), "mastodon" | "bluesky") {
-        adapter_for(&app).await?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), adapter_for(&app))
+            .await
+            .map_err(|_| ApiError::bad("Provider instance lookup timed out"))??;
     } else if app.instance_url.is_some() {
         return Err(ApiError::bad(
             "Only Mastodon and Bluesky accept an instance URL",
