@@ -459,6 +459,135 @@ def chunked_stream_test(env, origin, call, brand, media_dir):
     wait_for_upload_cleanup(call, media_dir, before, existing_files)
 
 
+def trailing_multipart_test(env, origin, call, brand, media_dir):
+    """Slow extra fields and epilogues must finish before rejection or commit."""
+    before = call("/media/limits")
+    existing_files = set(media_dir.iterdir())
+    media_ids = {row["id"] for row in call("/media")}
+    boundary = "trailing-fixture"
+    prefix = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
+              'filename="fixture.bin"\r\nContent-Type: application/octet-stream\r\n\r\n').encode()
+    closing = f"\r\n--{boundary}--\r\n".encode()
+    size = 8 * 1024 * 1024
+    tail_size = 4 * 1024 * 1024
+    block = b"0" * 65536
+    port = int(origin.rsplit(":", 1)[1])
+    valid_signature = b"\x00\x00\x00\x18ftypisom"
+    invalid_signature = b"unsupported!"
+
+    def send_repeated(connection, count, slow=False):
+        while count:
+            amount = min(len(block), count)
+            connection.send(block[:amount])
+            count -= amount
+            if slow:
+                time.sleep(0.001)
+
+    for valid, extra_name in ((False, "metadata"), (True, "metadata"),
+                              (True, "file"), (False, None), (True, None)):
+        signature = valid_signature if valid else invalid_signature
+        if extra_name is None:
+            separator = closing
+            suffix = b""
+        else:
+            separator = (f'\r\n--{boundary}\r\nContent-Disposition: form-data; '
+                         f'name="{extra_name}"\r\n\r\n').encode()
+            suffix = closing
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+        try:
+            connection.putrequest("POST", "/api/v1/media?brand_id=" + brand)
+            connection.putheader("Authorization", "Bearer " + env["BEWEFT_TOKEN"])
+            connection.putheader("Content-Type", "multipart/form-data; boundary=" + boundary)
+            connection.putheader("Content-Length", str(len(prefix) + size + len(separator) + tail_size + len(suffix)))
+            connection.endheaders()
+            connection.send(prefix + signature)
+            send_repeated(connection, size - len(signature))
+            connection.send(separator + block[:4096])
+            assert not select.select([connection.sock], [], [], 0.3)[0], "API responded before the trailing body was sent"
+            assert {row["id"] for row in call("/media")} == media_ids, "Media committed before the body ended"
+            assert call("/media/limits")["reserved_bytes"] > before["reserved_bytes"]
+            send_repeated(connection, tail_size - 4096, slow=True)
+            if suffix:
+                connection.send(suffix)
+            response = connection.getresponse()
+            result = json.loads(response.read())
+            if extra_name is not None:
+                assert response.status == 400 and result["error"]["code"] == "invalid_request", result
+            elif not valid:
+                assert response.status == 400 and result["error"]["code"] == "unsupported_media_type", result
+            else:
+                assert response.status == 200, result
+                uploaded = result["data"]
+                assert uploaded["size"] == size
+        finally:
+            connection.close()
+
+        if valid and extra_name is None:
+            expected = hashlib.sha256(signature)
+            remaining = size - len(signature)
+            while remaining:
+                amount = min(len(block), remaining)
+                expected.update(block[:amount])
+                remaining -= amount
+            actual = hashlib.sha256()
+            request = urllib.request.Request(origin + uploaded["url"], headers={"Authorization": "Bearer " + env["BEWEFT_TOKEN"]})
+            with urllib.request.urlopen(request, timeout=20) as response:
+                while chunk := response.read(65536):
+                    actual.update(chunk)
+            assert actual.digest() == expected.digest()
+            request = urllib.request.Request(origin + "/api/v1/media/" + uploaded["id"],
+                                             headers={"Authorization": "Bearer " + env["BEWEFT_TOKEN"]}, method="DELETE")
+            with urllib.request.urlopen(request, timeout=10) as response:
+                assert response.status == 200
+        wait_for_upload_cleanup(call, media_dir, before, existing_files)
+        assert {row["id"] for row in call("/media")} == media_ids
+
+    # Reject an extra field preceding the file too.
+    leading = (f'--{boundary}\r\nContent-Disposition: form-data; name="other"\r\n\r\nx\r\n').encode()
+    body = leading + prefix + valid_signature + closing
+    request = urllib.request.Request(origin + "/api/v1/media?brand_id=" + brand, data=body,
+                                     headers={"Authorization": "Bearer " + env["BEWEFT_TOKEN"],
+                                              "Content-Type": "multipart/form-data; boundary=" + boundary})
+    try:
+        urllib.request.urlopen(request, timeout=10)
+        raise AssertionError("Leading extra field was accepted")
+    except urllib.error.HTTPError as error:
+        assert error.code == 400 and json.load(error)["error"]["code"] == "invalid_request"
+    wait_for_upload_cleanup(call, media_dir, before, existing_files)
+    assert {row["id"] for row in call("/media")} == media_ids
+
+    # An oversized chunked epilogue must hit the request body limit before
+    # commit, even without Content-Length. The fixture's limit is 65 MiB.
+    epilogue_size = 66 * 1024 * 1024
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    try:
+        connection.putrequest("POST", "/api/v1/media?brand_id=" + brand)
+        connection.putheader("Authorization", "Bearer " + env["BEWEFT_TOKEN"])
+        connection.putheader("Content-Type", "multipart/form-data; boundary=" + boundary)
+        connection.putheader("Transfer-Encoding", "chunked")
+        connection.endheaders()
+        try:
+            def send_chunk(data):
+                connection.send(f"{len(data):x}\r\n".encode() + data + b"\r\n")
+            send_chunk(prefix + valid_signature + closing)
+            remaining = epilogue_size
+            while remaining:
+                amount = min(len(block), remaining)
+                send_chunk(block[:amount])
+                remaining -= amount
+            connection.send(b"0\r\n\r\n")
+            response = connection.getresponse()
+            assert response.status == 400, response.status
+            response.read()
+        except (BrokenPipeError, ConnectionResetError, http.client.RemoteDisconnected):
+            # A bounded refusal may close the connection while the sender is active.
+            pass
+    finally:
+        connection.close()
+    wait_for_upload_cleanup(call, media_dir, before, existing_files)
+    assert {row["id"] for row in call("/media")} == media_ids
+
+
 def bootstrap_commit_401_test(env, setup_secret, call):
     """Force the committed-owner/session-creation race in an isolated database."""
     sql("""
@@ -525,6 +654,17 @@ def page_limit_error_test(env, origin):
                 raise AssertionError(f"{route} accepted limit={value}")
             except urllib.error.HTTPError as error:
                 assert error.code == 400 and json.load(error)["error"]["code"] == expected
+            raw_error = cli(env, "api", "GET", f"/{route}?limit={value}", success=False)
+            assert "Provide limit once as an integer from 1 to 10" in raw_error, raw_error
+        duplicate = cli(env, "api", "GET", f"/{route}?limit=1&limit=2", success=False)
+        assert "Provide limit once as an integer from 1 to 10" in duplicate, duplicate
+        unrelated = cli(env, "api", "GET", f"/{route}?brand_id=not-a-uuid&limit=1", success=False)
+        assert "HTTP 400" in unrelated and "Provide limit" not in unrelated, unrelated
+        secret_value = "private-query-value-fixture"
+        redacted = cli(env, "api", "GET", f"/{route}?limit={secret_value}", success=False)
+        assert secret_value not in redacted and "integer from 1 to 10" in redacted, redacted
+    assert cli(env, "api", "GET", "/media/limits?limit=abc")["data"]["max_upload_bytes"] > 0
+    assert cli(env, "api", "GET", "/brands?limit=abc")["data"]
     mcp = Mcp(env)
     try:
         mcp.initialize()
@@ -648,7 +788,7 @@ def pagination_test(env, unrestricted_env, call, brand, other, channel):
         assert "HTTP 400" in cli(env, "api", "GET", "/posts?limit=10&status=draft&view=summary&cursor=bad", success=False)
         assert "HTTP 400" in cli(env, "api", "GET", "/posts?limit=10&brand_id=" + brand + "&view=summary&cursor=" + cursor, success=False)
         assert "HTTP 400" in cli(env, "api", "GET", "/posts?limit=10&brand_id=" + brand + "&status=draft&cursor=" + cursor, success=False)
-        assert "HTTP 400" in cli(env, "api", "GET", "/posts?limit=11", success=False)
+        assert "integer from 1 to 10" in cli(env, "api", "GET", "/posts?limit=11", success=False)
         rows = list(first["data"])
         while cursor:
             page = mcp.call("drafts", {"brand_id": brand, "limit": 10, "cursor": cursor})
@@ -797,7 +937,8 @@ def run(temporary):
     clean_env = {k: v for k, v in os.environ.items() if not k.startswith("BEWEFT_") and k != "DATABASE_URL"}
     server_env = dict(clean_env, DATABASE_URL=f"postgres://{DB_USER}:{DB_PASSWORD}@127.0.0.1:{DB_PORT}/{DB}",
                       BEWEFT_PUBLIC_URL=origin, BEWEFT_BIND=f"127.0.0.1:{port}", BEWEFT_MEDIA_DIR=str(media),
-                      BEWEFT_SETUP_SECRET="isolated-cli-setup-secret", BEWEFT_ENABLE_FIXTURES="false")
+                      BEWEFT_SETUP_SECRET="isolated-cli-setup-secret", BEWEFT_ENABLE_FIXTURES="false",
+                      BEWEFT_MAX_UPLOAD_BYTES=str(64 * 1024 * 1024))
     server = subprocess.Popen([str(BIN / "beweft-server")], cwd=ROOT, env=server_env,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
@@ -859,6 +1000,7 @@ def run(temporary):
         large_unsupported_upload_test(env, call, brand["id"], upload_root, media)
         reflected_error_test(env)
         chunked_stream_test(env, origin, call, brand["id"], media)
+        trailing_multipart_test(env, origin, call, brand["id"], media)
         created = cli(env, "draft-create", "--json", "-", body={"body": {"brand_id": brand["id"], "text": "CLI draft", "options": {"source": "fixture"}, "variants": [{"channel_id": channel["id"], "text": "fixture variant"}]}})["data"]
         assert created["status"] == "draft" and not cli(env, "queue")["data"]
         summary = cli(env, "drafts")["data"][0]
@@ -962,7 +1104,7 @@ def run(temporary):
         race_test(env, upload_root, temp / "race-secret", brand["id"])
         pagination_test(env, dict(env, BEWEFT_TOKEN=unrestricted), call, brand["id"], other["id"], channel["id"])
         request_bounds_test(env, call, brand["id"], channel["id"])
-        print("PASS: isolated API CLI/MCP, post-commit 401 and redacted guidance, 10 large rejected uploads with cleanup, limit errors, schedule rollback, split chunked/empty uploads, lost-response recovery, scoped pagination, 50-channel compact scheduling, bounded escaped envelopes and upload confinement")
+        print("PASS: isolated API CLI/MCP, full multipart field/epilogue drain and bounds, post-commit 401, redacted errors, large upload cleanup and byte readback, raw limit guidance, schedule rollback, lost-response recovery, scoped pagination, compact scheduling and bounded envelopes")
     finally:
         stop(server)
 

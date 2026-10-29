@@ -86,7 +86,7 @@ describe the current change.
 ## Media
 - GET `/media?brand_id=UUID` → media array.
 - GET `/media/limits` → `{max_upload_bytes,quota_bytes,used_bytes,reserved_bytes,available_bytes}`. Storage quota defaults to 10 GiB (`BEWEFT_MEDIA_QUOTA_BYTES`); active uploads reserve capacity atomically. Uploads have a 15-minute deadline.
-- POST `/media?brand_id=UUID` multipart field `file` → media. Maximum `BEWEFT_MAX_UPLOAD_BYTES` (default 256 MiB), streamed to persistent storage; JPEG/PNG/WebP/GIF/MP4/WebM only. Authentication plus custom header applies to multipart too.
+- POST `/media?brand_id=UUID` multipart field `file` → media. Exactly one field named `file` is accepted; extra or duplicate fields are rejected. The complete multipart request, including any epilogue, is consumed within the request body limit (the configured file limit plus 1 MiB) and the 15-minute deadline before a media record is committed or a signature rejection is returned. Maximum file size is `BEWEFT_MAX_UPLOAD_BYTES` (default 256 MiB), streamed to persistent storage; JPEG/PNG/WebP/GIF/MP4/WebM only. Authentication plus custom header applies to multipart too.
 - GET `/media/:id/file` → authenticated file bytes.
 - DELETE `/media/:id` → `{ok:true}`; media referenced by draft or publication cannot be removed.
 - Media `{id,brand_id,name,mime,size,url,alt_text,created_at}`; `url` is the authenticated file endpoint.

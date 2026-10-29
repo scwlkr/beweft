@@ -6,16 +6,19 @@ use crate::{
     state::AppState,
 };
 use axum::{
-    Json,
-    body::Body,
-    extract::{Multipart, Path, Query, State},
+    Json, RequestExt,
+    body::{Body, BodyDataStream},
+    extract::{FromRequest, Multipart, Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use futures_util::{StreamExt, stream::Fuse};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::Row;
+use std::{path::PathBuf, sync::Arc};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 fn detect(bytes: &[u8]) -> Option<&'static str> {
@@ -78,7 +81,7 @@ pub async fn upload(
     auth: Auth,
     Query(filter): Query<Filter>,
     headers: HeaderMap,
-    multipart: Multipart,
+    request: Request,
 ) -> Result<Json<Value>> {
     auth.scope("drafts:write")?;
     let brand = filter
@@ -99,25 +102,61 @@ pub async fn upload(
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(state.config.max_upload_bytes)
         .min(state.config.max_upload_bytes);
+    // Multipart stops at its closing boundary, which can precede the end of
+    // the HTTP body. Retain the limited stream so its remaining epilogue can
+    // be drained before accepting or returning a known validation rejection.
+    let (parts, body) = request.with_limited_body().into_parts();
+    let shared = Arc::new(Mutex::new(body.into_data_stream().fuse()));
+    let parser_body = futures_util::stream::unfold(shared.clone(), |shared| async move {
+        let chunk = shared.lock().await.next().await;
+        chunk.map(|chunk| (chunk, shared))
+    });
+    let request = Request::from_parts(parts, Body::from_stream(parser_body));
+    let multipart = Multipart::from_request(request, &state)
+        .await
+        .map_err(|_| ApiError::bad("Invalid multipart upload"))?;
     tokio::time::timeout(
         std::time::Duration::from_secs(900),
-        receive_upload(&state, brand, reserved, multipart),
+        receive_upload(&state, brand, reserved, multipart, shared),
     )
     .await
     .map_err(|_| ApiError::bad("Upload timed out after 15 minutes"))?
 }
+type SharedUploadBody = Arc<Mutex<Fuse<BodyDataStream>>>;
+
+struct PendingUpload {
+    id: Uuid,
+    key: String,
+    name: String,
+    temporary: PathBuf,
+    file: tokio::fs::File,
+    guard: crate::media_storage::UploadGuard,
+    size: u64,
+    prefix: Vec<u8>,
+}
+
 async fn receive_upload(
     state: &AppState,
     brand: Uuid,
     reserved: u64,
     mut multipart: Multipart,
+    shared: SharedUploadBody,
 ) -> Result<Json<Value>> {
+    let mut pending: Option<PendingUpload> = None;
+    let mut extra_fields = false;
     while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|_| ApiError::bad("Invalid multipart upload"))?
     {
-        if field.name() != Some("file") {
+        if field.name() != Some("file") || pending.is_some() || extra_fields {
+            extra_fields = true;
+            while field
+                .chunk()
+                .await
+                .map_err(|_| ApiError::bad("Upload exceeds the size limit or is incomplete"))?
+                .is_some()
+            {}
             continue;
         }
         let name = field
@@ -129,7 +168,7 @@ async fn receive_upload(
             .collect::<String>();
         let id = Uuid::new_v4();
         let key = format!("{id}.bin");
-        let mut guard = crate::media_storage::reserve(state, id, reserved).await?;
+        let guard = crate::media_storage::reserve(state, id, reserved).await?;
         let temporary = state.config.media_dir.join(format!(".upload-{id}.part"));
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
@@ -155,35 +194,65 @@ async fn receive_upload(
             prefix.extend_from_slice(&chunk[..sample]);
             file.write_all(&chunk).await.map_err(ApiError::internal)?;
         }
-        if size == 0 {
-            return Err(ApiError::bad("Upload must not be empty"));
-        }
-        // Consume the whole bounded field before rejecting its signature, so
-        // a streaming client can finish sending and receive this response.
-        // The upload guard cleans the reservation and temporary file on error.
-        let mime = detect(&prefix).ok_or_else(|| {
-            ApiError::bad_code(
-                "unsupported_media_type",
-                "Only JPEG, PNG, GIF, WebP, MP4 and WebM are supported",
-            )
-        })?;
-        file.sync_all().await.map_err(ApiError::internal)?;
-        drop(file);
-        let mut tx = state.db.begin().await?;
-        crate::media_storage::lock(&mut tx).await?;
-        tokio::fs::rename(&temporary, state.config.media_dir.join(&key))
-            .await
-            .map_err(ApiError::internal)?;
-        let row:Value=sqlx::query_scalar("INSERT INTO media(id,brand_id,name,mime,size,storage_key) VALUES($1,$2,$3,$4,$5,$6) RETURNING (to_jsonb(media.*)-'storage_key')||jsonb_build_object('url','/api/v1/media/'||id||'/file')").bind(id).bind(brand).bind(name).bind(mime).bind(size as i64).bind(key).fetch_one(&mut *tx).await?;
-        sqlx::query("DELETE FROM media_upload_reservations WHERE id=$1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        guard.finish();
-        return Ok(data(row));
+        pending = Some(PendingUpload {
+            id,
+            key,
+            name,
+            temporary,
+            file,
+            guard,
+            size,
+            prefix,
+        });
     }
-    Err(ApiError::bad("Multipart field 'file' is required"))
+    // Drop the parser first: it may hold an outstanding poll on the shared
+    // body. Data already buffered by it has already passed the body limit.
+    drop(multipart);
+    while let Some(chunk) = shared.lock().await.next().await {
+        chunk.map_err(|_| ApiError::bad("Upload exceeds the size limit or is incomplete"))?;
+    }
+    if extra_fields {
+        return Err(ApiError::bad(
+            "Exactly one multipart field named 'file' is required",
+        ));
+    }
+    let Some(PendingUpload {
+        id,
+        key,
+        name,
+        temporary,
+        file,
+        mut guard,
+        size,
+        prefix,
+    }) = pending
+    else {
+        return Err(ApiError::bad("Multipart field 'file' is required"));
+    };
+    if size == 0 {
+        return Err(ApiError::bad("Upload must not be empty"));
+    }
+    let mime = detect(&prefix).ok_or_else(|| {
+        ApiError::bad_code(
+            "unsupported_media_type",
+            "Only JPEG, PNG, GIF, WebP, MP4 and WebM are supported",
+        )
+    })?;
+    file.sync_all().await.map_err(ApiError::internal)?;
+    drop(file);
+    let mut tx = state.db.begin().await?;
+    crate::media_storage::lock(&mut tx).await?;
+    tokio::fs::rename(&temporary, state.config.media_dir.join(&key))
+        .await
+        .map_err(ApiError::internal)?;
+    let row:Value=sqlx::query_scalar("INSERT INTO media(id,brand_id,name,mime,size,storage_key) VALUES($1,$2,$3,$4,$5,$6) RETURNING (to_jsonb(media.*)-'storage_key')||jsonb_build_object('url','/api/v1/media/'||id||'/file')").bind(id).bind(brand).bind(name).bind(mime).bind(size as i64).bind(key).fetch_one(&mut *tx).await?;
+    sqlx::query("DELETE FROM media_upload_reservations WHERE id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    guard.finish();
+    Ok(data(row))
 }
 pub async fn file(
     State(state): State<AppState>,

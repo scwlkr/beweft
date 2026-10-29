@@ -42,6 +42,35 @@ fn known_guidance(status: u16, bytes: &[u8]) -> Option<&'static str> {
         _ => None,
     }
 }
+
+fn validate_page_limit(method: &Method, url: &Url) -> Result<()> {
+    if method != Method::GET
+        || !matches!(
+            url.path(),
+            "/api/v1/posts" | "/api/v1/media" | "/api/v1/publications"
+        )
+    {
+        return Ok(());
+    }
+    let mut seen = false;
+    for (key, value) in url.query_pairs() {
+        if key != "limit" {
+            continue;
+        }
+        ensure!(
+            !seen
+                && !value.is_empty()
+                && value.bytes().all(|byte| byte.is_ascii_digit())
+                && value
+                    .parse::<u32>()
+                    .is_ok_and(|limit| (1..=10).contains(&limit)),
+            "Provide limit once as an integer from 1 to 10"
+        );
+        seen = true;
+    }
+    Ok(())
+}
+
 impl Api {
     pub fn from_env() -> Result<Self> {
         let origin = Url::parse(
@@ -148,9 +177,11 @@ impl Api {
             "Set BEWEFT_TOKEN_FILE or BEWEFT_TOKEN to a scoped API token"
         );
         let is_write = method != Method::GET;
+        let endpoint = self.endpoint(path)?;
+        validate_page_limit(&method, &endpoint)?;
         let mut request = self
             .client
-            .request(method, self.endpoint(path)?)
+            .request(method, endpoint)
             .bearer_auth(&self.token)
             .header("X-Beweft-Request", "1");
         if let Some(body) = body {

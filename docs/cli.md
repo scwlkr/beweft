@@ -75,7 +75,8 @@ text limit or missing posting schedule. They never display remote error messages
 or unknown codes, which could contain private data. An authentication error on
 a write, like an unrecognized write error, requires checking authoritative state
 before retrying; authentication can fail after a change has committed. For list
-query errors, use an integer `limit` from 1 to 10.
+query errors, use an integer `limit` from 1 to 10. Raw `api GET` requests to
+`/posts`, `/media` and `/publications` validate that limit locally before sending.
 
 ## MCP configuration
 
