@@ -166,8 +166,9 @@ impl Adapter {
             }
             "linkedin_image_processing" => {
                 let id = urn(cp, "upload_id", "image")?;
-                // LinkedIn documents that w_member_social permits this legacy read,
-                // while the same read through its versioned gateway is forbidden.
+                // LinkedIn documents a legacy member read but its general versioning
+                // guide requires a version header. This unversioned request remains
+                // unverified live; a failed read cannot advance to a public post.
                 let value = self
                     .send(
                         self.request(
