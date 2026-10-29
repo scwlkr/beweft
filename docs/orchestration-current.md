@@ -6,7 +6,7 @@ qualification or completed release is claimed.
 
 ## Integration
 
-Integration branch: `codex/orchestrator-handoff`, metadata-contract merge `6e57386`.
+Integration branch: `codex/orchestrator-handoff`, provider-wiring merge `f2ad5a5`.
 Main remains at durable-core PR #3. Open PRs #4–#8 preserve the original stack.
 Reviewed additions land through merge commits; the completed stack will land
 without squashing an ancestor beneath open descendants.
@@ -37,7 +37,8 @@ three active children plus the orchestrator. Each milestone freezes its SHA.
   The review's final sync-guidance finding was adjudicated nonblocking: recovery
   explicitly waits for active work, inspects connected channels and permits
   removal only of orphaned access. Disconnect itself waits for channel locks.
-  Provider routes and the pre-disconnect warning remain to wire into production.
+  Production provider routes subsequently landed in PR #20. The browser warning
+  and recovery controls still need the new production contracts.
 
 - PR #16, idea organization: `9bcc379`, reviewed head `a770e43`. Real API
   browser scenarios cover board stages, groups, tags including literal `all`,
@@ -48,15 +49,16 @@ three active children plus the orchestrator. Each milestone freezes its SHA.
 
 | Lane | Checkpoint | Next acceptance boundary |
 | --- | --- | --- |
-| Core/providers A+B | PR #20 at `f804dd2`, two review corrections active | Refresh must update derived capabilities; malformed reconnect targets must fail before authorization. Practical formats still follow. |
-| Web C | PR #14 correction after `240b91e`; #15 and #16 merged | Durable request recovery and partial-acceptance evidence passed 66 browser cases. Exact correction time still needs persistence after a rejected/retired intent clears and the composer reloads. Preserved manual guidance awaits integration. |
+| Core/providers A+B | PR #20 merged `f2ad5a5`; X video milestone started | Current v2 streaming upload, durable stages and uncertainty handling; thread media needs an explicit snapshot contract afterward. |
+| Web C | PR #14 at `cf31286`, fresh review in progress; #15 and #16 merged | Review reproduced a valid publication ID discarded when another field was missing, plus correction preference recovery/fencing issues. Further correction is required. Preserved manual guidance awaits integration. |
 | CLI/operations D+E | PR #18 correction after `f65402d` | Recovery, controlled state and subprocess supervision passed targeted review. The remaining initializer helper needs a durable operation identity and exact cleanup across interruption. |
 
 PR #20 now wires the production provider routes and worker, durable terminal
 schedule rejection/retirement receipts, and reply revision/active-executor fences.
-Its latest sandboxed review passed API/worker preflights, separate-worker routing
-and provider integration. Two capability/input-validation findings remain under
-correction; this checkpoint is not merged. A lost database session does not prove
+Fresh independent review at `b40eed8` found no actionable issues after the
+capability/input-validation corrections. Default/fixture startup preflights,
+production router/worker fixtures and independent scope/reconnect variations
+passed in the loopback sandbox. It merged at `f2ad5a5`. A lost database session does not prove
 an outbound sender stopped: owner resolution requires a truthful sender-stopped
 attestation as well as the observed reply revision.
 
@@ -114,8 +116,9 @@ normal browsers are protected.
 
 At merged `6e57386`, the root workspace build, web build, both scheduling API
 suites and all 93 isolated Chromium scenarios passed. Temporary fixture resources
-were cleaned by the harnesses. Root binaries and web/dist now match this merge;
-they are not a running preview.
+were cleaned by the harnesses. At `f2ad5a5`, the root workspace and web builds plus both scheduling API
+suites passed again. Root binaries and web/dist now match that provider-wiring
+merge; they are not a running preview.
 
 During provider #20 qualification, a shared-target feature mismatch may have
 sent synthetic OAuth client/code data to Facebook's token endpoint. No real
@@ -127,7 +130,9 @@ changes remain outside testing authorization.
 
 Workers own isolated test databases/processes/artifacts. Shared mutable outputs
 are avoided; retained builds are tied to a source SHA. Finished review worktrees
-are retired through Codex. The orchestrator owns final cleanup and a useful
+are retired through Codex. Six merged local branches and five merged remote
+branches were removed after checking ancestry; active and stacked PR branches
+remain protected. The orchestrator owns final cleanup and a useful
 running local installation. Hosting remains placeholders until the owner chooses
 a server/domain. Missing adapter code is unfinished work, not an external blocker.
 

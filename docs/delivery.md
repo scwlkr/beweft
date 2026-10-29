@@ -10,8 +10,10 @@ marked placeholders. No live provider publication has been authorized for tests.
 The bounded cycle-1 trial is recorded in `docs/orchestration-cycle-1.md`.
 Its brand-list and browser-session follow-ups were subsequently resolved in
 PR #11 and integrated through PR #9. CLI/MCP qualification (#10), named-worker
-health (#13) and provider removal fencing (#12) also landed in the integration
-branch. Main still awaits the full stack's integrated delivery checks.
+health (#13), provider removal fencing (#12), media descriptions (#15), idea
+organization (#16), durable scheduling receipts (#17/#19), and production provider
+wiring (#20) also landed in the integration branch. Main still awaits the full
+stack's integrated delivery checks.
 
 ## Complete
 
@@ -42,13 +44,17 @@ branch. Main still awaits the full stack's integrated delivery checks.
 ## Still required before delivery
 
 - Independent review and any consequential fixes with fresh review.
-- Provider-to-worker integration, granular media/format validation, token refresh,
-  disconnect/reconnect, receipts/reconciliation and provider fixtures.
+- Practical provider format expansion beyond the current limited adapters.
+  Production routes, worker dispatch, scoped grants/refresh, durable receipts and
+  reply/revocation fences landed in #20 after fresh sandboxed review; that does
+  not establish live access. Provider connection/recovery UI still needs adoption.
 - Real supported analytics/inbox reads and replies with capability/coverage
   reporting; no fabricated metrics or universal inbox promises.
 - Useful Rust CLI/MCP consuming the authoritative HTTP API (partial checkpoint).
-- Remaining practical workflow refinements: idea organization, reusable original
-  templates, tags, media metadata, post duplication and clear timezone behavior.
+- Remaining practical workflow UI: reusable original templates, atomic queued
+  editing/priority, brand archive/rename, owner sessions/password, useful provider
+  metadata and manual guidance. Idea organization and media metadata are merged.
+  Browser scheduling recovery remains under correction in #14.
 - Production Compose packaging, persistent volumes, setup, backup/restore,
   upgrade and worker health documentation; local deployment rehearsal
   (partial checkpoint).
