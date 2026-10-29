@@ -31,12 +31,13 @@ test("Meta recovery requires current checkpoint evidence and never retries autom
       attempt_id: crypto.randomUUID(),
       checkpoint_id: crypto.randomUUID(),
       retry_allowed: false,
-      reason: "Inspect this attempt.",
+      reason: "Facebook accepted the request; processing is still pending.",
     };
     const second = {
       ...first,
       attempt_id: crypto.randomUUID(),
       checkpoint_id: crypto.randomUUID(),
+      reason: "Facebook operation was canceled.",
     };
     let current: typeof first | null = first;
     const reconciles: unknown[] = [];
@@ -50,6 +51,18 @@ test("Meta recovery requires current checkpoint evidence and never retries autom
     await page.route(
       `**/publications/${original.id}/provider-status`,
       (route) => route.fulfill({ json: { data: { meta_delivery: current } } }),
+    );
+    await page.route(
+      `**/publications/${original.id}/provider-reconcile`,
+      (route) =>
+        route.fulfill({
+          json: {
+            data: {
+              state: "uncertain",
+              reason: "Processing is still pending.",
+            },
+          },
+        }),
     );
     await page.route(`**/publications/${original.id}/reconcile`, (route) => {
       reconciles.push(route.request().postDataJSON());
@@ -76,8 +89,35 @@ test("Meta recovery requires current checkpoint evidence and never retries autom
     await page.goto("/#queue");
     await page.getByRole("button", { name: "Reconcile outcome" }).click();
     await expect(page.getByText(first.checkpoint_id)).toBeVisible();
+    await expect(page.getByText(first.reason)).toBeVisible();
     await expect(
       page.getByText(/may still complete after the sender stops/),
+    ).toBeVisible();
+    await expect(
+      page.getByText(/Do not record a not-published outcome or retry/),
+    ).toBeVisible();
+    const dialog = page.getByRole("dialog");
+    await expect(
+      dialog.getByRole("button", { name: "Cancel publication" }),
+    ).toHaveCount(0);
+    await expect(
+      dialog.getByRole("button", { name: "Retry publication" }),
+    ).toHaveCount(0);
+    await page.getByRole("button", { name: "Check provider outcome" }).click();
+    await expect(
+      page.getByText("Processing is still pending.", { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText(first.checkpoint_id)).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: "Cancel publication" }),
+    ).toHaveCount(0);
+    await expect(
+      dialog.getByRole("button", { name: "Retry publication" }),
+    ).toHaveCount(0);
+    current = { ...first, reason: "Facebook operation was canceled." };
+    await page.getByRole("button", { name: "Check delivery status" }).click();
+    await expect(
+      page.getByText("Facebook operation was canceled."),
     ).toBeVisible();
     await page.getByLabel("Verified outcome").selectOption("not_published");
     await page.getByLabel("Verification note").fill("Checked the account");
@@ -85,8 +125,11 @@ test("Meta recovery requires current checkpoint evidence and never retries autom
       name: /original sender has stopped/,
     });
     const inspected = page.getByRole("checkbox", {
-      name: /inspected the network/,
+      name: /provider's operation has definitively failed/,
     });
+    await expect(inspected).toHaveAccessibleName(
+      /An absent post or a stopped local sender alone does not prove it cannot publish later/,
+    );
     await expect(
       page.getByRole("button", { name: "Record outcome" }),
     ).toBeDisabled();
@@ -456,7 +499,11 @@ test("LinkedIn checkpoint recovery requires its own advertised status and exact 
     await page
       .getByRole("checkbox", { name: /original sender has stopped/ })
       .check();
-    await page.getByRole("checkbox", { name: /inspected the network/ }).check();
+    await page
+      .getByRole("checkbox", {
+        name: /provider's operation has definitively failed/,
+      })
+      .check();
     await page.getByRole("button", { name: "Record outcome" }).click();
     await expect(
       page.getByRole("button", { name: "Retry publication" }),

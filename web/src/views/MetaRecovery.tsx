@@ -232,11 +232,17 @@ export function MetaRecovery({
             </strong>
             <p>{checkpoint.reason}</p>
             {checkpoint.phase === "post_started" && (
-              <p>
-                An already accepted provider request may still complete after
-                the sender stops. Your inspection or attestation is not a
-                provider-confirmed receipt.
-              </p>
+              <>
+                <p>
+                  An already accepted provider request may still complete after
+                  the sender stops. Your inspection or attestation is not a
+                  provider-confirmed receipt.
+                </p>
+                <p>
+                  Do not record a not-published outcome or retry while the
+                  provider operation is still processing.
+                </p>
+              </>
             )}
             <p>
               Attempt: <code>{checkpoint.attempt_id}</code>
@@ -299,7 +305,9 @@ export function MetaRecovery({
               )}
               {observed && (
                 <option value="not_published">
-                  I verified it was not published
+                  {checkpoint?.phase === "post_started"
+                    ? "Not published; provider operation definitively ended"
+                    : "I verified it was not published"}
                 </option>
               )}
             </select>
@@ -337,8 +345,9 @@ export function MetaRecovery({
                   checked={inspected}
                   onChange={(event) => setInspected(event.target.checked)}
                 />
-                I inspected the network and verified this attempt was not
-                published.
+                {checkpoint?.phase === "post_started"
+                  ? "I confirmed the provider's operation has definitively failed, been stopped, or been canceled. An absent post or a stopped local sender alone does not prove it cannot publish later."
+                  : "I inspected the network and verified this attempt was not published."}
               </label>
             </>
           )}
