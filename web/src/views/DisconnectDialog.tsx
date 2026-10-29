@@ -37,6 +37,9 @@ export function DisconnectDialog({
   onClose: () => void;
   onReview: () => void;
 }) {
+  const googleFamily = ["youtube", "google_business"].includes(
+    channel.provider,
+  );
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<z.infer<typeof DisconnectResult> | null>(
@@ -92,14 +95,29 @@ export function DisconnectDialog({
       open
       onOpenChange={(open) => !open && !busy && onClose()}
       title={`Disconnect ${channel.name}?`}
-      description="This removes the selected channel’s stored credentials and cancels its queued deliveries. Publishing history remains."
+      description={
+        googleFamily
+          ? "This removes the selected channel’s stored credentials and cancels its unsent queued deliveries. Publishing history remains."
+          : "This removes the selected channel’s stored credentials and cancels its queued deliveries. Publishing history remains."
+      }
     >
       <div className="form-stack">
-        <p>
-          Other channels for this provider, including accounts in other brands,
-          may need to reconnect if access is removed. beweft does not revoke
-          access at the provider.
-        </p>
+        {googleFamily ? (
+          <p>
+            YouTube and Google Business Profile may share Google authorization
+            across current and prior Google projects and accounts. Other
+            affected beweft Google channels, including those in other brands,
+            keep their stored credentials and queues but are marked for
+            reconnection. Inspect those channels before removing the relevant
+            beweft access at Google. beweft does not revoke access at Google.
+          </p>
+        ) : (
+          <p>
+            Other channels for this provider, including accounts in other
+            brands, may need to reconnect if access is removed. beweft does not
+            revoke access at the provider.
+          </p>
+        )}
         {!result && !error && (
           <label className="checkbox-label">
             <input

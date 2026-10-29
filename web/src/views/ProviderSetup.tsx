@@ -39,6 +39,7 @@ export function ProviderSetup({
   onSaved: () => Promise<void>;
 }) {
   const id = provider.id ?? provider.provider ?? "";
+  const googleFamily = ["youtube", "google_business"].includes(id);
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
   const [instance, setInstance] = useState(
@@ -274,6 +275,14 @@ export function ProviderSetup({
               "Provider app registration and account permission are required.",
           )}
         </p>
+        {id === "google_business" && (
+          <p className="muted">
+            Requested Google scope:{" "}
+            <code>https://www.googleapis.com/auth/business.manage</code>.
+            Project approval and location eligibility remain unverified by
+            connecting an account.
+          </p>
+        )}
         <dl className="connection-facts">
           <div>
             <dt>Adapter</dt>
@@ -312,12 +321,33 @@ export function ProviderSetup({
           )}
           {removal && (
             <>
-              <p>
-                Before connecting again, inspect your channels, including other
-                brands, and remove beweft access in the provider’s connected-app
-                settings or app passwords. Removing access can affect other
-                accounts.
-              </p>
+              {googleFamily ? (
+                <>
+                  <p>
+                    Before removing access, inspect your other beweft YouTube
+                    and Google Business Profile channels across brands. Google
+                    authorization can affect current and prior Google app
+                    projects and Google accounts. Remove only the relevant
+                    beweft access in Google’s connected-app settings.
+                  </p>
+                  <p>
+                    Other affected channels keep their stored credentials and
+                    queues but are marked for reconnection. App changes and new
+                    connections for both Google providers are blocked until the
+                    pending removal is acknowledged.
+                  </p>
+                  <p>
+                    Pending removal: <code>{removal}</code>
+                  </p>
+                </>
+              ) : (
+                <p>
+                  Before connecting again, inspect your channels, including
+                  other brands, and remove beweft access in the provider’s
+                  connected-app settings or app passwords. Removing access can
+                  affect other accounts.
+                </p>
+              )}
               <p>
                 This is your attestation; beweft does not verify or revoke
                 access at the provider.
