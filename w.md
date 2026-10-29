@@ -6,8 +6,9 @@ decisions and verification boundaries are in
 [the active delivery record](docs/orchestration-current.md).
 Brand/session fixes from PRs #9 and #11, CLI/MCP qualification from PR #10,
 named-worker health from PR #13, and provider removal fencing from PR #12 are
-merged into the integration branch. Scheduling request recovery, media editing,
-idea organization and self-host delivery are active checkpoints.
+merged into the integration branch. Media editing and idea organization have also merged. Scheduling recovery,
+production provider wiring and self-host delivery are in final correction rounds;
+practical provider formats and remaining workflows still follow.
 Results and workflow improvements: [cycle 1](docs/orchestration-cycle-1.md).
 Start continuation with [the active delivery record](docs/orchestration-current.md);
 [ORCHESTRATOR-HANDOFF.md](ORCHESTRATOR-HANDOFF.md) preserves the original launch

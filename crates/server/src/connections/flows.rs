@@ -69,13 +69,7 @@ pub async fn start(
     auth.owner_session()?;
     let brand = uuid(&body, "brand_id")?;
     auth.brand(brand)?;
-    let reconnect = body["reconnect_channel_id"]
-        .as_str()
-        .map(|v| {
-            v.parse::<Uuid>()
-                .map_err(|_| ApiError::bad("Invalid reconnect channel"))
-        })
-        .transpose()?;
+    let reconnect = optional_reconnect_channel(&body)?;
     if let Some(id) = reconnect {
         let row = sqlx::query("SELECT brand_id,provider FROM channels WHERE id=$1")
             .bind(id)
