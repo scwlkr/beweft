@@ -362,7 +362,7 @@ pub struct ReconcileRequest {
     pub external_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_url: Option<String>,
-    /// Required for Meta delivery checkpoints and X public-start checkpoints when resolving not published.
+    /// Required for Google owner reconciliation, Meta delivery checkpoints and X public-start checkpoints.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_attempt_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -370,6 +370,7 @@ pub struct ReconcileRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sender_stopped: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// For Google not-published recovery, inspection confirms the remote operation definitively failed, stopped, or was canceled. An absent post is not enough.
     pub provider_inspected: Option<bool>,
     /// Complete ordered X post IDs for owner-attested thread completion.
     #[serde(skip_serializing_if = "Option::is_none")]

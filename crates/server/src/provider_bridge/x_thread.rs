@@ -51,7 +51,10 @@ pub(crate) fn x_thread_pre_public(cp: &Value) -> bool {
 /// positive evidence of the exact started segment and its empty prefix.
 pub(crate) fn x_thread_current_root_started(cp: &Value) -> bool {
     cp["stage"] == "x_thread_post_started"
-        && cp.get("confirmed_ids").and_then(Value::as_array).is_some_and(Vec::is_empty)
+        && cp
+            .get("confirmed_ids")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
         && cp.get("next_index").and_then(Value::as_u64) == Some(0)
 }
 
@@ -77,7 +80,7 @@ pub(crate) async fn x_thread_reset_covers_attempts(
     db: &mut sqlx::PgConnection,
     id: Uuid,
 ) -> Result<bool> {
-    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_events r WHERE r.subject_id=$1 AND r.action='reset_x_upload' AND r.detail->'thread_safe_reset'='true'::jsonb AND jsonb_typeof(r.detail->'attempt_ids')='array' AND NOT EXISTS(SELECT 1 FROM publication_attempts a WHERE a.publication_id=$1 AND NOT (r.detail->'attempt_ids' ? a.id::text)))")
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_events r WHERE r.subject_id=$1 AND r.action='reset_x_upload' AND r.detail->'thread_safe_reset'='true'::jsonb AND (r.detail->'thread_reset_evidence'->>'kind'='pre_public' OR (r.detail->'thread_reset_evidence'->>'kind'='owner_attested_root_ended' AND r.detail->'thread_reset_evidence'->'attestation'->'thread_root_definitively_ended'='true'::jsonb)) AND jsonb_typeof(r.detail->'attempt_ids')='array' AND NOT EXISTS(SELECT 1 FROM publication_attempts a WHERE a.publication_id=$1 AND NOT (r.detail->'attempt_ids' ? a.id::text)))")
         .bind(id).fetch_one(db).await?)
 }
 

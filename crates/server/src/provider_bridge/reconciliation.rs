@@ -174,6 +174,22 @@ pub(crate) fn linkedin_attested(cp: &Value, attempt: Uuid, checkpoint: Uuid) -> 
         && cp["not_published_attestation"]["checkpoint_id"] == json!(checkpoint)
 }
 
+pub(crate) fn google_identity(cp: &Value) -> Result<(Uuid, Uuid)> {
+    let parse = |name: &str| cp[name].as_str().and_then(|value| value.parse().ok());
+    match (parse("attempt_id"), parse("checkpoint_id")) {
+        (Some(attempt), Some(checkpoint)) => Ok((attempt, checkpoint)),
+        _ => Err(ApiError::conflict(
+            "The Google checkpoint has no valid recovery identity",
+        )),
+    }
+}
+
+pub(crate) fn google_attested(cp: &Value, attempt: Uuid, checkpoint: Uuid) -> bool {
+    cp["not_published_attestation"]["attempt_id"] == json!(attempt)
+        && cp["not_published_attestation"]["checkpoint_id"] == json!(checkpoint)
+        && cp["not_published_attestation"]["remote_definitively_ended"] == true
+}
+
 pub async fn reset_x_upload(
     State(state): State<AppState>,
     auth: Auth,
@@ -332,6 +348,32 @@ pub async fn reconcile(
                 .execute(&mut *tx)
                 .await?;
             ("published", receipt)
+        }
+        Ok(Some(Step::Checkpoint(mut next)))
+            if channel.app.provider == "google_business"
+                && next["stage"] == "google_post_rejected" =>
+        {
+            let (attempt, previous_checkpoint) = google_identity(&cp)?;
+            let checkpoint = Uuid::new_v4();
+            next["attempt_id"] = json!(attempt);
+            next["checkpoint_id"] = json!(checkpoint);
+            save_checkpoint_tx(&mut tx, &state, id, &next).await?;
+            let changed = sqlx::query("UPDATE provider_delivery_checkpoints SET checkpoint_id=$2 WHERE publication_id=$1 AND attempt_id=$3 AND checkpoint_id=$4")
+                .bind(id).bind(checkpoint).bind(attempt).bind(previous_checkpoint).execute(&mut *tx).await?;
+            if changed.rows_affected() != 1 {
+                return Err(ApiError::conflict(
+                    "Google delivery identity changed; reload before recovery",
+                ));
+            }
+            (
+                "failed",
+                json!({"verification":"provider","name":next["name"],"state":"REJECTED","attempt_id":attempt,"checkpoint_id":checkpoint}),
+            )
+        }
+        Ok(Some(Step::Checkpoint(_))) if channel.app.provider == "google_business" => {
+            return Ok(data(
+                json!({"state":"uncertain","reason":"Google has not returned a conclusive post state."}),
+            ));
         }
         Ok(Some(Step::Checkpoint(next))) => {
             save_checkpoint_tx(&mut tx, &state, id, &next).await?;
@@ -531,7 +573,27 @@ pub async fn provider_status(
     } else {
         None
     };
+    let google_delivery = if provider == "google_business" {
+        cp.as_ref().map(|cp| {
+            let (attempt, checkpoint) = google_identity(cp)?;
+            let stage = cp["stage"].as_str().unwrap_or("");
+            let rejected = stage == "google_post_rejected";
+            let retry_allowed = current == "failed" && (rejected || google_attested(cp, attempt, checkpoint));
+            let reason = if current == "published" {
+                "This delivery is recorded as published and cannot be retried."
+            } else if retry_allowed && rejected {
+                "Google rejected this post. An explicit retry creates a new post and retains the original evidence."
+            } else if retry_allowed {
+                "The owner attested that the original Google operation definitively ended without publication. An explicit retry creates a new post."
+            } else {
+                "Inspect Google and stop the original sender. A missing post or stopped local sender alone does not prove that Google's remote operation ended. Keep the outcome uncertain until it is definitively resolved."
+            };
+            Ok::<_, ApiError>(json!({"phase":match stage {"google_post_processing"=>"processing","google_post_rejected"=>"rejected",_=>"create_started"},"attempt_id":attempt,"checkpoint_id":checkpoint,"post_name":cp["name"].as_str(),"retry_allowed":retry_allowed,"reason":reason}))
+        }).transpose()?
+    } else {
+        None
+    };
     Ok(data(
-        json!({"session_expired":expired,"reset_allowed":provider == "youtube" && expired && attested && current == "failed","reason":if expired && provider == "bluesky" {Some("The Bluesky processing window ended. Reconcile the saved video job before continuing.")} else if expired && provider == "youtube" {Some("Inspect YouTube Studio, record not-published reconciliation, then reset this expired upload before retrying.")}else{None},"x_upload":x_upload,"x_thread":x_thread,"x_thread_retry_allowed":x_thread_retry_allowed,"meta_delivery":meta_delivery,"linkedin_delivery":linkedin_delivery}),
+        json!({"session_expired":expired,"reset_allowed":provider == "youtube" && expired && attested && current == "failed","reason":if expired && provider == "bluesky" {Some("The Bluesky processing window ended. Reconcile the saved video job before continuing.")} else if expired && provider == "youtube" {Some("Inspect YouTube Studio, record not-published reconciliation, then reset this expired upload before retrying.")}else{None},"x_upload":x_upload,"x_thread":x_thread,"x_thread_retry_allowed":x_thread_retry_allowed,"meta_delivery":meta_delivery,"linkedin_delivery":linkedin_delivery,"google_delivery":google_delivery}),
     ))
 }

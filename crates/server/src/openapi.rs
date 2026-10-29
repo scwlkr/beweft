@@ -84,6 +84,8 @@ use serde_json::{Value, json};
         ProviderSyncResult,
         ProviderReply,
         ProviderStatus,
+        GoogleDeliveryStatus,
+        GoogleDeliveryPhase,
         MetaDeliveryStatus,
         XUploadStatus,
         XUploadPhase,

@@ -130,6 +130,7 @@ fn channel(provider: &str) -> Channel {
             instance_url: None,
         },
         identity: Identity {
+            parent: None,
             id: "123".into(),
             name: "Fixture".into(),
             username: None,

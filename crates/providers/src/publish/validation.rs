@@ -102,6 +102,9 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
             }
             post_limit(p, 5000)?;
         }
+        "google_business" => {
+            super::google_business::post_body(p, false)?;
+        }
         "facebook" => {
             if p.options.get("format").is_some_and(|v| v != "reel") {
                 return Err(invalid(

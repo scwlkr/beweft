@@ -45,6 +45,7 @@ fn channel() -> Channel {
             id: "1".into(),
             name: "Fixture".into(),
             username: None,
+            parent: None,
         },
         tokens: Tokens {
             access_token: "fixture".into(),

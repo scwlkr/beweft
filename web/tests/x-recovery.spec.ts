@@ -157,6 +157,87 @@ test("partial X thread displays the saved prefix and requires a complete inspect
   });
 });
 
+test("root recovery sends a distinct attestation only for an explicit current root checkpoint", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await fixture(page, context, write, "uncertain");
+    f.set({
+      ...f.get(),
+      payload: {
+        ...f.get().payload,
+        options: { x_thread: { replies: ["Reply"] } },
+      },
+    });
+    const cp = checkpoint("post_started", false);
+    let currentRoot = false;
+    let submitted: any = null;
+    await page.route(
+      `**/publications/${f.publication.id}/provider-status`,
+      (route) =>
+        route.fulfill({
+          json: {
+            data: {
+              ...status(cp),
+              x_thread_retry_allowed: false,
+              x_thread: {
+                phase: "request_started",
+                confirmed_ids: [],
+                next_index: 0,
+                total: 2,
+                remaining_texts: ["Local fixture", "Reply"],
+                attempt_id: cp.attempt_id,
+                checkpoint_id: cp.checkpoint_id,
+                root_request_started: currentRoot,
+              },
+            },
+          },
+        }),
+    );
+    await page.route(
+      `**/publications/${f.publication.id}/reconcile`,
+      (route) => {
+        submitted = route.request().postDataJSON();
+        return route.fulfill({
+          json: { data: { ...f.get(), state: "failed" } },
+        });
+      },
+    );
+    await page.goto("/#queue");
+    await page.getByRole("button", { name: "Reconcile outcome" }).click();
+    await expect(page.getByText("Reply", { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Record root not published" }),
+    ).toHaveCount(0);
+    currentRoot = true;
+    await page.getByRole("button", { name: "Check X recovery status" }).click();
+    await expect(
+      page.getByRole("button", { name: "Record root not published" }),
+    ).toBeVisible();
+    await page
+      .getByLabel("X verification note")
+      .fill("Verified remote operation ended.");
+    await page
+      .getByRole("checkbox", { name: /original sender has stopped/ })
+      .check();
+    await page
+      .getByRole("checkbox", {
+        name: /root operation definitively ended without creating a post/,
+      })
+      .check();
+    await page
+      .getByRole("button", { name: "Record root not published" })
+      .click();
+    await expect.poll(() => submitted).not.toBeNull();
+    expect(submitted).toMatchObject({
+      resolution: "not_published",
+      observed_attempt_id: cp.attempt_id,
+      observed_checkpoint_id: cp.checkpoint_id,
+      sender_stopped: true,
+      provider_inspected: true,
+      thread_root_definitively_ended: true,
+    });
+  });
+});
+
 test("X composer saves ordered text replies on the channel variant", async () => {
   await withWorkspace(async (page, context, write) => {
     const brand = await write("/brands", { name: "X composer fixture" });

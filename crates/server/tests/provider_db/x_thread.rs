@@ -83,6 +83,7 @@ async fn x_thread_recovery_and_receipts(h: &Harness) {
     let mut not_published = observed.clone();
     not_published["resolution"] = json!("not_published");
     not_published["note"] = json!("inspected fixture");
+    not_published["thread_root_definitively_ended"] = json!(true);
     assert_eq!(
         send(partial, "reconcile", not_published)
             .send()
@@ -139,6 +140,19 @@ async fn x_thread_recovery_and_receipts(h: &Harness) {
         StatusCode::CONFLICT
     );
     complete["thread_ids"] = json!(["1001", "1002", "1003"]);
+    complete["thread_root_definitively_ended"] = json!(true);
+    assert_eq!(
+        send(partial, "reconcile", complete.clone())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    complete
+        .as_object_mut()
+        .unwrap()
+        .remove("thread_root_definitively_ended");
     complete["external_id"] = json!("9999");
     assert_eq!(
         send(partial, "reconcile", complete.clone())
@@ -213,7 +227,43 @@ async fn x_thread_recovery_and_receipts(h: &Harness) {
         .unwrap();
     let thread = &root_status["data"]["x_thread"];
     assert_eq!(thread["confirmed_ids"], json!([]));
-    let mut root_resolution = json!({"resolution":"not_published","note":"remote root ended without creation","observed_attempt_id":thread["attempt_id"],"observed_checkpoint_id":thread["checkpoint_id"],"sender_stopped":true,"provider_inspected":false});
+    assert_eq!(thread["root_request_started"], true);
+    // An older generic client only attests inspection; it must not authorize
+    // reset or retry of the unknown remote root request.
+    let mut root_resolution = json!({"resolution":"not_published","note":"looked and found no post","observed_attempt_id":thread["attempt_id"],"observed_checkpoint_id":thread["checkpoint_id"],"sender_stopped":true,"provider_inspected":true});
+    assert_eq!(
+        send(root, "reconcile", root_resolution.clone())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let reset = json!({"observed_attempt_id":thread["attempt_id"],"observed_checkpoint_id":thread["checkpoint_id"],"sender_stopped":true,"provider_inspected":true,"confirm_restart":true});
+    assert_eq!(
+        send(root, "reset-x-upload", reset.clone())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        send(root, "retry", json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let state: String = sqlx::query_scalar("SELECT state FROM publications WHERE id=$1")
+        .bind(root)
+        .fetch_one(&h.state.db)
+        .await
+        .unwrap();
+    assert_eq!(state, "uncertain");
+    root_resolution["thread_root_definitively_ended"] = json!(true);
+    root_resolution["provider_inspected"] = json!(false);
     assert_eq!(
         send(root, "reconcile", root_resolution.clone())
             .send()
@@ -241,7 +291,6 @@ async fn x_thread_recovery_and_receipts(h: &Harness) {
         .await
         .unwrap();
     assert_eq!(root_status["data"]["x_upload"]["reset_allowed"], true);
-    let reset = json!({"observed_attempt_id":thread["attempt_id"],"observed_checkpoint_id":thread["checkpoint_id"],"sender_stopped":true,"provider_inspected":true,"confirm_restart":true});
     assert_eq!(
         send(root, "reset-x-upload", reset)
             .send()
@@ -293,6 +342,154 @@ async fn x_thread_recovery_and_receipts(h: &Harness) {
             .status(),
         StatusCode::CONFLICT
     );
+
+    // Legacy or malformed checkpoints cannot establish a current root write,
+    // even if the caller sends the explicit new attestation.
+    for checkpoint_body in [
+        json!({"stage":"x_post_started","media_ids":[]}),
+        json!({"stage":"x_legacy_ambiguous","media_ids":[]}),
+        json!({"stage":"x_thread_post_started","media_ids":[],"confirmed_ids":[]}),
+        json!({"stage":"x_thread_post_started","media_ids":[],"next_index":0}),
+    ] {
+        let (legacy, attempt) = sending(h, channel, 300).await;
+        sqlx::query(
+            "UPDATE publications SET payload=$2,state='uncertain',lease_until=NULL WHERE id=$1",
+        )
+        .bind(legacy)
+        .bind(&payload)
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE publication_attempts SET state='uncertain' WHERE id=$1")
+            .bind(attempt)
+            .execute(&h.state.db)
+            .await
+            .unwrap();
+        let checkpoint = Uuid::new_v4();
+        let mut saved = checkpoint_body;
+        saved["attempt_id"] = json!(attempt);
+        saved["checkpoint_id"] = json!(checkpoint);
+        let encrypted = crypto::encrypt(&[13; 32], legacy, &saved.to_string()).unwrap();
+        sqlx::query("INSERT INTO provider_delivery_checkpoints(publication_id,encrypted_checkpoint,attempt_id,checkpoint_id) VALUES($1,$2,$3,$4)").bind(legacy).bind(encrypted).bind(attempt).bind(checkpoint).execute(&h.state.db).await.unwrap();
+        let resolution = json!({"resolution":"not_published","note":"root ended","observed_attempt_id":attempt,"observed_checkpoint_id":checkpoint,"sender_stopped":true,"provider_inspected":true,"thread_root_definitively_ended":true});
+        assert_eq!(
+            send(legacy, "reconcile", resolution)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        let reset = json!({"observed_attempt_id":attempt,"observed_checkpoint_id":checkpoint,"sender_stopped":true,"provider_inspected":true,"confirm_restart":true});
+        assert_eq!(
+            send(legacy, "reset-x-upload", reset)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            send(legacy, "retry", json!({}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        let state: String = sqlx::query_scalar("SELECT state FROM publications WHERE id=$1")
+            .bind(legacy)
+            .fetch_one(&h.state.db)
+            .await
+            .unwrap();
+        assert_eq!(state, "uncertain");
+        if saved["stage"] == "x_post_started" {
+            let observed: Value = client
+                .get(status_url(legacy))
+                .header(header::COOKIE, &cookie)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(observed["data"]["x_thread"]["root_request_started"], false);
+            let full = json!({"resolution":"published","note":"inspected entire fixture chain","observed_attempt_id":attempt,"observed_checkpoint_id":checkpoint,"sender_stopped":true,"provider_inspected":true,"thread_ids":["7001","7002","7003"]});
+            assert_eq!(
+                send(legacy, "reconcile", full)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+    }
+
+    // Attestations written before the explicit flag was introduced do not
+    // become stronger evidence merely because the software was upgraded.
+    let (old_attestation, attempt) = sending(h, channel, 300).await;
+    sqlx::query("UPDATE publications SET payload=$2,state='failed',lease_until=NULL WHERE id=$1")
+        .bind(old_attestation)
+        .bind(&payload)
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE publication_attempts SET state='failed' WHERE id=$1")
+        .bind(attempt)
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+    let checkpoint = Uuid::new_v4();
+    let observed = json!({"attempt_id":attempt,"checkpoint_id":checkpoint});
+    let saved = json!({"stage":"x_thread_post_started","media_ids":[],"confirmed_ids":[],"next_index":0,"attempt_id":attempt,"checkpoint_id":checkpoint,"not_published_attestation":observed,"thread_root_ended_attestation":observed});
+    let encrypted = crypto::encrypt(&[13; 32], old_attestation, &saved.to_string()).unwrap();
+    sqlx::query("INSERT INTO provider_delivery_checkpoints(publication_id,encrypted_checkpoint,attempt_id,checkpoint_id) VALUES($1,$2,$3,$4)").bind(old_attestation).bind(encrypted).bind(attempt).bind(checkpoint).execute(&h.state.db).await.unwrap();
+    let reset = json!({"observed_attempt_id":attempt,"observed_checkpoint_id":checkpoint,"sender_stopped":true,"provider_inspected":true,"confirm_restart":true});
+    assert_eq!(
+        send(old_attestation, "reset-x-upload", reset)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    sqlx::query("DELETE FROM provider_delivery_checkpoints WHERE publication_id=$1")
+        .bind(old_attestation)
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO audit_events(id,owner_id,action,subject_id,detail) VALUES($1,$2,'reset_x_upload',$3,$4)")
+        .bind(Uuid::new_v4()).bind(h.auth.owner_id).bind(old_attestation)
+        .bind(json!({"thread_safe_reset":true,"attempt_ids":[attempt],"thread_reset_evidence":{"kind":"owner_attested_root_ended","attestation":observed}}))
+        .execute(&h.state.db).await.unwrap();
+    let status: Value = client
+        .get(status_url(old_attestation))
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["data"]["x_thread_retry_allowed"], false);
+    assert_eq!(
+        send(old_attestation, "retry", json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let youtube: Uuid = sqlx::query_scalar(
+        "SELECT id FROM channels WHERE provider='youtube' AND brand_id=$1 LIMIT 1",
+    )
+    .bind(h.brand)
+    .fetch_one(&h.state.db)
+    .await
+    .unwrap();
+    let non_x = h.publication(youtube, "unused").await;
+    assert_eq!(send(non_x, "reconcile", json!({"resolution":"not_published","note":"fixture","thread_root_definitively_ended":true})).send().await.unwrap().status(), StatusCode::BAD_REQUEST);
 
     // A paused claim at a saved reply boundary must not return to the queue.
     let (paused, paused_attempt) = sending(h, channel, 300).await;

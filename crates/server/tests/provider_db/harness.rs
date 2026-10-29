@@ -36,10 +36,59 @@ struct Provider {
     bluesky_session_block: AtomicUsize,
     bluesky_session_started: Notify,
     bluesky_session_release: Notify,
+    google_writes: AtomicUsize,
+    google_mode: AtomicUsize,
+    google_body: std::sync::Mutex<Value>,
 }
 async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
     let path = r.uri().path().to_owned();
     match path.as_str() {
+        "/v1/accounts" => {
+            Json(json!({"accounts":[{"name":"accounts/g1","accountName":"Fixture account"}]}))
+                .into_response()
+        }
+        "/v1/accounts/g1/locations" => {
+            Json(json!({"locations":[{"name":"locations/l1","title":"Fixture location"}]}))
+                .into_response()
+        }
+        "/v4/accounts/g1/locations/l1/localPosts" => {
+            s.google_writes.fetch_add(1, Ordering::SeqCst);
+            let mode = s.google_mode.load(Ordering::SeqCst);
+            if mode == 1 {
+                return StatusCode::BAD_GATEWAY.into_response();
+            }
+            if mode == 5 {
+                let body: Value =
+                    serde_json::from_slice(&to_bytes(r.into_body(), 100_000).await.unwrap())
+                        .unwrap();
+                *s.google_body.lock().unwrap() = body.clone();
+                let origin = s.callback_origin.lock().unwrap().clone();
+                let url = body["media"][0]["sourceUrl"]
+                    .as_str()
+                    .unwrap()
+                    .replace("https://fixture.google.com", &origin);
+                let response = reqwest::Client::new().get(url).send().await.unwrap();
+                if !response.status().is_success() {
+                    return StatusCode::BAD_GATEWAY.into_response();
+                }
+                *s.media_received.lock().unwrap() = response.bytes().await.unwrap().to_vec();
+            }
+            Json(json!({"name":"accounts/g1/locations/l1/localPosts/p1","state":"PROCESSING"}))
+                .into_response()
+        }
+        "/v4/accounts/g1/locations/l1/localPosts/p1" => {
+            let mode = s.google_mode.load(Ordering::SeqCst);
+            if mode == 4 {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            let status = match mode {
+                2 | 5 => "LIVE",
+                3 => "REJECTED",
+                _ => "PROCESSING",
+            };
+            Json(json!({"name":"accounts/g1/locations/l1/localPosts/p1","state":status}))
+                .into_response()
+        }
         "/2/oauth2/token" | "/token" | "/oauth/token" | "/oauth/v2/accessToken" => {
             let body = to_bytes(r.into_body(), 10000).await.unwrap();
             let form: std::collections::HashMap<String, String> =
@@ -304,6 +353,7 @@ impl Harness {
         let id = Uuid::new_v4();
         let c = Channel {
             identity: Identity {
+                parent: None,
                 id: "destination".into(),
                 name: "Fixture".into(),
                 username: None,

@@ -50,10 +50,19 @@ impl ScheduleFormatValidator {
         let value = json!({"id":Uuid::nil(),"brand_id":brand,"payload":payload});
         let p = preparation::prepare_publication_on(state, tx, &value, false).await?;
         providers::validate(&provider, &p).map_err(format_error)?;
+        if provider == "google_business"
+            && !p.media.is_empty()
+            && !providers::google_public_origin(&state.config.public_url)
+        {
+            return Err(ApiError::bad_code(
+                "provider_format_invalid",
+                "Google photos require an actual public HTTPS server origin; local, private and reserved origins cannot be fetched.",
+            ));
+        }
         if !p.media.is_empty()
             && matches!(
                 provider.as_str(),
-                "facebook" | "instagram" | "threads" | "pinterest"
+                "facebook" | "instagram" | "threads" | "pinterest" | "google_business"
             )
             && !(provider == "facebook" && p.options["format"] == "reel")
             && !state.config.public_url.starts_with("https://")

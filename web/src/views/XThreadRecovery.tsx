@@ -76,7 +76,9 @@ export function XThreadRecovery({
       observed_checkpoint_id: thread.checkpoint_id,
       sender_stopped: true,
       provider_inspected: true,
-      ...(resolution === "published" ? { thread_ids: ids } : {}),
+      ...(resolution === "published"
+        ? { thread_ids: ids }
+        : { thread_root_definitively_ended: true }),
     };
     running.current = true;
     setBusy(true);
@@ -187,7 +189,8 @@ export function XThreadRecovery({
       >
         Record complete thread
       </Button>
-      {thread.phase === "request_started" &&
+      {thread.root_request_started &&
+        thread.phase === "request_started" &&
         thread.next_index === 0 &&
         thread.confirmed_ids.length === 0 && (
           <div className="form-stack">

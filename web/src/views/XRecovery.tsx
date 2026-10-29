@@ -33,6 +33,7 @@ const ThreadCheckpoint: z.ZodType<XThreadStatus> = z
     remaining_texts: z.array(z.string()),
     attempt_id: z.string().uuid(),
     checkpoint_id: z.string().uuid(),
+    root_request_started: z.boolean().default(false),
   })
   .refine(
     (value) =>

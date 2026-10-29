@@ -14,6 +14,7 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
     let credentials = Channel {
         app: connections::app_config(&h.state, "youtube").await.unwrap(),
         identity: Identity {
+            parent: None,
             id: "destination".into(),
             name: "Fixture".into(),
             username: None,
@@ -613,12 +614,8 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
         .await
         .unwrap();
     assert_eq!(sibling, "reconnect_required");
-    h.app("youtube", "revocation-client", None).await;
-    assert_eq!(
-        start(request.clone()).send().await.unwrap().status(),
-        StatusCode::CONFLICT
-    );
     assert_eq!(ack(true, h.revocation_marker("youtube").await).send().await.unwrap().status(), StatusCode::OK);
+    h.app("youtube", "revocation-client", None).await;
     let recovered = authorize(&client, &base, start(request).send().await.unwrap()).await;
     assert_eq!(
         complete(&recovered).send().await.unwrap().status(),

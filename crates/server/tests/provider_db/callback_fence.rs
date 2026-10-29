@@ -13,6 +13,7 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
     let grant = Channel {
         app: connections::app_config(&h.state, "youtube").await.unwrap(),
         identity: Identity {
+            parent: None,
             id: "destination".into(),
             name: "Fixture".into(),
             username: None,

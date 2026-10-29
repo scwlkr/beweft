@@ -41,12 +41,14 @@ include!("provider_db/post_grant_recovery.rs");
 include!("provider_db/revocation_latch.rs");
 include!("provider_db/x_legacy.rs");
 include!("provider_db/x_thread.rs");
+include!("provider_db/google_business.rs");
 #[path = "../../providers/tests/support/mod.rs"]
 mod media_fixture;
 #[tokio::test]
 #[ignore = "requires isolated BEWEFT_TEST_DATABASE_URL; run provider_integration.py"]
 async fn provider_database_security_and_recovery() {
     let h = Harness::new().await;
+    google_family_and_publication_boundaries(&h).await;
     overlapping_syncs_preserve_pool_and_rotated_tokens(&h).await;
     callback_exchange_respects_removal_boundary(&h).await;
     bluesky_connection_obeys_provider_and_brand_fences(&h).await;

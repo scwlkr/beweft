@@ -166,7 +166,7 @@ async fn change(
         .fetch_one(&mut *tx)
         .await?;
     crate::schedules::lock_channel(&mut tx, channel).await?;
-    let row=sqlx::query("SELECT p.*,c.provider FROM publications p JOIN channels c ON c.id=p.channel_id WHERE p.id=$1 FOR UPDATE OF p").bind(id).fetch_one(&mut *tx).await?;
+    let row=sqlx::query("SELECT p.*,c.provider,c.connection_identity FROM publications p JOIN channels c ON c.id=p.channel_id WHERE p.id=$1 FOR UPDATE OF p").bind(id).fetch_one(&mut *tx).await?;
     auth.brand(row.get("brand_id"))?;
     if ["retry", "reschedule"].contains(&action) {
         crate::brand_admin::active(&mut tx, row.get("brand_id")).await?;
@@ -185,7 +185,9 @@ async fn change(
     if body.get("thread_root_definitively_ended").is_some()
         && (!x_thread || action != "reconcile" || body["resolution"] != "not_published")
     {
-        return Err(ApiError::bad("The root-ended attestation is only valid for an X thread not-published resolution"));
+        return Err(ApiError::bad(
+            "The root-ended attestation is only valid for an X thread not-published resolution",
+        ));
     }
     let mut x_checkpoint = if provider == "x"
         && (["retry", "reconcile"].contains(&action)
@@ -205,8 +207,8 @@ async fn change(
             }
         } else {
             // A new queued thread has no attempt. After any attempt, a missing
-            // checkpoint cannot prove no write occurred; a recorded pre-public
-            // reset is the sole exception, fenced against later attempts.
+            // checkpoint cannot prove no write occurred; a recorded safe reset
+            // is the sole exception, fenced against later attempts.
             if !crate::provider_bridge::valid_x_thread_snapshot(&payload) {
                 return Err(ApiError::conflict(
                     "The saved X thread is invalid; recovery cannot proceed",
@@ -242,7 +244,9 @@ async fn change(
             let status = crate::provider_bridge::x_thread_status(&payload, cp)?;
             if crate::provider_bridge::x_thread_pre_public(cp) {
                 if body.get("thread_root_definitively_ended").is_some() {
-                    return Err(ApiError::bad("A root-ended attestation is only valid for a started X thread root"));
+                    return Err(ApiError::bad(
+                        "A root-ended attestation is only valid for a started X thread root",
+                    ));
                 }
             } else {
                 auth.owner_session()?;
@@ -279,6 +283,58 @@ async fn change(
         } else {
             None
         };
+    let mut google_checkpoint =
+        if provider == "google_business" && ["retry", "reconcile"].contains(&action) {
+            crate::provider_bridge::checkpoint_for_recovery(state, &mut tx, id).await?
+        } else {
+            None
+        };
+    if let Some(cp) = google_checkpoint.as_ref() {
+        let (attempt, checkpoint) = crate::provider_bridge::google_identity(cp)?;
+        let matches_row: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM provider_delivery_checkpoints cp JOIN publication_attempts a ON a.id=cp.attempt_id AND a.publication_id=cp.publication_id WHERE cp.publication_id=$1 AND cp.attempt_id=$2 AND cp.checkpoint_id=$3)")
+            .bind(id).bind(attempt).bind(checkpoint).fetch_one(&mut *tx).await?;
+        if !matches_row {
+            return Err(ApiError::conflict(
+                "Google delivery identity changed; reload before recovery",
+            ));
+        }
+    }
+    if provider == "google_business" && action == "reconcile" {
+        auth.owner_session()?;
+        let cp = google_checkpoint.as_ref().ok_or_else(|| ApiError::conflict("The Google delivery has no recovery identity; inspect the original attempt before resolving it"))?;
+        let (attempt, checkpoint) = crate::provider_bridge::google_identity(cp)?;
+        if body["observed_attempt_id"] != json!(attempt)
+            || body["observed_checkpoint_id"] != json!(checkpoint)
+            || body["sender_stopped"] != true
+            || body["provider_inspected"] != true
+        {
+            return Err(ApiError::conflict(
+                "Stop the original sender and inspect Google using the current attempt and checkpoint IDs. For not-published, inspection must establish that the remote operation definitively failed, stopped, or was canceled; a missing post or stopped local sender alone is not proof.",
+            ));
+        }
+    }
+    if action == "retry"
+        && let Some(cp) = google_checkpoint.as_ref()
+    {
+        let (attempt, checkpoint) = crate::provider_bridge::google_identity(cp)?;
+        if cp["stage"] != "google_post_rejected"
+            && !crate::provider_bridge::google_attested(cp, attempt, checkpoint)
+        {
+            return Err(ApiError::conflict(
+                "Google may still publish the original post. Reconcile the exact delivery before retrying.",
+            ));
+        }
+        if current == "failed" {
+            sqlx::query("INSERT INTO audit_events(id,owner_id,action,subject_id,detail) VALUES($1,$2,'retry_google_delivery',$3,$4)")
+                .bind(Uuid::new_v4()).bind(auth.owner_id).bind(id)
+                .bind(json!({"attempt_id":attempt,"checkpoint_id":checkpoint,"stage":cp["stage"],"post_name":cp["name"],"owner_attestation":cp["not_published_attestation"]}))
+                .execute(&mut *tx).await?;
+            sqlx::query("DELETE FROM provider_delivery_checkpoints WHERE publication_id=$1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
     if action == "retry"
         && let Some(cp) = linkedin_checkpoint.as_ref()
     {
@@ -356,12 +412,19 @@ async fn change(
                                 .as_ref()
                                 .is_some_and(crate::provider_bridge::x_public_boundary)
                                 || meta_checkpoint.is_some()
-                                || linkedin_checkpoint.is_some())))) =>
+                                || linkedin_checkpoint.is_some()
+                                || google_checkpoint.is_some())))) =>
         {
             required(&body, "note")?;
             match body["resolution"].as_str() {
                 Some("published") => "published",
                 Some("not_published") => {
+                    if let Some(cp) = google_checkpoint.as_mut() {
+                        let (attempt, checkpoint) = crate::provider_bridge::google_identity(cp)?;
+                        cp["not_published_attestation"] = json!({"attempt_id":attempt,"checkpoint_id":checkpoint,"remote_definitively_ended":true});
+                        crate::provider_bridge::save_recovery_checkpoint_tx(&mut tx, state, id, cp)
+                            .await?;
+                    }
                     if let Some(cp) = linkedin_checkpoint.as_mut() {
                         auth.owner_session()?;
                         let (attempt, checkpoint) = crate::provider_bridge::linkedin_identity(cp)?;
@@ -447,7 +510,35 @@ async fn change(
             ));
         }
     }
-    sqlx::query("UPDATE publications SET state=$2,scheduled_at=$3,external_id=COALESCE($4,external_id),external_url=COALESCE($5,external_url),last_error=CASE WHEN $2 IN ('queued','published','canceled') THEN NULL ELSE last_error END,lease_until=NULL,scheduling_mode=CASE WHEN $6 THEN 'exact' ELSE scheduling_mode END,updated_at=now() WHERE id=$1").bind(id).bind(target).bind(scheduled_at).bind(body["external_id"].as_str()).bind(external_url).bind(action == "reschedule").execute(&mut *tx).await?;
+    let mut external_id = body["external_id"].as_str();
+    if provider == "google_business"
+        && action == "reconcile"
+        && target == "published"
+        && let Some(supplied) = external_id
+    {
+        let location: Option<String> = row.get("connection_identity");
+        let location = location.ok_or_else(|| ApiError::conflict("Google channel location is unavailable; omit the external ID and inspect the original delivery"))?;
+        beweft_providers::google_post_name_for_location(supplied, &location).map_err(|_| {
+            ApiError::bad(
+                "Google post ID must be a canonical resource name for this channel's location",
+            )
+        })?;
+    }
+    if provider == "google_business"
+        && action == "reconcile"
+        && target == "published"
+        && let Some(saved) = google_checkpoint
+            .as_ref()
+            .and_then(|cp| cp["name"].as_str())
+    {
+        if external_id.is_some_and(|supplied| supplied != saved) {
+            return Err(ApiError::conflict(
+                "The supplied Google post ID differs from the saved post resource",
+            ));
+        }
+        external_id = Some(saved);
+    }
+    sqlx::query("UPDATE publications SET state=$2,scheduled_at=$3,external_id=COALESCE($4,external_id),external_url=COALESCE($5,external_url),last_error=CASE WHEN $2 IN ('queued','published','canceled') THEN NULL ELSE last_error END,lease_until=NULL,scheduling_mode=CASE WHEN $6 THEN 'exact' ELSE scheduling_mode END,updated_at=now() WHERE id=$1").bind(id).bind(target).bind(scheduled_at).bind(external_id).bind(external_url).bind(action == "reschedule").execute(&mut *tx).await?;
     sqlx::query(
         "INSERT INTO audit_events(id,owner_id,action,subject_id,detail) VALUES($1,$2,$3,$4,$5)",
     )
