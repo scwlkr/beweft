@@ -37,7 +37,10 @@ export function ConnectedChannels({
           <div>
             <h3>{c.name}</h3>
             {!["manual", "fixture"].includes(c.provider) && (
-              <ChannelPermissions capabilities={c.capabilities} />
+              <ChannelPermissions
+                capabilities={c.capabilities}
+                showScopes={c.provider === "google_business"}
+              />
             )}
             {c.connection_error != null && (
               <p className="inline-error">{String(c.connection_error)}</p>
@@ -47,7 +50,9 @@ export function ConnectedChannels({
                 ? `Manual handoff · ${c.manual_guidance?.name ?? "Other platform"} · Owner confirms publication`
                 : c.provider === "fixture"
                   ? "Isolated fixture · Does not publish"
-                  : c.provider}{" "}
+                  : c.provider === "google_business"
+                    ? "Google Business Profile"
+                    : c.provider}{" "}
               · {c.timezone}
             </p>
             {c.provider === "manual" && (

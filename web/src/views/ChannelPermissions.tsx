@@ -15,8 +15,10 @@ const Permissions = z.object({
 });
 export function ChannelPermissions({
   capabilities,
+  showScopes = false,
 }: {
   capabilities: unknown;
+  showScopes?: boolean;
 }) {
   const parsed = Permissions.safeParse(capabilities);
   if (!parsed.success)
@@ -46,6 +48,15 @@ export function ChannelPermissions({
         ))}
       </dl>
       <small className="muted">Scope source: {permission.source}</small>
+      {showScopes && (
+        <p className="muted">
+          Reported scopes:{" "}
+          {permission.reported_scopes.length
+            ? permission.reported_scopes.join(", ")
+            : "none reported"}
+          .
+        </p>
+      )}
     </details>
   );
 }

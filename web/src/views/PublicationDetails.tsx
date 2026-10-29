@@ -24,6 +24,7 @@ import { QueueReplacement } from "./QueueReplacement";
 import type { PendingMedia } from "../usePendingMedia";
 import type { usePendingSchedule } from "../usePendingSchedule";
 import { MetaRecovery } from "./MetaRecovery";
+import { GoogleRecovery } from "./GoogleRecovery";
 import { ProviderRecovery } from "./ProviderRecovery";
 import { XRecovery } from "./XRecovery";
 import { AttemptHistory, isOwnerAttestation } from "./AttemptHistory";
@@ -81,9 +82,15 @@ export function PublicationDetails({
       : null;
   const destination = safeDestination(guidance?.compose_url);
   const [retryAllowed, setRetryAllowed] = useState(
-    !["youtube", "x", "facebook", "instagram", "threads", "linkedin"].includes(
-      p.provider,
-    ),
+    ![
+      "youtube",
+      "x",
+      "facebook",
+      "instagram",
+      "threads",
+      "linkedin",
+      "google_business",
+    ].includes(p.provider),
   );
   const xThread =
     p.provider === "x" && p.payload.options?.x_thread !== undefined;
@@ -270,9 +277,14 @@ export function PublicationDetails({
           </form>
         )}
         {p.state === "uncertain" &&
-          !["x", "facebook", "instagram", "threads", "linkedin"].includes(
-            p.provider,
-          ) && (
+          ![
+            "x",
+            "facebook",
+            "instagram",
+            "threads",
+            "linkedin",
+            "google_business",
+          ].includes(p.provider) && (
             <form
               className="form-stack"
               onSubmit={(e) => {
@@ -362,6 +374,15 @@ export function PublicationDetails({
             pending={pending}
           />
         )}
+        {p.provider === "google_business" &&
+          ["sending", "uncertain", "failed"].includes(p.state) && (
+            <GoogleRecovery
+              publication={p}
+              onRetryAllowed={setRetryAllowed}
+              action={action}
+              pending={pending}
+            />
+          )}
         {["facebook", "instagram", "threads", "linkedin"].includes(
           p.provider,
         ) &&
@@ -383,7 +404,10 @@ export function PublicationDetails({
           </Button>
         )}
         {["queued", "manual_required", "failed"].includes(p.state) &&
-          (!xThread || p.state === "queued" || xThreadCancelAllowed) && (
+          (!xThread || p.state === "queued" || xThreadCancelAllowed) &&
+          (p.provider !== "google_business" ||
+            p.state !== "failed" ||
+            retryAllowed) && (
             <Button
               variant="destructive"
               disabled={pending}

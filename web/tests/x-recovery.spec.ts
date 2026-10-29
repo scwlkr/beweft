@@ -63,6 +63,103 @@ const checkpoint = (
   reason: "Review this attempt.",
 });
 
+test("failed X thread cancellation follows the saved public boundary", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await fixture(page, context, write, "failed");
+    f.set({
+      ...f.get(),
+      payload: {
+        ...f.get().payload,
+        options: { x_thread: { replies: ["Reply"] } },
+      },
+    });
+    const cp = checkpoint("post_started", false);
+    let preparing = false;
+    await page.route(
+      `**/publications/${f.publication.id}/provider-status`,
+      (route) =>
+        route.fulfill({
+          json: {
+            data: {
+              ...status(
+                preparing
+                  ? { ...cp, phase: "upload", reset_allowed: true }
+                  : cp,
+              ),
+              x_thread_retry_allowed: false,
+              x_thread: {
+                phase: preparing ? "preparing" : "ready",
+                confirmed_ids: preparing ? [] : ["1001"],
+                next_index: preparing ? 0 : 1,
+                total: 2,
+                remaining_texts: preparing
+                  ? ["Local fixture", "Reply"]
+                  : ["Reply"],
+                attempt_id: cp.attempt_id,
+                checkpoint_id: cp.checkpoint_id,
+                root_request_started: false,
+              },
+            },
+          },
+        }),
+    );
+    await page.goto("/#queue");
+    await page.getByRole("button", { name: "View details" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toContainText("Confirmed post 1:");
+    await expect(
+      dialog.getByRole("button", { name: "Cancel publication" }),
+    ).toHaveCount(0);
+    preparing = true;
+    await dialog
+      .getByRole("button", { name: "Check X recovery status" })
+      .click();
+    await expect(dialog).toContainText("0 of 2 posts have provider receipts");
+    await expect(
+      dialog.getByRole("button", { name: "Cancel publication" }),
+    ).toBeVisible();
+  });
+});
+
+test("a queued manual publication remains cancelable", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const brand = await write("/brands", { name: "Manual cancel fixture" });
+    const channel = await write("/channels", {
+      brand_id: brand.id,
+      provider: "manual",
+      name: "Manual fixture",
+      timezone: "UTC",
+    });
+    const post = await write("/posts", {
+      brand_id: brand.id,
+      text: "Queued manual fixture",
+      variants: [],
+    });
+    const [publication] = await write(`/posts/${post.id}/schedule`, {
+      version: post.version,
+      channel_ids: [channel.id],
+      scheduled_at: new Date(Date.now() + 86400000).toISOString(),
+    });
+    await context.addInitScript(
+      (id) => localStorage.setItem("beweft.brand", id),
+      brand.id,
+    );
+    await page.goto("/#queue");
+    await page.getByRole("button", { name: "View details" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("button", { name: "Cancel publication" }).click();
+    await expect(dialog).toHaveCount(0);
+    const rows = (
+      await (
+        await context.request.get(`/api/v1/publications?brand_id=${brand.id}`)
+      ).json()
+    ).data;
+    expect(
+      rows.find((row: { id: string }) => row.id === publication.id).state,
+    ).toBe("canceled");
+  });
+});
+
 test("partial X thread displays the saved prefix and requires a complete inspected chain", async () => {
   await withWorkspace(async (page, context, write) => {
     const f = await fixture(page, context, write, "uncertain");

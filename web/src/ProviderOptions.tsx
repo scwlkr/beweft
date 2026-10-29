@@ -1,5 +1,6 @@
 import { Field } from "./components/shared";
 import { Button } from "./components/ui/button";
+import { GoogleOptions } from "./GoogleOptions";
 export function ProviderOptions({
   provider,
   capabilities,
@@ -17,6 +18,8 @@ export function ProviderOptions({
       ? (capabilities as Record<string, unknown>)
       : {};
   const formats = Array.isArray(caps.formats) ? caps.formats : [];
+  if (provider === "google_business")
+    return <GoogleOptions value={value} onChange={onChange} />;
   if (provider === "facebook") {
     const permissions =
       caps.permissions && typeof caps.permissions === "object"

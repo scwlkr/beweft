@@ -908,6 +908,12 @@ code {
   padding-top: 18px;
   border-top: 1px solid var(--line);
 }
+.composer-footer {
+  flex-wrap: wrap;
+}
+.google-photo-notice {
+  flex: 0 0 100%;
+}
 .dialog-wide > .dialog-footer {
   padding: 16px 25px;
   margin: 0;
