@@ -24,8 +24,8 @@ Ideas gain `status: "inbox"|"in_progress"|"ready"|"archived"` (default inbox), `
 
 ## Media descriptions and manual guidance
 
-- Media responses add `alt_text:string` (default empty).
-- PATCH `/media/:id` `{alt_text:string}` → media. Maximum 2,000 characters; drafts:write. Newly scheduled snapshots freeze per-media descriptions in `payload.media_metadata:[{id,alt_text}]`; existing queued content is unchanged.
+- Media responses add `alt_text:string` (default empty) and `metadata_version:number` (initially 1). GET `/media/:id` reads the current authorized asset.
+- PATCH `/media/:id` `{alt_text:string,metadata_version:number}` → media with incremented metadata version. The required version must match the current record; a stale version returns 409 `media_version_changed` without updating it. Maximum 2,000 characters; drafts:write. Newly scheduled snapshots freeze per-media descriptions in `payload.media_metadata:[{id,alt_text}]`; existing queued content is unchanged.
 - GET `/manual-platforms` → allowlisted `{id,name,compose_url:string|null,guidance:string}` entries.
 - Manual channel POST/PATCH accepts `target_platform` (default `generic`), one of generic/x/youtube/facebook/instagram/threads/tiktok/bluesky/mastodon/linkedin/pinterest. Nonmanual channels cannot set this field. Channel responses include `target_platform:string|null` and `manual_guidance:{id,name,compose_url,guidance}|null`. Links are server-owned HTTPS destinations, never user-supplied redirect URLs.
 

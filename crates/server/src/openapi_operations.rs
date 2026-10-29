@@ -64,6 +64,7 @@ pub(crate) const OPERATIONS: &[(&str, &str, &str, &str, bool)] = &[
     ("get", "/media", "", "Media", true),
     ("post", "/media", "multipart", "Media", false),
     ("get", "/media/limits", "", "MediaLimits", false),
+    ("get", "/media/{id}", "", "Media", false),
     ("delete", "/media/{id}", "", "OkResponse", false),
     ("get", "/media/{id}/file", "", "binary", false),
     ("get", "/schedules", "", "ScheduleRule", true),

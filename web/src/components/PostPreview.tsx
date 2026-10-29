@@ -32,7 +32,7 @@ export function PostPreview({
             <img
               className="preview-media"
               src={m.url}
-              alt={m.name}
+              alt={m.alt_text || m.name}
               key={m.id}
             />
           ) : (

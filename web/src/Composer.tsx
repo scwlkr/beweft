@@ -207,7 +207,7 @@ export function Composer({
                       }
                     >
                       {m.mime.startsWith("image/") ? (
-                        <img src={m.url} alt={m.name} />
+                        <img src={m.url} alt={m.alt_text || m.name} />
                       ) : (
                         <span>Video</span>
                       )}
@@ -223,7 +223,7 @@ export function Composer({
               {selectedMedia.map((m) => (
                 <div key={m.id}>
                   {m.mime.startsWith("image/") ? (
-                    <img src={m.url} alt={m.name} />
+                    <img src={m.url} alt={m.alt_text || m.name} />
                   ) : (
                     <span>{m.name}</span>
                   )}
@@ -241,28 +241,23 @@ export function Composer({
               ))}
             </div>
           )}
-          {active &&
-            ["bluesky", "mastodon"].includes(active.provider) &&
-            selectedMedia.some((m) => m.mime.startsWith("image/")) && (
-              <Field
-                label="Image description"
-                hint="Currently applied to every image in this channel variant. Describe the content for people who cannot see it."
-              >
-                <textarea
-                  rows={2}
-                  value={String(options[active.id]?.alt_text ?? "")}
-                  onChange={(e) =>
-                    setOptions({
-                      ...options,
-                      [active.id]: {
-                        ...options[active.id],
-                        alt_text: e.target.value,
-                      },
-                    })
-                  }
-                />
-              </Field>
-            )}
+          {selectedMedia.length > 0 && (
+            <div className="media-descriptions">
+              <strong>Media descriptions</strong>
+              <p className="muted">
+                Edit descriptions in Media library. New schedules save these
+                descriptions; already scheduled posts keep theirs.
+              </p>
+              <ul>
+                {selectedMedia.map((item) => (
+                  <li key={item.id}>
+                    <strong>{item.name}:</strong>{" "}
+                    {item.alt_text || "No description yet"}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {active && (
             <ProviderOptions
               provider={active.provider}
