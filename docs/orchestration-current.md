@@ -48,9 +48,22 @@ three active children plus the orchestrator. Each milestone freezes its SHA.
 
 | Lane | Checkpoint | Next acceptance boundary |
 | --- | --- | --- |
-| Core/providers A+B | PR #19 merged; provider wiring #20 in correction | DB-clock lease admission, local validation and durable rejected/retired receipts; practical formats still follow. |
-| Web C | PR #14 scheduling; #15 media descriptions; #16 idea organization | PR #15 merged `025c319` after fresh review (24/24 media cases). PR #14 review found unsafe generic-error release and stale intent transitions; fixes now use authoritative receipts/retirement. Preserved manual guidance still awaits integration. |
-| CLI/operations D+E | PR #18 recovery corrections | Ownership/reservation, DB pin and cleanup corrections passed targeted checks; the next review found editable app/hold controls and plugin-child supervision gaps. Controlled atomic state and a bounded wrapper surface are being qualified. |
+| Core/providers A+B | PR #20 at `f804dd2`, two review corrections active | Refresh must update derived capabilities; malformed reconnect targets must fail before authorization. Practical formats still follow. |
+| Web C | PR #14 correction after `240b91e`; #15 and #16 merged | Durable request recovery and partial-acceptance evidence passed 66 browser cases. Exact correction time still needs persistence after a rejected/retired intent clears and the composer reloads. Preserved manual guidance awaits integration. |
+| CLI/operations D+E | PR #18 correction after `f65402d` | Recovery, controlled state and subprocess supervision passed targeted review. The remaining initializer helper needs a durable operation identity and exact cleanup across interruption. |
+
+PR #20 now wires the production provider routes and worker, durable terminal
+schedule rejection/retirement receipts, and reply revision/active-executor fences.
+Its latest sandboxed review passed API/worker preflights, separate-worker routing
+and provider integration. Two capability/input-validation findings remain under
+correction; this checkpoint is not merged. A lost database session does not prove
+an outbound sender stopped: owner resolution requires a truthful sender-stopped
+attestation as well as the observed reply revision.
+
+PR #18's review exercised nonempty backup/restore, owner access, media, drafts,
+queue, post-restore upload, activation holds, concurrent MCP/log usage and signal
+handling. These results do not yet qualify a schema-changing application upgrade.
+The retained old application image is reserved for that later integrated rehearsal.
 
 Core owns server/worker/providers/migrations/generated exports. Web owns client
 and browser tests, plus a narrow loan for media metadata CAS and authorized GET:
@@ -117,3 +130,19 @@ are avoided; retained builds are tied to a source SHA. Finished review worktrees
 are retired through Codex. The orchestrator owns final cleanup and a useful
 running local installation. Hosting remains placeholders until the owner chooses
 a server/domain. Missing adapter code is unfinished work, not an external blocker.
+
+## Remaining delivery sequence
+
+After the active corrections pass fresh independent review, integrate their frozen
+heads and continue practical provider formats, provider connection/recovery UI,
+templates and queue maintenance, brand/security settings and CLI/MCP receipt
+workflows. New nested media formats must participate in the complete frozen media
+union/version contract. Adding Google Business Profile must account for shared
+Google app/grant revocation across YouTube and Business Profile.
+
+Final acceptance includes integrated default-build and isolated provider checks,
+a fresh useful local installation, restart/recovery, a real schema-changing
+application upgrade and matching backup restore/rollback rehearsal. Preserve the
+old dev data. Merge the original PR stack with its ancestry intact, keep capability
+and operator docs current, then retire owned disposable resources. No physical
+host reboot, live account qualification or public provider publication is claimed.
