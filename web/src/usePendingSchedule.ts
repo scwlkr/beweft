@@ -13,6 +13,7 @@ import {
 } from "./scheduleIntent";
 export function usePendingSchedule(brandId: string, enabled = true) {
   const [key, setKey] = useState("");
+  const [ownerId, setOwnerId] = useState("");
   const [verifiedBrand, setVerifiedBrand] = useState("");
   const [verifiedSession, setVerifiedSession] = useState<ApiSession | null>(
     null,
@@ -23,7 +24,9 @@ export function usePendingSchedule(brandId: string, enabled = true) {
     let active = true;
     const controller = new AbortController();
     let storageKey = "";
+    let ownerId = "";
     setKey("");
+    setOwnerId("");
     setVerifiedBrand("");
     setVerifiedSession(null);
     setIntent(null);
@@ -46,13 +49,20 @@ export function usePendingSchedule(brandId: string, enabled = true) {
         const pending = readScheduleIntent(storageKey);
         if (pending && pending.post.brand_id !== brandId)
           throw new Error("Pending schedule belongs to another brand.");
+        if (
+          pending?.request_contract === "request-id-v2" &&
+          (pending.owner_id !== ownerId || pending.brand_id !== brandId)
+        )
+          throw new Error("Pending schedule belongs to another workspace.");
         setIntent(pending);
         setKey(storageKey);
+        setOwnerId(ownerId);
         setVerifiedBrand(brandId);
         setVerifiedSession(session);
         setError("");
       } catch (failure) {
         setKey("");
+        setOwnerId("");
         setVerifiedBrand("");
         setVerifiedSession(null);
         setIntent(null);
@@ -69,6 +79,7 @@ export function usePendingSchedule(brandId: string, enabled = true) {
       .then((owner) => {
         if (!active) return;
         requireWorkspaceSession(session);
+        ownerId = owner.id;
         storageKey = `beweft.pending-schedule:${owner.id}:${brandId}`;
         read();
       })
@@ -92,5 +103,11 @@ export function usePendingSchedule(brandId: string, enabled = true) {
   }, [brandId, enabled]);
   const ready =
     enabled && !!key && verifiedBrand === brandId && verifiedSession !== null;
-  return { key: ready ? key : "", intent: ready ? intent : null, error, ready };
+  return {
+    key: ready ? key : "",
+    owner: ready ? ownerId : "",
+    intent: ready ? intent : null,
+    error,
+    ready,
+  };
 }

@@ -12,6 +12,7 @@ use chrono::{DateTime, Datelike, Duration, NaiveTime, TimeZone, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{Postgres, Row, Transaction};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 pub async fn list(
     State(state): State<AppState>,
@@ -138,6 +139,66 @@ pub fn parse_future(value: &Value) -> Result<DateTime<Utc>> {
 pub struct ScheduleResponseView {
     view: Option<String>,
 }
+async fn original_publications(
+    tx: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    request: Uuid,
+) -> Result<Vec<Uuid>> {
+    Ok(sqlx::query_scalar("SELECT publication_id FROM schedule_request_publications WHERE owner_id=$1 AND request_id=$2 ORDER BY position")
+        .bind(owner).bind(request).fetch_all(&mut **tx).await?)
+}
+
+async fn publication_rows(state: &AppState, ids: &[Uuid], summary: bool) -> Result<Vec<Value>> {
+    if summary {
+        let rows = crate::publications::get_publication_summaries(&state.db, ids).await?;
+        if rows.len() != ids.len() {
+            return Err(ApiError::internal(
+                "schedule request publication is unavailable",
+            ));
+        }
+        Ok(rows)
+    } else {
+        let mut rows = Vec::with_capacity(ids.len());
+        for id in ids {
+            rows.push(crate::publications::get_publication(&state.db, *id).await?);
+        }
+        Ok(rows)
+    }
+}
+
+/// Recover a committed request. A missing or unauthorized result is deliberately
+/// indistinguishable, and a 404 does not decide an in-flight transaction's outcome.
+pub async fn get_schedule_request(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(request_id): Path<Uuid>,
+) -> Result<Json<Value>> {
+    let row = sqlx::query("SELECT post_id,brand_id,post_version,channel_ids,scheduled_at,media_versions FROM schedule_requests WHERE owner_id=$1 AND request_id=$2 AND (cardinality($3::uuid[])=0 OR brand_id=ANY($3))")
+        .bind(auth.owner_id).bind(request_id).bind(&auth.brand_ids)
+        .fetch_optional(&state.db).await?.ok_or_else(ApiError::missing)?;
+    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT publication_id FROM schedule_request_publications WHERE owner_id=$1 AND request_id=$2 ORDER BY position")
+        .bind(auth.owner_id).bind(request_id).fetch_all(&state.db).await?;
+    let channels: Vec<Uuid> = row.get("channel_ids");
+    if ids.len() != channels.len() {
+        return Err(ApiError::internal(
+            "schedule request publication links are incomplete",
+        ));
+    }
+    let timestamp: Option<DateTime<Utc>> = row.get("scheduled_at");
+    Ok(data(json!({
+        "request_id":request_id,
+        "post_id":row.get::<Uuid,_>("post_id"),
+        "brand_id":row.get::<Uuid,_>("brand_id"),
+        "request":{
+            "version":row.get::<i32,_>("post_version"),
+            "channel_ids":channels,
+            "scheduled_at":timestamp.map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Micros,true)),
+            "media_versions":row.get::<Option<Value>,_>("media_versions")
+        },
+        "publications":publication_rows(&state, &ids, true).await?
+    })))
+}
+
 pub async fn schedule_post(
     State(state): State<AppState>,
     auth: Auth,
@@ -145,15 +206,13 @@ pub async fn schedule_post(
     Query(view): Query<ScheduleResponseView>,
     Json(input): Json<crate::contracts::SchedulePostRequest>,
 ) -> Result<Json<Value>> {
-    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     auth.scope("publishing:write")?;
     let summary = match view.view.as_deref() {
         None => false,
         Some("summary") => true,
         _ => return Err(ApiError::bad("Unsupported schedule response view")),
     };
-    let mut channels: Vec<Uuid> = serde_json::from_value(body["channel_ids"].clone())
-        .map_err(|_| ApiError::bad("channel_ids must be UUIDs"))?;
+    let mut channels = input.channel_ids;
     if channels.is_empty() || channels.len() > 50 {
         return Err(ApiError::bad("Select between one and 50 channels"));
     }
@@ -163,22 +222,74 @@ pub async fn schedule_post(
     if count != channels.len() {
         return Err(ApiError::bad("Duplicate channel IDs"));
     }
-    let exact = body
-        .get("scheduled_at")
-        .filter(|v| !v.is_null())
-        .map(parse_future)
-        .transpose()?;
+    let exact = input.scheduled_at;
+    let expected_version = input.version;
+    let request_id = input.request_id;
+    let media_versions = input.media_versions;
+    // Authorize the target before looking up any owner-scoped request key.
+    let brand: Uuid = sqlx::query_scalar("SELECT brand_id FROM posts WHERE id=$1")
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
+    auth.brand(brand)?;
     let mut tx = state.db.begin().await?;
+    if let Some(request_id) = request_id {
+        // A same-key retry must not leave a blocked PostgreSQL query behind:
+        // if the original owns the key, reject promptly and keep GET usable.
+        let admitted: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))")
+                .bind(format!("schedule-request:{}:{request_id}", auth.owner_id))
+                .fetch_one(&mut *tx)
+                .await?;
+        if !admitted {
+            return Err(ApiError::conflict_code(
+                "schedule_request_in_progress",
+                "This scheduling request is still in progress. Check its status or retry with the same request ID.",
+            ));
+        }
+        let previous = sqlx::query("SELECT post_id,brand_id,post_version,channel_ids,scheduled_at,media_versions FROM schedule_requests WHERE owner_id=$1 AND request_id=$2")
+            .bind(auth.owner_id).bind(request_id).fetch_optional(&mut *tx).await?;
+        if let Some(previous) = previous {
+            if auth.brand(previous.get("brand_id")).is_err() {
+                return Err(ApiError::missing());
+            }
+            let previous_media_versions: Option<BTreeMap<Uuid, i64>> = previous
+                .get::<Option<Value>, _>("media_versions")
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(ApiError::internal)?;
+            if previous.get::<Uuid, _>("post_id") != id
+                || previous.get::<i32, _>("post_version") != expected_version
+                || previous.get::<Vec<Uuid>, _>("channel_ids") != channels
+                || previous.get::<Option<DateTime<Utc>>, _>("scheduled_at") != exact
+                || previous_media_versions != media_versions
+            {
+                return Err(ApiError::conflict_code(
+                    "schedule_request_conflict",
+                    "This request ID belongs to a different scheduling intent.",
+                ));
+            }
+            let ids = original_publications(&mut tx, auth.owner_id, request_id).await?;
+            if ids.len() != channels.len() {
+                return Err(ApiError::internal(
+                    "schedule request publication links are incomplete",
+                ));
+            }
+            tx.commit().await?;
+            return Ok(data(publication_rows(&state, &ids, summary).await?));
+        }
+    }
+    // Date, revision and archive checks apply only to a new intent. An already
+    // committed replay must remain recoverable after any of those change.
+    if exact.is_some_and(|time| time < Utc::now() - Duration::seconds(5)) {
+        return Err(ApiError::bad("Choose a future posting time"));
+    }
     let post = sqlx::query("SELECT * FROM posts WHERE id=$1 FOR UPDATE")
         .bind(id)
         .fetch_one(&mut *tx)
         .await?;
-    let brand: Uuid = post.get("brand_id");
-    auth.brand(brand)?;
-    let expected_version = body["version"]
-        .as_i64()
-        .ok_or_else(|| ApiError::bad("version is required"))?;
-    if expected_version != i64::from(post.get::<i32, _>("version")) {
+    auth.brand(post.get("brand_id"))?;
+    if expected_version != post.get::<i32, _>("version") {
         return Err(ApiError::conflict_code(
             "post_version_conflict",
             "Draft changed; reload before scheduling",
@@ -186,9 +297,10 @@ pub async fn schedule_post(
     }
     crate::brand_admin::lock(&mut tx, brand).await?;
     crate::brand_admin::active(&mut tx, brand).await?;
-    let mut ids = Vec::new();
-    for channel in channels {
-        lock_channel(&mut tx, channel).await?;
+    // Acquire all channel locks first, in UUID order, so media row locks are
+    // never held while waiting for channel admission.
+    for channel in &channels {
+        lock_channel(&mut tx, *channel).await?;
         let valid: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM channels WHERE id=$1 AND brand_id=$2)")
                 .bind(channel)
@@ -200,23 +312,27 @@ pub async fn schedule_post(
                 "Every channel must belong to the post's brand",
             ));
         }
+    }
+    crate::snapshot::lock_effective_media(&mut tx, &post, &channels, media_versions.as_ref())
+        .await?;
+    let mut ids = Vec::with_capacity(channels.len());
+    for channel in &channels {
         let scheduled_at = match exact {
             Some(t) => t,
-            None => next_slot(&mut tx, channel).await?,
+            None => next_slot(&mut tx, *channel).await?,
         };
-        let payload = crate::snapshot::from_post(&mut tx, &post, channel).await?;
+        let payload = crate::snapshot::from_post(&mut tx, &post, *channel).await?;
         let publication = Uuid::new_v4();
-        sqlx::query("INSERT INTO publications(id,post_id,brand_id,channel_id,post_version,scheduled_at,state,payload,scheduling_mode) VALUES($1,$2,$3,$4,$5,$6,'queued',$7,$8)").bind(publication).bind(id).bind(brand).bind(channel).bind(post.get::<i32,_>("version")).bind(scheduled_at).bind(payload).bind(if exact.is_some() { "exact" } else { "queue" }).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO publications(id,post_id,brand_id,channel_id,post_version,scheduled_at,state,payload,scheduling_mode) VALUES($1,$2,$3,$4,$5,$6,'queued',$7,$8)").bind(publication).bind(id).bind(brand).bind(channel).bind(expected_version).bind(scheduled_at).bind(payload).bind(if exact.is_some() { "exact" } else { "queue" }).execute(&mut *tx).await?;
         ids.push(publication);
     }
-    tx.commit().await?;
-    let mut rows = Vec::new();
-    for id in ids {
-        rows.push(if summary {
-            crate::publications::get_publication_summary(&state.db, id).await?
-        } else {
-            crate::publications::get_publication(&state.db, id).await?
-        });
+    if let Some(request_id) = request_id {
+        sqlx::query("INSERT INTO schedule_requests(owner_id,request_id,post_id,brand_id,post_version,channel_ids,scheduled_at,media_versions) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+            .bind(auth.owner_id).bind(request_id).bind(id).bind(brand).bind(expected_version).bind(&channels).bind(exact)
+            .bind(media_versions.as_ref().map(sqlx::types::Json)).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO schedule_request_publications(owner_id,request_id,position,publication_id) SELECT $1,$2,(wanted.position-1)::smallint,wanted.id FROM unnest($3::uuid[]) WITH ORDINALITY AS wanted(id,position)")
+            .bind(auth.owner_id).bind(request_id).bind(&ids).execute(&mut *tx).await?;
     }
-    Ok(data(rows))
+    tx.commit().await?;
+    Ok(data(publication_rows(&state, &ids, summary).await?))
 }

@@ -744,6 +744,10 @@
             "format": "uuid",
             "type": "string"
           },
+          "metadata_version": {
+            "format": "int32",
+            "type": "integer"
+          },
           "mime": {
             "type": "string"
           },
@@ -760,6 +764,7 @@
         },
         "required": [
           "alt_text",
+          "metadata_version",
           "id",
           "brand_id",
           "name",
@@ -941,6 +946,58 @@
           "attention"
         ],
         "type": "string"
+      },
+      "PostSummary": {
+        "properties": {
+          "brand_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "media_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PostStatus"
+          },
+          "text": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "version": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "brand_id",
+          "title",
+          "text",
+          "media_ids",
+          "version",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
       },
       "PostVariant": {
         "additionalProperties": false,
@@ -1221,6 +1278,73 @@
         ],
         "type": "string"
       },
+      "PublicationSummary": {
+        "properties": {
+          "brand_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "channel_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "channel_name": {
+            "description": "Display name truncated to at most 100 Unicode characters in summaries.",
+            "maxLength": 100,
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "post_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "post_version": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "provider": {
+            "description": "Provider label truncated to at most 64 Unicode characters in summaries.",
+            "maxLength": 64,
+            "type": "string"
+          },
+          "scheduled_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "scheduling_mode": {
+            "$ref": "#/components/schemas/SchedulingMode"
+          },
+          "state": {
+            "$ref": "#/components/schemas/PublicationState"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "post_id",
+          "brand_id",
+          "channel_id",
+          "channel_name",
+          "provider",
+          "post_version",
+          "scheduled_at",
+          "scheduling_mode",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
       "ReconcileRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1340,8 +1464,33 @@
             },
             "type": "array"
           },
+          "media_versions": {
+            "additionalProperties": {
+              "format": "int64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "description": "Expected metadata versions for the exact effective media set. Omit only for legacy behavior.",
+            "maxProperties": 1000,
+            "propertyNames": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "request_id": {
+            "description": "Client-generated UUID retained for retries and recovery. Optional for legacy clients.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "scheduled_at": {
-            "description": "Omit to reserve the next posting-rule slot. Supplying a time creates a fixed-date publication.",
+            "description": "Omit for a posting-rule slot; an exact RFC3339 time accepts at most six fractional digits.",
             "format": "date-time",
             "type": [
               "string",
@@ -1357,6 +1506,86 @@
         "required": [
           "version",
           "channel_ids"
+        ],
+        "type": "object"
+      },
+      "ScheduleRequestIntent": {
+        "properties": {
+          "channel_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "media_versions": {
+            "additionalProperties": {
+              "format": "int64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "description": "Original normalized media-version map, or null for legacy requests.",
+            "maxProperties": 1000,
+            "propertyNames": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "scheduled_at": {
+            "description": "UTC RFC3339, rendered to microsecond precision; null means a posting-rule slot.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "channel_ids",
+          "scheduled_at",
+          "media_versions"
+        ],
+        "type": "object"
+      },
+      "ScheduleRequestResult": {
+        "properties": {
+          "brand_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "post_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "publications": {
+            "items": {
+              "$ref": "#/components/schemas/PublicationSummary"
+            },
+            "type": "array"
+          },
+          "request": {
+            "$ref": "#/components/schemas/ScheduleRequestIntent"
+          },
+          "request_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "post_id",
+          "brand_id",
+          "request",
+          "publications"
         ],
         "type": "object"
       },
@@ -1701,10 +1930,15 @@
         "properties": {
           "alt_text": {
             "type": "string"
+          },
+          "metadata_version": {
+            "format": "int32",
+            "type": "integer"
           }
         },
         "required": [
-          "alt_text"
+          "alt_text",
+          "metadata_version"
         ],
         "type": "object"
       },
@@ -5661,6 +5895,25 @@
               "format": "uuid",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 2048,
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -5668,18 +5921,43 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "properties": {
-                    "data": {
-                      "items": {
-                        "$ref": "#/components/schemas/Media"
+                  "anyOf": [
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/Media"
+                          },
+                          "type": "array"
+                        }
                       },
-                      "type": "array"
+                      "required": [
+                        "data"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/Media"
+                          },
+                          "type": "array"
+                        },
+                        "next_cursor": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "data",
+                        "next_cursor"
+                      ],
+                      "type": "object"
                     }
-                  },
-                  "required": [
-                    "data"
-                  ],
-                  "type": "object"
+                  ]
                 }
               }
             },
@@ -5814,6 +6092,7 @@
           "content": {
             "multipart/form-data": {
               "schema": {
+                "additionalProperties": false,
                 "properties": {
                   "file": {
                     "format": "binary",
@@ -6106,6 +6385,138 @@
                   "properties": {
                     "data": {
                       "$ref": "#/components/schemas/OkResponse"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Scope, brand or origin denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Record not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Version, state or slot conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeds configured limit"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Typed request validation failed"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too many authentication attempts"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal failure"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "get": {
+        "operationId": "get__media_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Media"
                     }
                   },
                   "required": [
@@ -6541,6 +6952,47 @@
               "format": "uuid",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 2048,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "enum": [
+                "draft"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "view",
+            "required": false,
+            "schema": {
+              "enum": [
+                "summary"
+              ],
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -6548,18 +7000,78 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "properties": {
-                    "data": {
-                      "items": {
-                        "$ref": "#/components/schemas/Post"
+                  "anyOf": [
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/Post"
+                          },
+                          "type": "array"
+                        }
                       },
-                      "type": "array"
+                      "required": [
+                        "data"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/Post"
+                          },
+                          "type": "array"
+                        },
+                        "next_cursor": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "data",
+                        "next_cursor"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/PostSummary"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "required": [
+                        "data"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/PostSummary"
+                          },
+                          "type": "array"
+                        },
+                        "next_cursor": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "data",
+                        "next_cursor"
+                      ],
+                      "type": "object"
                     }
-                  },
-                  "required": [
-                    "data"
-                  ],
-                  "type": "object"
+                  ]
                 }
               }
             },
@@ -7257,6 +7769,17 @@
             }
           },
           {
+            "in": "query",
+            "name": "view",
+            "required": false,
+            "schema": {
+              "enum": [
+                "summary"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "description": "Must equal 1 for cookie-authenticated mutations and bootstrap/login. Bearer requests do not require it.",
             "in": "header",
             "name": "X-Beweft-Request",
@@ -7286,10 +7809,20 @@
                 "schema": {
                   "properties": {
                     "data": {
-                      "items": {
-                        "$ref": "#/components/schemas/Publication"
-                      },
-                      "type": "array"
+                      "anyOf": [
+                        {
+                          "items": {
+                            "$ref": "#/components/schemas/Publication"
+                          },
+                          "type": "array"
+                        },
+                        {
+                          "items": {
+                            "$ref": "#/components/schemas/PublicationSummary"
+                          },
+                          "type": "array"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -7549,6 +8082,57 @@
               "format": "uuid",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 2048,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "id",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "group",
+            "required": false,
+            "schema": {
+              "enum": [
+                "queue",
+                "history"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "view",
+            "required": false,
+            "schema": {
+              "enum": [
+                "summary"
+              ],
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -7556,18 +8140,78 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "properties": {
-                    "data": {
-                      "items": {
-                        "$ref": "#/components/schemas/Publication"
+                  "anyOf": [
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/Publication"
+                          },
+                          "type": "array"
+                        }
                       },
-                      "type": "array"
+                      "required": [
+                        "data"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/Publication"
+                          },
+                          "type": "array"
+                        },
+                        "next_cursor": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "data",
+                        "next_cursor"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/PublicationSummary"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "required": [
+                        "data"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/PublicationSummary"
+                          },
+                          "type": "array"
+                        },
+                        "next_cursor": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "data",
+                        "next_cursor"
+                      ],
+                      "type": "object"
                     }
-                  },
-                  "required": [
-                    "data"
-                  ],
-                  "type": "object"
+                  ]
                 }
               }
             },
@@ -8924,6 +9568,140 @@
                         "$ref": "#/components/schemas/Publication"
                       },
                       "type": "array"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Scope, brand or origin denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Record not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Version, state or slot conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeds configured limit"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Typed request validation failed"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too many authentication attempts"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal failure"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/schedule-requests/{request_id}": {
+      "get": {
+        "operationId": "get__schedule-requests_request_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/ScheduleRequestResult"
                     }
                   },
                   "required": [

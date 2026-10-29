@@ -24,8 +24,19 @@ export const IdeaSchema = z.object({
   title: z.string(),
   text: z.string(),
   color: z.string(),
+  status: z.enum(["inbox", "in_progress", "ready", "archived"]),
+  group_id: id.nullable(),
+  tags: z.array(z.string()),
   created_at: z.string(),
   updated_at: z.string(),
+});
+export const IdeaGroupSchema = z.object({
+  id,
+  brand_id: id,
+  name: z.string(),
+  color: z.string(),
+  position: z.number(),
+  created_at: z.string(),
 });
 export const VariantSchema = z.object({
   channel_id: id,
@@ -49,6 +60,8 @@ export const PostSchema = z.object({
 export const MediaSchema = z.object({
   id,
   brand_id: id,
+  alt_text: z.string(),
+  metadata_version: z.number().int().positive(),
   name: z.string(),
   mime: z.string(),
   size: z.number(),
@@ -119,6 +132,7 @@ export const InboxSchema = z.object({
 export type Brand = z.infer<typeof BrandSchema>;
 export type Channel = z.infer<typeof ChannelSchema>;
 export type Idea = z.infer<typeof IdeaSchema>;
+export type IdeaGroup = z.infer<typeof IdeaGroupSchema>;
 export type Post = z.infer<typeof PostSchema>;
 export type Media = z.infer<typeof MediaSchema>;
 export type Publication = z.infer<typeof PublicationSchema>;
