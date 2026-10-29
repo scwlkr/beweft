@@ -1022,6 +1022,35 @@
         ],
         "type": "object"
       },
+      "MetaDeliveryStatus": {
+        "properties": {
+          "attempt_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "checkpoint_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/XUploadPhase"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "retry_allowed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "phase",
+          "attempt_id",
+          "checkpoint_id",
+          "retry_allowed",
+          "reason"
+        ],
+        "type": "object"
+      },
       "OkResponse": {
         "properties": {
           "ok": {
@@ -1486,6 +1515,26 @@
       },
       "ProviderStatus": {
         "properties": {
+          "linkedin_delivery": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MetaDeliveryStatus"
+              }
+            ]
+          },
+          "meta_delivery": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MetaDeliveryStatus"
+              }
+            ]
+          },
           "reason": {
             "type": [
               "string",
@@ -1513,7 +1562,9 @@
           "session_expired",
           "reset_allowed",
           "reason",
-          "x_upload"
+          "x_upload",
+          "meta_delivery",
+          "linkedin_delivery"
         ],
         "type": "object"
       },
@@ -1846,7 +1897,7 @@
             "type": "string"
           },
           "observed_attempt_id": {
-            "description": "Required for an X public-start checkpoint when resolving not published.",
+            "description": "Required for Meta delivery checkpoints and X public-start checkpoints when resolving not published.",
             "format": "uuid",
             "type": [
               "string",
@@ -1940,6 +1991,29 @@
         "required": [
           "previous_publication_id",
           "publication"
+        ],
+        "type": "object"
+      },
+      "ReplacementStatus": {
+        "properties": {
+          "original": {
+            "$ref": "#/components/schemas/PublicationSummary"
+          },
+          "replacement": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PublicationSummary",
+                "description": "Null means no linked replacement is currently visible; a request may still be running."
+              }
+            ]
+          }
+        },
+        "required": [
+          "original",
+          "replacement"
         ],
         "type": "object"
       },
@@ -12676,6 +12750,140 @@
               }
             },
             "description": "Local media inspection unavailable or timed out"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/publications/{id}/replacement-status": {
+      "get": {
+        "operationId": "get__publications_id_replacement-status",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/ReplacementStatus"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Scope, brand or origin denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Record not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Version, state or slot conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeds configured limit"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Typed request validation failed"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too many authentication attempts"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal failure"
           }
         },
         "security": [

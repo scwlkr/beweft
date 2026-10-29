@@ -176,6 +176,10 @@ pub fn router(state: AppState) -> Router {
             "/publications/{id}/reschedule",
             post(publications::reschedule),
         )
+        .route(
+            "/publications/{id}/replacement-status",
+            get(queue_actions::replacement_status),
+        )
         .route("/publications/{id}/replace", post(queue_actions::replace))
         .route(
             "/publications/{id}/prioritize",

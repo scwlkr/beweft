@@ -8,7 +8,7 @@ Run `pnpm install`, then `pnpm build`. The Rust server serves `web/dist` at its 
 
 `pnpm test:e2e` uses an existing development PostgreSQL container (default `beweft-dev-postgres`, port 55439), built `target/debug/beweft-server` and `beweft-worker`, and `web/dist`. The Python harness creates a unique database, random owner credentials and encryption key, and temporary media/output directories. It starts private server/worker processes on an ephemeral loopback port. Its finally block stops those processes, drops that database, and removes temporary media and test output. Environment overrides match the backend integration harness's `BEWEFT_TEST_DB_*` and `BEWEFT_TEST_POSTGRES_CONTAINER` names.
 
-Pass Playwright arguments to the harness to run a focused scenario, for example `pnpm --filter @beweft/web test:e2e tests/brand-recovery.spec.ts`.
+Pass Playwright arguments to the harness to run a focused scenario, for example `pnpm --filter @beweft/web test:e2e tests/brand-recovery.spec.ts`. To include the replacement worker-claim regression, run `BEWEFT_FIXTURE_DELAY_MS=30000 pnpm --filter @beweft/web test:e2e tests/replacement-recovery.spec.ts`; the delayed fixture uses no provider network.
 
 The Playwright tests use bundled Chromium and always close it in `finally`; it does not launch installed Chrome or use a normal profile. Direct invocation refuses to mutate a server without the isolated-test environment flags. The main scenario exercises login, brand/channel creation, posting rules, idea-to-draft-to-queue, publishing details, media upload, unavailable analytics, theme choice, and phone calendar/composer. It sends no live provider calls and no public posts. Provider OAuth/publishing and metered reads require separate isolated adapter qualification and authorized account testing.
 
@@ -18,16 +18,20 @@ Regression scenarios cover archived-brand recovery with overlapping brand-list r
 
 The brand and authentication follow-up passed `pnpm build` and all 55 isolated browser scenarios on 2026-10-29. After adding session guards to intent changes, 34 focused authentication, reply, and helper scenarios passed. A loopback HTTP/1 regression holds owner-response bodies while two reply dialogs and a third tab compete for the auth lock; it verifies completed logout and usable replacement checks. Further regressions hold intent locks through sign-out and preserve unknown outcomes. Fresh independent review remains required. Scheduling recovery is described below and remains subject to independent review. Provider connection and live inbox/publishing paths were not exercised against real accounts.
 
-## Scope still requiring subsequent slices
+## Workflow scope
 
 The following are explicit unfinished workflows, not external provider blockers:
 
 - Ideas can be organized by stage, group, and tags, filtered on the board, edited, and converted to a draft. Deleting a group retains its ideas as ungrouped.
-- Draft duplication is implemented. Reusable custom templates and a template library are not implemented.
-- Queued publications retain immutable revisions and can be canceled, reordered in queue mode, and rescheduled. Editing their content with an atomic revision replacement is not implemented; editing a source draft does not silently rewrite queued history.
+- Drafts can be duplicated, and reusable templates can be created from starters or saved drafts, edited, deleted, and applied with variables to create an unscheduled draft. Saved media, channel variants, and options are retained; choose an updated draft to replace template contents.
+- Queued publications retain immutable revisions. The owner can edit the source draft, compare it with the queued snapshot, and explicitly replace that snapshot at its existing time. The canceled original stays in history. Queue-slot priority moves only queue-mode records; exact-date posts keep their times. A replacement with an unconfirmed response blocks new schedules while the original can still publish or be requeued. An audit-linked matching replacement resolves it; a known rejection or a terminal original requires an explicit review before scheduling is unlocked. The review never starts another publication.
 - Manual handoff provides destination guidance, caption copying, per-file downloads, an optional published URL, and owner attestation. The owner publishes in the destination app and records the outcome here.
 - Supported channel variants have separate text and media, and provider options. Media library descriptions are saved per asset and frozen into new scheduled snapshots; older snapshots retain their existing descriptions.
 - YouTube exposes privacy, audience, synthetic-media disclosure, and category. It uses the post title as the public video title. License choice is not implemented.
+
+Brand settings support rename, archive, and restore. Archive pauses channels; restored channels stay paused. Owner security lists and revokes sessions, revokes other sessions, and changes the password with a return to sign-in.
+
+With the matching Meta and LinkedIn recovery contracts, the publication dialog reads the current attempt and checkpoint before a not-published attestation, requires confirmation that the sender stopped and the provider was inspected, and leaves retry as a separate action. Facebook Reel options appear only when the running channel catalog advertises Reel support; carousel selection follows ordered attachments. These controls do not establish live provider access.
 
 Direct provider setup, destination selection, reconnection/disconnection, metrics, inbox read/reply, and explicit metered-X sync controls are implemented in the web client against the provider slice contract. This is not a claim that any live provider account or publication has been verified.
 

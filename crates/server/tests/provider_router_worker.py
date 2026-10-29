@@ -76,6 +76,22 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     x_video_wait = 2
     x_video_fail = ""
     x_tweet_fail = False
+    linkedin_mode = "success"
+    linkedin_posts = []
+    linkedin_poll_count = 0
+    linkedin_upload_started = threading.Event()
+    linkedin_upload_release = threading.Event()
+    linkedin_upload_returned = threading.Event()
+    reel_mode = "success"
+    reel_started = threading.Event()
+    reel_release = threading.Event()
+    reel_returned = threading.Event()
+    meta_next = 8000
+    meta_bodies = []
+    bsky_mode = "normal"
+    bsky_polls = 0
+    bsky_record = None
+    bsky_uri = None
 
     def log_message(self, *_):
         pass
@@ -100,6 +116,50 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
         self.record("GET " + path)
+        if path == "/v2/userinfo":
+            return self.respond({"sub":"linkedin-member", "name":"Fixture LinkedIn"})
+        if path.startswith("/rest/images/") or path.startswith("/rest/videos/"):
+            assert self.headers.get("Authorization") == "Bearer linkedin-fixture"
+            type(self).linkedin_poll_count += 1
+            status = "PROCESSING_FAILED" if self.linkedin_mode == "processing_failed" else "PROCESSING" if self.linkedin_poll_count == 1 else "AVAILABLE"
+            kind = "image" if path.startswith("/rest/images/") else "video"
+            if kind == "image":
+                assert self.headers.get("Linkedin-Version") is None
+            else:
+                assert self.headers.get("Linkedin-Version") == "202610"
+            return self.respond({"id":f"urn:li:{kind}:fixture", "owner":"urn:li:person:linkedin-member", "status":status})
+        if path == "/xrpc/app.bsky.notification.listNotifications":
+            assert self.headers.get("Authorization") == "Bearer bluesky-access-fixture"
+            assert self.headers.get("atproto-proxy") == "did:web:api.bsky.app#bsky_appview"
+            assert urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query) == {"limit":["50"]}
+            notification = {"uri":"at://did:plc:other/app.bsky.feed.post/fixture", "reason":"mention",
+                            "author":{"handle":"other.bsky.social"}, "record":{"text":"Hello"}}
+            return self.respond({"notifications":[notification, notification, {"uri":"at://ignored", "reason":"follow"}]})
+        if path == "/xrpc/com.atproto.server.getSession":
+            assert self.headers.get("Authorization") == "Bearer bluesky-access-fixture"
+            return self.respond({"did":"did:plc:fixture", "emailConfirmed":True,
+                                 "didDoc":{"id":"did:plc:fixture", "service":[{"id":"#atproto_pds", "serviceEndpoint":"https://pds.fixture"}]}})
+        if path == "/xrpc/com.atproto.server.getServiceAuth":
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            assert query["aud"] == ["did:web:pds.fixture"] and query["lxm"] == ["com.atproto.repo.uploadBlob"]
+            assert self.headers.get("Authorization") == "Bearer bluesky-access-fixture"
+            return self.respond({"token":"video-service-fixture"})
+        if path == "/xrpc/app.bsky.video.getJobStatus":
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            assert query == {"jobId":["fixture-job"]}
+            if self.bsky_mode == "status_error":
+                return self.respond({}, 503)
+            type(self).bsky_polls += 1
+            status = {"jobId":"fixture-job", "did":"did:plc:fixture", "state":"JOB_STATE_ENCODING"}
+            if self.bsky_mode == "failed":
+                status.update(state="JOB_STATE_FAILED", failureCode="encoding_failure")
+            elif self.bsky_polls > 1:
+                status.update(state="JOB_STATE_COMPLETED", blob={"$type":"blob", "ref":{"$link":"video-fixture"}, "mimeType":"video/mp4", "size":1024})
+            return self.respond({"jobStatus":status})
+        if path == "/xrpc/com.atproto.repo.getRecord":
+            if self.bsky_record is None:
+                return self.respond({}, 404)
+            return self.respond({"uri":self.bsky_uri, "cid":"fixture-cid", "value":self.bsky_record})
         if path == "/2/media/upload":
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             assert query == {"command":["STATUS"], "media_id":["123456789"]}, query
@@ -108,6 +168,18 @@ class Fixture(http.server.BaseHTTPRequestHandler):
                 polls = len(self.x_video_poll_times)
             status = "failed" if self.x_video_status == "failed" else "in_progress" if polls == 1 else "succeeded"
             return self.respond({"data":{"id":"123456789", "processing_info":{"state":status,"check_after_secs":self.x_video_wait}}})
+        if path == "/access_token":
+            return self.respond({"access_token":"instagram-fixture", "expires_in":7200,
+                                 "scope":"instagram_business_basic instagram_business_content_publish"})
+        if path == "/v23.0/me":
+            return self.respond({"user_id":"ig-destination", "name":"Fixture Instagram", "username":"fixture"})
+        if path == "/v23.0/12345":
+            if self.reel_mode == "status_403":
+                return self.respond({}, 403)
+            phase = "in_progress" if self.reel_mode == "pending" else "not_started" if self.reel_mode in ("uncertain", "blocked") else "error" if self.reel_mode == "ended" else "complete"
+            return self.respond({"id":"12345", "status":{"video_status":"ready" if phase == "complete" else "processing", "uploading_phase":{"status":"complete"}, "processing_phase":{"status":"complete"}, "publishing_phase":{"status":phase,"publish_status":"published"}}})
+        if path.startswith("/v23.0/") and path.rsplit("/", 1)[-1].isdigit():
+            return self.respond({"status_code":"FINISHED"})
         if path == "/v23.0/oauth/access_token":
             return self.respond({"access_token":"facebook-long-fixture", "expires_in":7200,
                                  "scope":"pages_manage_posts pages_read_engagement pages_manage_engagement"})
@@ -130,6 +202,65 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         self.record("POST " + path)
+        if path == "/oauth/v2/accessToken":
+            return self.respond({"access_token":"linkedin-fixture", "expires_in":7200, "scope":"openid profile w_member_social"})
+        if path in ("/rest/images", "/rest/videos"):
+            action = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("action")
+            value = json.loads(body)
+            assert self.headers.get("Linkedin-Version") == "202610"
+            if action == ["initializeUpload"]:
+                assert value["initializeUploadRequest"]["owner"] == "urn:li:person:linkedin-member"
+                expiry = int((time.time()+(-60 if self.linkedin_mode == "expired_upload" else 3600))*1000)
+                if path == "/rest/images":
+                    return self.respond({"value":{"image":"urn:li:image:fixture", "uploadUrl":"https://www.linkedin.com/dms-uploads/image", "uploadUrlExpiresAt":expiry}})
+                size = value["initializeUploadRequest"]["fileSizeBytes"]
+                return self.respond({"value":{"video":"urn:li:video:fixture", "uploadUrlsExpireAt":expiry, "uploadToken":"", "uploadInstructions":[{"firstByte":0,"lastByte":size-1,"uploadUrl":"https://www.linkedin.com/dms-uploads/video"}]}})
+            assert action == ["finalizeUpload"] and value["finalizeUploadRequest"]["uploadedPartIds"] == ["fixture-part"]
+            return self.respond({})
+        if path == "/rest/posts":
+            value = json.loads(body)
+            with self.lock:
+                self.linkedin_posts.append(value)
+            if self.linkedin_mode == "lost_post":
+                return self.respond({}, 502)
+            return self.respond({}, 201, {"x-restli-id":"urn:li:share:12345"})
+        if path == "/oauth/access_token":
+            return self.respond({"access_token":"instagram-short-fixture", "expires_in":7200})
+        if path == "/v23.0/me/video_reels":
+            value = {k:v[0] for k,v in urllib.parse.parse_qs(body.decode(), keep_blank_values=True).items()}
+            if value["upload_phase"] == "start":
+                return self.respond({"video_id":"12345","upload_url":"https://rupload.facebook.com/video-upload/v23.0/12345"})
+            assert value["upload_phase"] == "finish" and value["video_state"] == "PUBLISHED" and value["video_id"] == "12345"
+            self.record("reel_finish")
+            if self.reel_mode == "uncertain":
+                return self.respond({}, 502)
+            if self.reel_mode == "blocked":
+                self.reel_started.set()
+                self.reel_release.wait(20)
+                self.respond({"success":True})
+                self.reel_returned.set()
+                return
+            return self.respond({"success":True})
+        if path == "/video-upload/v23.0/12345":
+            assert self.headers.get("Authorization") == "OAuth page-fixture"
+            assert self.headers.get("offset") == "0" and int(self.headers["file_size"]) == len(body)
+            return self.respond({"success":True})
+        if path == "/v23.0/ig-destination/media":
+            value = {k:v[0] for k,v in urllib.parse.parse_qs(body.decode(), keep_blank_values=True).items()}
+            if "is_carousel_item" in value:
+                value["is_carousel_item"] = value["is_carousel_item"] == "true"
+            if value.get("is_carousel_item"):
+                url = value.get("image_url", value.get("video_url")).replace("https://media.fixture", self.app_origin, 1)
+                with urllib.request.urlopen(url, timeout=5) as response:
+                    fetched = response.read()
+                assert fetched
+            with self.lock:
+                self.meta_bodies.append(value)
+                type(self).meta_next += 1
+                created = str(self.meta_next)
+            return self.respond({"id":created})
+        if path == "/v23.0/ig-destination/media_publish":
+            return self.respond({"id":"ig-published"})
         if path == "/v23.0/oauth/access_token":
             return self.respond({"access_token":"facebook-short-fixture", "expires_in":7200})
         if path == "/token":
@@ -149,6 +280,24 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         if path == "/xrpc/com.atproto.server.createSession":
             return self.respond({"did":"did:plc:fixture", "handle":"fixture.bsky.social",
                                  "accessJwt":"bluesky-access-fixture", "refreshJwt":"bluesky-refresh-fixture"})
+        if path == "/xrpc/app.bsky.video.uploadVideo":
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            assert query == {"did":["did:plc:fixture"], "name":["video.mp4"]}
+            assert self.headers.get("Authorization") == "Bearer video-service-fixture"
+            assert self.headers.get("Content-Type") == "video/mp4" and len(body) > 0
+            if self.bsky_mode == "lost_upload":
+                return self.respond({}, 502)
+            if self.bsky_mode == "quota":
+                return self.respond({"error":"RateLimitExceeded"}, 429)
+            return self.respond({"jobStatus":{"jobId":"fixture-job", "did":"did:plc:fixture", "state":"JOB_STATE_CREATED"}})
+        if path == "/xrpc/com.atproto.repo.createRecord":
+            value = json.loads(body)
+            assert value["repo"] == "did:plc:fixture" and value["collection"] == "app.bsky.feed.post"
+            type(self).bsky_record = value["record"]
+            type(self).bsky_uri = f"at://did:plc:fixture/app.bsky.feed.post/{value['rkey']}"
+            if self.bsky_mode == "lost_post":
+                return self.respond({}, 502)
+            return self.respond({"uri":self.bsky_uri, "cid":"fixture-cid"})
         if path == "/2/tweets":
             if self.headers.get("Authorization") == "Bearer x-refresh-fixture":
                 self.record("x_rotated_authorization")
@@ -230,8 +379,18 @@ class Fixture(http.server.BaseHTTPRequestHandler):
 
     def do_PUT(self):
         path = urllib.parse.urlsplit(self.path).path
-        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         self.record("PUT " + path)
+        if path.startswith("/dms-uploads/"):
+            assert body
+            if self.linkedin_mode == "block_upload":
+                self.linkedin_upload_started.set()
+                self.linkedin_upload_release.wait(20)
+            if self.linkedin_mode == "lost_upload":
+                return self.respond({}, 502)
+            self.respond({}, 200, {"ETag":"\"fixture-part\""})
+            self.linkedin_upload_returned.set()
+            return
         if path == "/upload/youtube/v3/videos/session-fixture":
             return self.respond({}, 404)
         return self.respond({}, 404)
@@ -403,9 +562,11 @@ def run():
             brand = request("/brands", {"name":"Router fixture"})["id"]
             other_brand = request("/brands", {"name":"Other fixture"})["id"]
             request("/provider-apps/facebook", {"client_id":"facebook-client", "client_secret":"fixture-secret"}, "PUT")
+            request("/provider-apps/instagram", {"client_id":"instagram-client", "client_secret":"fixture-secret"}, "PUT")
             request("/provider-apps/x", {"client_id":"x-client", "client_secret":"fixture-secret"}, "PUT")
             request("/provider-apps/youtube", {"client_id":"youtube-client", "client_secret":"fixture-secret"}, "PUT")
-            request("/provider-apps/bluesky", {"client_id":""}, "PUT")
+            request("/provider-apps/bluesky", {"client_id":"", "instance_url":"https://pds.fixture"}, "PUT")
+            request("/provider-apps/linkedin", {"client_id":"linkedin-client", "client_secret":"fixture-secret"}, "PUT")
             apps = request("/provider-apps")
             assert all("client_secret" not in item and "revocation_id" in item for item in apps)
             assert next(item for item in request("/providers") if item["id"] == "facebook")["configuration"] == "configured"
@@ -424,9 +585,18 @@ def run():
             assert sql("SELECT (SELECT count(*) FROM connection_flows)||':'||(SELECT count(*) FROM channels)||':'||(SELECT count(*) FROM provider_oauth_fences)") == before_rows
             assert sql(fence_snapshot) == before_fences, "invalid reconnect IDs must not advance provider fences"
             fb = connect("facebook", brand)
+            ig = connect("instagram", brand)
+            sql(f"UPDATE channels SET capabilities=capabilities #- '{{permissions,actions,reel}}' WHERE id='{fb['id']}'")
+            fb_cap = next(c for c in request(f"/channels?brand_id={brand}") if c["id"] == fb["id"])["capabilities"]
+            assert "reel" in fb_cap["formats"] and fb_cap["permissions"]["actions"]["reel"]["status"] == "granted"
+            assert "carousel" in ig["capabilities"]["formats"]
+            sql(f"UPDATE channels SET capabilities=jsonb_set(capabilities,'{{formats}}','[\"image\",\"video\"]'::jsonb) WHERE id='{ig['id']}'")
+            assert "carousel" in next(c for c in request(f"/channels?brand_id={brand}") if c["id"] == ig["id"])["capabilities"]["formats"]
             sibling = connect("facebook", other_brand)
             x = connect("x", brand)
             youtube = connect("youtube", brand)
+            linkedin = connect("linkedin", brand)
+            assert linkedin["capabilities"]["permissions"]["actions"]["media"]["status"] == "granted"
             # Omitted/null values remain new connections; a valid ID continues
             # the exact matching destination for both OAuth and Bluesky.
             for reconnect in ("omitted", None, x["id"]):
@@ -441,6 +611,18 @@ def run():
             assert request("/connections/bluesky", {**bsky_body,"reconnect_channel_id":bsky["id"]})["id"] == bsky["id"]
             assert request("/connections/bluesky", {**bsky_body,"brand_id":other_brand})["id"] != bsky["id"]
             assert Fixture.counts.get("POST /xrpc/com.atproto.server.createSession") == 3
+            # A pre-upgrade connection keeps its grant data while exposing the
+            # formats of the installed adapter without another login.
+            sql(f"UPDATE channels SET capabilities=jsonb_set(capabilities||jsonb_build_object('fixture_marker','preserved'), '{{formats}}', '[\"text\",\"image\"]'::jsonb) WHERE id='{bsky['id']}'")
+            installed_bsky = next(row for row in request(f"/channels?brand_id={brand}") if row["id"] == bsky["id"])
+            assert installed_bsky["capabilities"]["formats"] == ["text", "image", "video"]
+            assert installed_bsky["capabilities"]["fixture_marker"] == "preserved"
+            assert installed_bsky["capabilities"]["permissions"]["actions"]["media"]["status"] == "unknown"
+            assert sql(f"SELECT capabilities->'formats' FROM channels WHERE id='{bsky['id']}'") == '["text", "image"]'
+            assert request(f"/channels/{bsky['id']}/sync", {})["inbox_items"] == 1
+            assert request(f"/channels/{bsky['id']}/sync", {})["inbox_items"] == 1
+            assert sql(f"SELECT count(*) FROM provider_inbox WHERE channel_id='{bsky['id']}'") == "1"
+            assert installed_bsky["capabilities"]["reply"] is False
             assert fb["connection_status"] == "connected" and fb["manual_guidance"] is None
             assert fb["capabilities"]["verification"] == "identity_verified_publishing_unverified"
             assert fb["capabilities"]["permissions"]["actions"]["publish"]["status"] == "granted"
@@ -559,7 +741,7 @@ def run():
             intent = {"version":1,"channel_ids":[x["id"]],"scheduled_at":when,"request_id":str(uuid.uuid4())}
             accepted = request(f"/posts/{valid['id']}/schedule?view=summary", intent)[0]
             # Replay remains authoritative after the installed capability has
-            # changed, even though a new LinkedIn media intent would fail.
+            # changed, even though a new provider intent could be validated differently.
             sql(f"UPDATE channels SET provider='linkedin' WHERE id='{x['id']}'")
             assert request(f"/posts/{valid['id']}/schedule?view=summary", intent)[0]["id"] == accepted["id"]
             receipt = request(f"/schedule-requests/{intent['request_id']}")
@@ -604,6 +786,92 @@ def run():
             assert Fixture.counts.get("x_rotated_authorization", 0) == 1
             attempt = request(f"/publications/{x_post['id']}/attempts")[0]
             assert attempt["state"] == "published" and attempt["receipt"]["verification"] == "unverified_live"
+
+            # LinkedIn member text, image and video exercise real routing,
+            # frozen descriptions, processing and durable post receipts.
+            text_post = schedule(brand, linkedin["id"], "LinkedIn text")
+            wait_for(lambda: state_is(text_post["id"], "published"), "LinkedIn text")
+            Fixture.linkedin_poll_count = 0
+            request(f"/media/{asset['id']}", {"alt_text":"Blue fixture", "metadata_version":1}, "PATCH")
+            image_post = schedule(brand, linkedin["id"], "LinkedIn image", [asset["id"]])
+            asset = request(f"/media/{asset['id']}", {"alt_text":"Changed later", "metadata_version":2}, "PATCH")
+            wait_for(lambda: state_is(image_post["id"], "published"), "LinkedIn image", seconds=40)
+            assert Fixture.linkedin_posts[-1]["content"]["media"]["altText"] == "Blue fixture"
+            Fixture.linkedin_poll_count = 0
+            video_post_li = schedule(brand, linkedin["id"], "LinkedIn video", [video_asset["id"]], title="Fixture title")
+            wait_for(lambda: state_is(video_post_li["id"], "published"), "LinkedIn video", seconds=40)
+            assert Fixture.linkedin_posts[-1]["content"]["media"]["id"] == "urn:li:video:fixture"
+            before_li_posts = Fixture.counts.get("POST /rest/posts", 0)
+            Fixture.linkedin_mode = "processing_failed"
+            broken_li = schedule(brand, linkedin["id"], "Rejected image", [asset["id"]])
+            wait_for(lambda: state_is(broken_li["id"], "failed"), "LinkedIn processing rejection", seconds=30)
+            assert Fixture.counts.get("POST /rest/posts", 0) == before_li_posts
+            Fixture.linkedin_mode = "lost_post"
+            unknown_li = schedule(brand, linkedin["id"], "LinkedIn lost response")
+            wait_for(lambda: state_is(unknown_li["id"], "uncertain"), "LinkedIn lost post")
+            assert Fixture.counts.get("POST /rest/posts", 0) == before_li_posts + 1
+            time.sleep(3)
+            assert Fixture.counts.get("POST /rest/posts", 0) == before_li_posts + 1
+            observed_li = request(f"/publications/{unknown_li['id']}/provider-status")["linkedin_delivery"]
+            assert observed_li["phase"] == "post_started" and not observed_li["retry_allowed"]
+            attestation = {"resolution":"not_published", "note":"Fixture inspected", "sender_stopped":True,
+                           "provider_inspected":True, "observed_attempt_id":observed_li["attempt_id"],
+                           "observed_checkpoint_id":observed_li["checkpoint_id"]}
+            request(f"/publications/{unknown_li['id']}/reconcile", {"resolution":"not_published", "note":"Fixture"}, expected=409)
+            request(f"/publications/{unknown_li['id']}/reconcile", {**attestation,"observed_checkpoint_id":str(uuid.uuid4())}, expected=409)
+            request(f"/publications/{unknown_li['id']}/reconcile", attestation, token=token, expected=403)
+            request(f"/publications/{unknown_li['id']}/reconcile", attestation)
+            assert request(f"/publications/{unknown_li['id']}/provider-status")["linkedin_delivery"]["retry_allowed"]
+            assert Fixture.counts.get("POST /rest/posts", 0) == before_li_posts + 1
+            Fixture.linkedin_mode = "success"
+            request(f"/publications/{unknown_li['id']}/retry", {})
+            wait_for(lambda: state_is(unknown_li["id"], "published"), "LinkedIn explicit attested retry")
+            assert Fixture.counts.get("POST /rest/posts", 0) == before_li_posts + 2
+            assert sql(f"SELECT count(*) FROM audit_events WHERE subject_id='{unknown_li['id']}' AND action='retry_linkedin_delivery'") == "1"
+
+            # Expired upload URLs never receive bytes, even though the worker's
+            # host wall clock is deliberately behind the database clock.
+            Fixture.linkedin_mode = "expired_upload"
+            before_upload = Fixture.counts.get("PUT /dms-uploads/image", 0)
+            expired_li = schedule(brand, linkedin["id"], "Expired LinkedIn upload", [asset["id"]])
+            wait_for(lambda: state_is(expired_li["id"], "uncertain"), "LinkedIn expired upload")
+            assert Fixture.counts.get("PUT /dms-uploads/image", 0) == before_upload
+            assert request(f"/publications/{expired_li['id']}/provider-status")["linkedin_delivery"]["phase"] == "upload"
+
+            # A lost private upload is quarantined and can be restarted only
+            # after a current owner observation and a separate explicit retry.
+            Fixture.linkedin_mode = "lost_upload"
+            lost_li = schedule(brand, linkedin["id"], "LinkedIn lost upload", [asset["id"]])
+            wait_for(lambda: state_is(lost_li["id"], "uncertain"), "LinkedIn lost upload", seconds=30)
+            upload_status = request(f"/publications/{lost_li['id']}/provider-status")["linkedin_delivery"]
+            assert upload_status["phase"] == "upload" and not upload_status["retry_allowed"]
+            request(f"/publications/{lost_li['id']}/reconcile", {"resolution":"not_published", "note":"Fixture inspected", "sender_stopped":True,
+                    "provider_inspected":True, "observed_attempt_id":upload_status["attempt_id"], "observed_checkpoint_id":upload_status["checkpoint_id"]})
+            Fixture.linkedin_mode = "success"
+            Fixture.linkedin_poll_count = 0
+            request(f"/publications/{lost_li['id']}/retry", {})
+            wait_for(lambda: state_is(lost_li["id"], "published"), "LinkedIn upload restart", seconds=40)
+
+            # The same attempt/lease fence prevents a stale LinkedIn upload
+            # response from advancing into a public call.
+            before_li_stale = Fixture.counts.get("POST /rest/posts", 0)
+            stale_li = schedule(brand, linkedin["id"], "Stale LinkedIn upload", [asset["id"]], delay=60)
+            sql("CREATE FUNCTION fixture_linkedin_short_lease() RETURNS trigger LANGUAGE plpgsql AS $$ "
+                f"BEGIN IF NEW.publication_id='{stale_li['id']}' THEN UPDATE publications SET lease_until=clock_timestamp()+interval '4 seconds' WHERE id=NEW.publication_id; END IF; "
+                "RETURN NEW; END $$; CREATE TRIGGER fixture_linkedin_short_lease BEFORE INSERT ON publication_attempts "
+                "FOR EACH ROW EXECUTE FUNCTION fixture_linkedin_short_lease();")
+            Fixture.linkedin_upload_started.clear(); Fixture.linkedin_upload_returned.clear(); Fixture.linkedin_upload_release.clear()
+            Fixture.linkedin_mode = "block_upload"
+            sql(f"UPDATE publications SET scheduled_at=clock_timestamp() WHERE id='{stale_li['id']}'")
+            assert Fixture.linkedin_upload_started.wait(20), "LinkedIn upload did not start"
+            worker.send_signal(signal.SIGSTOP); Fixture.linkedin_upload_release.set()
+            assert Fixture.linkedin_upload_returned.wait(5), "LinkedIn upload response did not return"
+            time.sleep(5); worker.send_signal(signal.SIGCONT)
+            wait_for(lambda: state_is(stale_li["id"], "uncertain"), "LinkedIn stale upload quarantine")
+            assert Fixture.counts.get("POST /rest/posts", 0) == before_li_stale
+            assert request(f"/publications/{stale_li['id']}/provider-status")["linkedin_delivery"]["phase"] == "upload"
+            Fixture.linkedin_mode = "success"
+            sql("DROP TRIGGER fixture_linkedin_short_lease ON publication_attempts; DROP FUNCTION fixture_linkedin_short_lease();")
 
             # Expired and sub-second leases cannot start even the refresh call.
             # The short lease is set by PostgreSQL during claim, so this test
@@ -719,6 +987,131 @@ def run():
             Fixture.x_exchange_scope = "tweet.read tweet.write users.read offline.access media.write"
             Fixture.x_refresh_scope = Fixture.x_exchange_scope
 
+            # The selected variants use a complete flat media-version union.
+            # A later library edit must not alter the frozen video description.
+            bsky_asset = upload(brand, video.read_bytes(), "bsky-fixture.mp4", "video/mp4")
+            described = request(f"/media/{bsky_asset['id']}", {"alt_text":"Original Bluesky video description", "metadata_version":1}, "PATCH")
+            post = request("/posts", {"brand_id":brand, "text":"Bluesky video snapshot", "media_ids":[asset["id"]],
+                           "variants":[{"channel_id":bsky["id"], "media_ids":[bsky_asset["id"]]}]})
+            request_id = str(uuid.uuid4())
+            intent = {"version":1, "channel_ids":[manual, bsky["id"]], "request_id":request_id,
+                      "scheduled_at":(dt.datetime.now(dt.timezone.utc)+dt.timedelta(seconds=60)).isoformat(timespec="microseconds"),
+                      "media_versions":{asset["id"]:asset["metadata_version"], bsky_asset["id"]:described["metadata_version"]}}
+            rows = request(f"/posts/{post['id']}/schedule", intent)
+            assert request(f"/schedule-requests/{request_id}")["request"]["media_versions"] == intent["media_versions"]
+            bsky_video = next(row for row in rows if row["channel_id"] == bsky["id"])
+            request(f"/media/{bsky_asset['id']}", {"alt_text":"Later library edit", "metadata_version":described["metadata_version"]}, "PATCH")
+            Fixture.bsky_mode = "lost_post"
+            Fixture.bsky_polls = 0
+            before_upload = Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0)
+            before_post = Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0)
+            sql(f"UPDATE publications SET scheduled_at=clock_timestamp() WHERE id='{bsky_video['id']}'")
+            wait_for(lambda: sql(f"SELECT EXISTS(SELECT 1 FROM publications p JOIN provider_delivery_checkpoints cp ON cp.publication_id=p.id WHERE p.id='{bsky_video['id']}' AND p.state='queued' AND cp.not_before>clock_timestamp())") == "t", "durable Bluesky processing delay")
+            worker.send_signal(signal.SIGTERM)
+            worker.wait(timeout=10)
+            worker = subprocess.Popen(loopback_only([TARGET / "debug/beweft-worker"]), cwd=ROOT, env=worker_env,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            processes.append(worker)
+            published_bsky = wait_for(lambda: state_is(bsky_video["id"], "published"), "Bluesky video after worker restart", seconds=35)
+            assert published_bsky["external_id"] == Fixture.bsky_uri
+            assert Fixture.bsky_record["embed"]["alt"] == "Original Bluesky video description"
+            assert Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0) == before_upload + 1
+            assert Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0) == before_post + 1
+            assert Fixture.counts.get("GET /xrpc/com.atproto.repo.getRecord", 0) >= 1
+
+            # An interrupted status read can be reconciled with the saved job,
+            # without another upload or public write during the recovery probe.
+            Fixture.bsky_mode = "status_error"
+            Fixture.bsky_polls = 0
+            before_upload = Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0)
+            recovery = schedule(brand, bsky["id"], "Resume saved video job", [bsky_asset["id"]])
+            wait_for(lambda: state_is(recovery["id"], "uncertain"), "Bluesky status failure", seconds=25)
+            before_post = Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0)
+            Fixture.bsky_mode = "normal"
+            assert request(f"/publications/{recovery['id']}/provider-reconcile", {})["state"] == "queued"
+            assert Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0) == before_post
+            wait_for(lambda: state_is(recovery["id"], "published"), "resumed Bluesky job", seconds=25)
+            assert Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0) == before_upload + 1
+            assert Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0) == before_post + 1
+
+            # Database time bounds automatic polling; an explicit probe may
+            # resume this same saved job after the local window ends.
+            Fixture.bsky_polls = 0
+            bounded = schedule(brand, bsky["id"], "Bounded Bluesky processing", [bsky_asset["id"]])
+            wait_for(lambda: sql(f"SELECT EXISTS(SELECT 1 FROM publications p JOIN provider_delivery_checkpoints cp ON cp.publication_id=p.id WHERE p.id='{bounded['id']}' AND p.state='queued' AND cp.not_before>clock_timestamp())") == "t", "Bluesky processing deadline")
+            before_poll = Fixture.counts.get("GET /xrpc/app.bsky.video.getJobStatus", 0)
+            before_upload = Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0)
+            sql(f"UPDATE provider_delivery_checkpoints SET expires_at=clock_timestamp()-interval '1 second' WHERE publication_id='{bounded['id']}'")
+            wait_for(lambda: state_is(bounded["id"], "uncertain"), "bounded Bluesky processing", seconds=15)
+            assert Fixture.counts.get("GET /xrpc/app.bsky.video.getJobStatus", 0) == before_poll
+            status = request(f"/publications/{bounded['id']}/provider-status")
+            assert status["session_expired"] and "Bluesky" in status["reason"] and not status["reset_allowed"]
+            assert request(f"/publications/{bounded['id']}/provider-reconcile", {})["state"] == "queued"
+            wait_for(lambda: state_is(bounded["id"], "published"), "Bluesky job after explicit probe", seconds=25)
+            assert Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0) == before_upload
+
+            # A definite quota rejection ends the attempt as failed. Clearing
+            # quota alone does nothing; an explicit retry resumes the same
+            # publication and performs one successful upload and one post.
+            Fixture.bsky_mode = "quota"
+            Fixture.bsky_polls = 0
+            before_upload = Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0)
+            before_post = Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0)
+            limited = schedule(brand, bsky["id"], "Explicit Bluesky quota retry", [bsky_asset["id"]])
+            limited_failed = wait_for(lambda: state_is(limited["id"], "failed"), "definite Bluesky quota rejection")
+            assert "limit reached" in limited_failed["last_error"]
+            original_attempt = sql(f"SELECT attempt_id FROM provider_delivery_checkpoints WHERE publication_id='{limited['id']}'")
+            assert sql(f"SELECT state||':'||(receipt->>'verification') FROM publication_attempts WHERE id='{original_attempt}'") == "failed:rejected"
+            assert Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0) == before_upload + 1
+            assert Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0) == before_post
+            Fixture.bsky_mode = "normal"
+            time.sleep(3)
+            assert publication(limited["id"])["state"] == "failed"
+            assert Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0) == before_upload + 1
+            request(f"/publications/{limited['id']}/retry", {})
+            wait_for(lambda: state_is(limited["id"], "published"), "explicit Bluesky quota retry", seconds=30)
+            assert Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0) == before_upload + 2
+            assert Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0) == before_post + 1
+            assert Fixture.bsky_record["text"] == "Explicit Bluesky quota retry"
+            assert Fixture.bsky_record["embed"]["alt"] == "Later library edit"
+
+            # A checkpoint whose sender did not durably finish rejected must
+            # not be converted to a fresh upload, even if a stale queued claim
+            # is constructed. No newer attempt can manufacture that evidence.
+            Fixture.bsky_mode = "quota"
+            stale = schedule(brand, bsky["id"], "Stale quota checkpoint", [bsky_asset["id"]])
+            wait_for(lambda: state_is(stale["id"], "failed"), "stale quota setup")
+            stale_attempt = sql(f"SELECT attempt_id FROM provider_delivery_checkpoints WHERE publication_id='{stale['id']}'")
+            sql(f"UPDATE publication_attempts SET state='uncertain' WHERE id='{stale_attempt}'")
+            before_upload = Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0)
+            before_post = Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0)
+            request(f"/publications/{stale['id']}/retry", {}, expected=409)
+            sql(f"UPDATE publications SET state='queued',scheduled_at=clock_timestamp() WHERE id='{stale['id']}'")
+            wait_for(lambda: state_is(stale["id"], "uncertain"), "stale quota attempt quarantine")
+            assert Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0) == before_upload
+            assert Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0) == before_post
+
+            # A lost upload has no queryable job ID. Even an owner resolution
+            # and retry cannot cause an automatic second upload or public post.
+            Fixture.bsky_mode = "lost_upload"
+            before_upload = Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0)
+            before_post = Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0)
+            lost = schedule(brand, bsky["id"], "Lost Bluesky upload", [bsky_asset["id"]])
+            wait_for(lambda: state_is(lost["id"], "uncertain"), "lost Bluesky upload")
+            assert request(f"/publications/{lost['id']}/provider-reconcile", {})["state"] == "uncertain"
+            request(f"/publications/{lost['id']}/reconcile", {"resolution":"not_published", "note":"Fixture inspected"})
+            request(f"/publications/{lost['id']}/retry", {})
+            wait_for(lambda: state_is(lost["id"], "uncertain"), "unresolved Bluesky retry")
+            assert Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0) == before_upload + 1
+            assert Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0) == before_post
+
+            Fixture.bsky_mode = "failed"
+            Fixture.bsky_polls = 0
+            failed = schedule(brand, bsky["id"], "Bluesky encoding failure", [bsky_asset["id"]])
+            wait_for(lambda: state_is(failed["id"], "failed"), "Bluesky processing failure", seconds=25)
+            assert Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0) == before_post
+            Fixture.bsky_mode = "normal"
+
             # A video larger than one bounded claim crosses durable attempts;
             # processing delay survives the claim boundary and the originally
             # scheduled time remains unchanged. All X calls are loopback-only.
@@ -798,6 +1191,127 @@ def run():
             Fixture.x_tweet_fail = False
             request(f"/publications/{unknown_post['id']}/retry", {})
             wait_for(lambda: state_is(unknown_post["id"], "published"), "attested X retry")
+
+            # Real router scheduling inspects every flat carousel attachment;
+            # the provider receives ordered child IDs and fetches both capabilities.
+            bad_carousel = request("/posts", {"brand_id":brand,"text":"invalid second item","media_ids":[asset["id"],corrupt["id"]]})
+            rejected_schedule(bad_carousel, [ig["id"]])
+            second = upload(brand, image_bytes, "second.jpg")
+            start_children = len(Fixture.meta_bodies)
+            carousel = schedule(brand, ig["id"], "Carousel fixture", [asset["id"],second["id"]])
+            wait_for(lambda: state_is(carousel["id"], "published"), "Instagram carousel", seconds=35)
+            created = Fixture.meta_bodies[start_children:]
+            assert len(created) == 3 and all(x["is_carousel_item"] for x in created[:2])
+            assert created[2]["media_type"] == "CAROUSEL" and created[2]["children"] == "8001,8002"
+            assert request(f"/publications/{carousel['id']}/attempts")[0]["receipt"]["provider_receipt"]["id"] == "ig-published"
+
+            # Facebook's accepted finish is not a receipt until status confirms publication.
+            reel_file = Path(temp) / "reel.mp4"
+            subprocess.run(["ffmpeg","-nostdin","-v","error","-f","lavfi","-i","color=c=blue:s=540x960:r=24",
+                            "-t","4","-c:v","libx264","-preset","ultrafast","-pix_fmt","yuv420p","-movflags","+faststart",str(reel_file)], check=True)
+            reel_brand = request("/brands", {"name":"Reel recovery fixture"})["id"]
+            reel_fb = connect("facebook", reel_brand)
+            reel_asset = upload(reel_brand, reel_file.read_bytes(), "reel.mp4", "video/mp4")
+            # An accepted public finish remains uncertain while remote processing
+            # continues; it cannot become an ordinary cancelable queue entry.
+            Fixture.reel_mode = "pending"
+            before_pending = Fixture.counts.get("reel_finish", 0)
+            pending_reel = schedule(reel_brand, reel_fb["id"], "Accepted and processing", [reel_asset["id"]], options={"format":"reel"})
+            wait_for(lambda: state_is(pending_reel["id"], "uncertain"), "accepted Facebook Reel processing", seconds=35)
+            assert Fixture.counts["reel_finish"] == before_pending + 1
+            assert sql(f"SELECT count(*) FROM provider_delivery_checkpoints WHERE publication_id='{pending_reel['id']}'") == "1"
+            pending_status = request(f"/publications/{pending_reel['id']}/provider-status")["meta_delivery"]
+            assert pending_status["phase"] == "post_started" and not pending_status["retry_allowed"]
+            assert "remote operation definitively failed" in pending_status["reason"]
+            request(f"/publications/{pending_reel['id']}/cancel", {}, expected=409)
+            future = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=10)).isoformat(timespec="microseconds")
+            request(f"/publications/{pending_reel['id']}/reschedule", {"scheduled_at":future}, expected=409)
+            request(f"/publications/{pending_reel['id']}/replace", {"post_version":1, "publication_post_version":1, "scheduled_at":pending_reel["scheduled_at"]}, expected=409)
+            request(f"/channels/{reel_fb['id']}", {"paused":True}, "PATCH")
+            assert publication(pending_reel["id"])["state"] == "uncertain"
+            assert request(f"/publications/{pending_reel['id']}/provider-status")["meta_delivery"] == pending_status
+            assert request(f"/publications/{pending_reel['id']}/provider-reconcile", {})["state"] == "uncertain"
+            assert Fixture.counts["reel_finish"] == before_pending + 1
+            # Simulate an old queued checkpoint/replaced claim: the new worker
+            # must quarantine it without issuing another public finish.
+            sql(f"UPDATE publications SET state='queued' WHERE id='{pending_reel['id']}'; UPDATE provider_delivery_checkpoints SET not_before=NULL WHERE publication_id='{pending_reel['id']}'")
+            sql("CREATE FUNCTION fixture_pause_reel_claim() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+                f"IF NEW.publication_id='{pending_reel['id']}' THEN UPDATE channels SET paused=true WHERE id='{reel_fb['id']}'; END IF; "
+                "RETURN NEW; END $$; CREATE TRIGGER fixture_pause_reel_claim BEFORE INSERT ON publication_attempts "
+                "FOR EACH ROW EXECUTE FUNCTION fixture_pause_reel_claim()")
+            request(f"/channels/{reel_fb['id']}", {"paused":False}, "PATCH")
+            wait_for(lambda: state_is(pending_reel["id"], "uncertain"), "paused restarted Reel quarantined", seconds=20)
+            assert sql(f"SELECT paused FROM channels WHERE id='{reel_fb['id']}'") == "t"
+            assert Fixture.counts["reel_finish"] == before_pending + 1
+            assert request(f"/publications/{pending_reel['id']}/provider-status")["meta_delivery"]["attempt_id"] == pending_status["attempt_id"]
+            sql("DROP TRIGGER fixture_pause_reel_claim ON publication_attempts; DROP FUNCTION fixture_pause_reel_claim()")
+            request(f"/channels/{reel_fb['id']}", {"paused":False}, "PATCH")
+            Fixture.reel_mode = "success"
+            reconciled_reel = request(f"/publications/{pending_reel['id']}/provider-reconcile", {})
+            assert reconciled_reel["state"] == "published" and reconciled_reel["external_id"] == "12345"
+            assert Fixture.counts["reel_finish"] == before_pending + 1
+
+            # A rejected status read after acceptance is still an unknown public outcome.
+            error_brand = request("/brands", {"name":"Reel status error fixture"})["id"]
+            error_fb = connect("facebook", error_brand)
+            error_asset = upload(error_brand, reel_file.read_bytes(), "reel.mp4", "video/mp4")
+            Fixture.reel_mode = "status_403"
+            before_error = Fixture.counts["reel_finish"]
+            error_reel = schedule(error_brand, error_fb["id"], "Status rejected", [error_asset["id"]], options={"format":"reel"})
+            wait_for(lambda: state_is(error_reel["id"], "uncertain"), "accepted Reel status rejected", seconds=35)
+            assert Fixture.counts["reel_finish"] == before_error + 1
+            assert request(f"/publications/{error_reel['id']}/provider-status")["meta_delivery"]["phase"] == "post_started"
+            request(f"/publications/{error_reel['id']}/cancel", {}, expected=409)
+            Fixture.reel_mode = "success"
+
+            reel_before = Fixture.counts.get("reel_finish", 0)
+            published_reel = schedule(reel_brand, reel_fb["id"], "A Reel", [reel_asset["id"]], options={"format":"reel"})
+            wait_for(lambda: state_is(published_reel["id"], "published"), "Facebook Reel receipt", seconds=35)
+            assert publication(published_reel["id"])["external_id"] == "12345"
+            assert Fixture.counts.get("reel_finish", 0) == reel_before + 1
+            assert request(f"/publications/{published_reel['id']}/attempts")[0]["receipt"]["provider_receipt"]["status"] == "publishing_complete"
+
+            Fixture.reel_mode = "uncertain"
+            uncertain_reel = schedule(reel_brand, reel_fb["id"], "Lost Reel finish", [reel_asset["id"]], options={"format":"reel"})
+            wait_for(lambda: state_is(uncertain_reel["id"], "uncertain"), "lost Facebook Reel response", seconds=35)
+            observed = request(f"/publications/{uncertain_reel['id']}/provider-status")["meta_delivery"]
+            assert observed["phase"] == "post_started" and not observed["retry_allowed"]
+            writes = Fixture.counts["reel_finish"]
+            request(f"/publications/{uncertain_reel['id']}/retry", {}, expected=409)
+            Fixture.reel_mode = "ended"
+            resolution = {"resolution":"not_published", "note":"Fixture confirmed remote operation ended", "observed_attempt_id":observed["attempt_id"],
+                          "observed_checkpoint_id":observed["checkpoint_id"], "sender_stopped":True, "provider_inspected":True}
+            request(f"/publications/{uncertain_reel['id']}/reconcile", {**resolution,"sender_stopped":False}, expected=409)
+            request(f"/publications/{uncertain_reel['id']}/reconcile", {**resolution,"observed_checkpoint_id":str(uuid.uuid4())}, expected=409)
+            assert Fixture.counts["reel_finish"] == writes
+            request(f"/publications/{uncertain_reel['id']}/reconcile", resolution)
+            assert request(f"/publications/{uncertain_reel['id']}/provider-status")["meta_delivery"]["retry_allowed"]
+            Fixture.reel_mode = "success"
+            request(f"/publications/{uncertain_reel['id']}/retry", {})
+            wait_for(lambda: state_is(uncertain_reel["id"], "published"), "attested Facebook Reel retry", seconds=35)
+            assert Fixture.counts["reel_finish"] == writes + 1
+            assert sql(f"SELECT count(*) FROM audit_events WHERE action='retry_meta_delivery' AND subject_id='{uncertain_reel['id']}' AND detail->>'video_id'='12345'") == "1"
+
+            # Replace the database attempt while an accepted public request
+            # remains in flight. The next claim must not repeat that write.
+            Fixture.reel_mode = "blocked"
+            stale_reel = schedule(reel_brand, reel_fb["id"], "Stale Reel finish", [reel_asset["id"]], options={"format":"reel"})
+            assert Fixture.reel_started.wait(20), "Reel finish did not reach the fixture"
+            old_attempt = sql(f"SELECT id FROM publication_attempts WHERE publication_id='{stale_reel['id']}' AND state='sending'")
+            terminated = sql("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=current_database() "
+                             "AND state='idle in transaction' AND query LIKE '%provider_delivery_checkpoints%' AND pid<>pg_backend_pid()")
+            assert terminated == "t", terminated
+            sql(f"UPDATE publication_attempts SET state='uncertain',finished_at=now() WHERE id='{old_attempt}'; "
+                f"UPDATE publications SET state='queued',lease_until=NULL WHERE id='{stale_reel['id']}'")
+            stale_writes = Fixture.counts["reel_finish"]
+            Fixture.reel_release.set()
+            assert Fixture.reel_returned.wait(5)
+            wait_for(lambda: state_is(stale_reel["id"], "uncertain"), "stale Meta attempt quarantined", seconds=30)
+            assert Fixture.counts["reel_finish"] == stale_writes
+            assert publication(stale_reel["id"])["external_id"] is None
+            stale_status = request(f"/publications/{stale_reel['id']}/provider-status")["meta_delivery"]
+            assert stale_status["phase"] == "post_started" and stale_status["attempt_id"] == old_attempt
+            Fixture.reel_mode = "success"
 
             before_metadata = Fixture.counts.get("POST /2/media/metadata", 0)
             x_photo = schedule(brand, x["id"], "Fixture X image", [asset["id"]], options={"alt_text":"A blue fixture image"})
@@ -1062,6 +1576,21 @@ def run():
             assert request("/connections/facebook/removal-status")["revocation_id"] == orphan
             request("/connections/facebook/acknowledge-revocation", {"access_removed":True,"revocation_id":orphan})
             assert not any("revoke" in key for key in Fixture.counts), Fixture.counts
+
+            # Disconnect may remove local credentials, but it must retain the
+            # uncertain publication and its public checkpoint for recovery.
+            request("/provider-apps/facebook", {"client_id":"facebook-client", "client_secret":"fixture-secret"}, "PUT")
+            reel_fb = connect("facebook", reel_brand, reel_fb["id"])
+            Fixture.reel_mode = "pending"
+            before_disconnect = Fixture.counts["reel_finish"]
+            disconnected_reel = schedule(reel_brand, reel_fb["id"], "Pending before disconnect", [reel_asset["id"]], options={"format":"reel"})
+            wait_for(lambda: state_is(disconnected_reel["id"], "uncertain"), "Reel pending before disconnect", seconds=35)
+            before_checkpoint = request(f"/publications/{disconnected_reel['id']}/provider-status")["meta_delivery"]
+            disconnected = request(f"/channels/{reel_fb['id']}/disconnect", {"confirm_shared_impact":True})
+            assert disconnected["disconnected"] is True
+            assert publication(disconnected_reel["id"])["state"] == "uncertain"
+            assert request(f"/publications/{disconnected_reel['id']}/provider-status")["meta_delivery"] == before_checkpoint
+            assert Fixture.counts["reel_finish"] == before_disconnect + 1
             print("PASS production router, OAuth, worker receipts, media capability, observations, replies, recovery and revocation fences")
         finally:
             if locker is not None:
@@ -1069,6 +1598,7 @@ def run():
                 locker.stdin.flush()
                 locker.wait(timeout=5)
             Fixture.feed_release.set()
+            Fixture.reel_release.set()
             Fixture.x_media_release.set()
             Fixture.reply_release.set()
             for process in reversed(processes):

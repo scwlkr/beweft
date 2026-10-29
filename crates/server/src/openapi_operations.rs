@@ -290,6 +290,13 @@ pub(crate) const OPERATIONS: &[(&str, &str, &str, &str, bool)] = &[
     ),
     ("patch", "/media/{id}", "UpdateMediaRequest", "Media", false),
     (
+        "get",
+        "/publications/{id}/replacement-status",
+        "",
+        "ReplacementStatus",
+        false,
+    ),
+    (
         "post",
         "/publications/{id}/replace",
         "ReplacePublicationRequest",

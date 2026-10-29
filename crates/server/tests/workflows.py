@@ -74,12 +74,20 @@ def exercise(call, client, origin, sql):
     assert publication['payload']['media_metadata'] == [{'id': media['id'], 'alt_text': 'A small white test pixel'}]
     call(f"/media/{media['id']}", {'alt_text': 'Updated description', 'metadata_version': media['metadata_version']}, 'PATCH')
     post = call(f"/posts/{post['id']}", {'version': post['version'], 'text': 'Revised content'}, 'PATCH')
+    status = call(f"/publications/{publication['id']}/replacement-status")
+    assert status['original']['id'] == publication['id'] and status['original']['state'] == 'queued' and status['replacement'] is None
+    call(f"/publications/{publication['id']}/replacement-status", token=restricted['token'], expected=404)
+    call('/publications/00000000-0000-4000-8000-000000000000/replacement-status', expected=404)
     replacement_body = {'post_version': post['version'], 'publication_post_version': publication['post_version'], 'scheduled_at': publication['scheduled_at']}
     call(f"/publications/{publication['id']}/replace", dict(replacement_body, post_version=1), expected=409)
     assert next(p for p in call('/publications') if p['id'] == publication['id'])['state'] == 'queued'
     replacement = call(f"/publications/{publication['id']}/replace", replacement_body)['publication']
     assert replacement['id'] != publication['id'] and replacement['scheduled_at'] == publication['scheduled_at'] and replacement['scheduling_mode'] == 'exact'
     assert replacement['payload']['text'] == 'Revised content' and replacement['payload']['media_metadata'][0]['alt_text'] == 'Updated description'
+    status = call(f"/publications/{publication['id']}/replacement-status")
+    assert status['original']['state'] == 'canceled' and status['replacement']['id'] == replacement['id']
+    assert status['replacement']['post_version'] == post['version'] and status['replacement']['channel_id'] == channel['id']
+    call(f"/publications/{publication['id']}/replacement-status", token=restricted['token'], expected=404)
     old = next(p for p in call('/publications') if p['id'] == publication['id'])
     assert old['state'] == 'canceled' and old['payload']['text'] == 'Original content' and old['payload']['media_metadata'][0]['alt_text'] == 'A small white test pixel'
     call(f"/publications/{publication['id']}/replace", replacement_body, expected=409)

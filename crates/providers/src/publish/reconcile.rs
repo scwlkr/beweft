@@ -48,7 +48,84 @@ impl Adapter {
                     json!({"id":id,"reconciled":true}),
                 )))
             }
+            "facebook"
+                if matches!(
+                    checkpoint_stage(cp),
+                    "fb_reel_public" | "fb_reel_processing"
+                ) =>
+            {
+                let id = field(cp, "video_id")?;
+                if id.len() > 32 || !id.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(error(
+                        FailureKind::Uncertain,
+                        "Invalid Facebook Reel checkpoint",
+                    ));
+                }
+                match self.facebook_reel_status(c, &id, cp).await? {
+                    Step::Published {
+                        external_id,
+                        external_url,
+                        mut receipt,
+                    } => {
+                        receipt["reconciled"] = json!(true);
+                        Ok(Some(Step::Published {
+                            external_id,
+                            external_url,
+                            receipt,
+                        }))
+                    }
+                    _ => Ok(None),
+                }
+            }
             "bluesky" => {
+                // These stages precede the public record boundary. A saved job
+                // can be polled and resumed without making another upload.
+                if checkpoint_stage(cp) == "bsky_prepared" {
+                    field(cp, "rkey")?;
+                    field(cp, "created_at")?;
+                    let blobs = cp["blobs"]
+                        .as_array()
+                        .filter(|blobs| blobs.len() <= p.media.len())
+                        .ok_or_else(|| {
+                            error(FailureKind::Uncertain, "Invalid Bluesky media checkpoint")
+                        })?;
+                    if blobs
+                        .iter()
+                        .zip(&p.media)
+                        .any(|(blob, media)| !super::bluesky::valid_blob(blob, &media.mime))
+                    {
+                        return Err(error(
+                            FailureKind::Uncertain,
+                            "Invalid Bluesky media checkpoint",
+                        ));
+                    }
+                    return Ok(Some(Step::Checkpoint(cp.clone())));
+                }
+                if checkpoint_stage(cp) == "bsky_video_preflight" {
+                    // Verify the read succeeds before allowing a resumed worker
+                    // to repeat the preflight and reach the upload boundary.
+                    self.publish_bluesky(c, p, cp).await?;
+                    return Ok(Some(Step::Checkpoint(cp.clone())));
+                }
+                if checkpoint_stage(cp) == "bsky_video_processing" {
+                    require_permission(c, "media")?;
+                    return match self.publish_bluesky(c, p, cp).await? {
+                        Step::Wait(next) | Step::Checkpoint(next) => {
+                            Ok(Some(Step::Checkpoint(next)))
+                        }
+                        Step::Published { .. } => Err(error(
+                            FailureKind::Uncertain,
+                            "Unexpected Bluesky video reconciliation result",
+                        )),
+                    };
+                }
+                if matches!(
+                    checkpoint_stage(cp),
+                    "bsky_video_upload_started" | "bsky_image_upload_started"
+                ) {
+                    return Ok(None);
+                }
+                let expected = super::bluesky::bluesky_record(p, cp)?;
                 let rkey = field(cp, "rkey")?;
                 let origin = instance_origin(&c.app)?;
                 let v = self
@@ -66,21 +143,13 @@ impl Adapter {
                         false,
                     )
                     .await?;
-                if v["value"]["text"].as_str() != Some(p.text.as_str()) {
+                if v["value"] != expected {
                     return Err(error(
                         FailureKind::Uncertain,
                         "Existing Bluesky record does not match the publication snapshot",
                     ));
                 }
-                let id = field(&v, "uri")?;
-                Ok(Some(published(
-                    id.clone(),
-                    Some(format!(
-                        "https://bsky.app/profile/{}/post/{rkey}",
-                        c.identity.id
-                    )),
-                    json!({"uri":id,"cid":v["cid"],"reconciled":true}),
-                )))
+                Ok(Some(super::bluesky::bluesky_receipt(c, cp, &v, true)?))
             }
             _ => Ok(None),
         }

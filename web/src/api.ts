@@ -5,6 +5,7 @@ export const BrandSchema = z.object({
   name: z.string(),
   color: z.string(),
   created_at: z.string(),
+  archived_at: z.string().nullable().optional(),
 });
 export const ManualGuidanceSchema = z.object({
   id: z.string(),
@@ -91,6 +92,10 @@ export const PublicationSchema = z.object({
     text: z.string(),
     media_ids: z.array(id),
     title: z.string(),
+    options: z.record(z.string(), z.unknown()).optional(),
+    media_metadata: z
+      .array(z.object({ id: z.string(), alt_text: z.string() }))
+      .optional(),
   }),
   external_id: z.string().nullable(),
   external_url: z.string().nullable(),
@@ -419,7 +424,12 @@ export async function api<T>(
     requireCurrentApiSession(session);
     if (
       response.status === 401 &&
-      !["/auth/login", "/auth/bootstrap", "/auth/status"].includes(path)
+      ![
+        "/auth/login",
+        "/auth/bootstrap",
+        "/auth/status",
+        "/auth/password",
+      ].includes(path)
     )
       unauthorizedListeners.forEach((listener) => listener(session));
     let result: unknown;

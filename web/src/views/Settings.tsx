@@ -3,6 +3,8 @@ import { useState } from "react";
 import { type Channel, type Health } from "../api";
 import { Time } from "../components/shared";
 
+import { BrandSettings } from "./BrandSettings";
+import { Security } from "./Security";
 import { Schedules } from "./Schedules";
 import { Tokens } from "./Tokens";
 type Action = (
@@ -16,6 +18,7 @@ export function Settings({
   action,
   pending,
   health,
+  endSessionWith,
 }: {
   channels: Channel[];
   theme: string;
@@ -23,6 +26,11 @@ export function Settings({
   action: Action;
   pending: boolean;
   health: Health | null;
+  endSessionWith: (
+    path: string,
+    method: "POST" | "DELETE",
+    body?: unknown,
+  ) => Promise<void>;
 }) {
   const [tab, setTab] = useState("schedules");
   return (
@@ -33,6 +41,18 @@ export function Settings({
           onClick={() => setTab("schedules")}
         >
           Posting schedules
+        </button>
+        <button
+          aria-pressed={tab === "brands"}
+          onClick={() => setTab("brands")}
+        >
+          Brands
+        </button>
+        <button
+          aria-pressed={tab === "security"}
+          onClick={() => setTab("security")}
+        >
+          Security
         </button>
         <button
           aria-pressed={tab === "preferences"}
@@ -56,6 +76,14 @@ export function Settings({
       {tab === "schedules" && (
         <Schedules channels={channels} action={action} pending={pending} />
       )}{" "}
+      {tab === "brands" && <BrandSettings action={action} pending={pending} />}
+      {tab === "security" && (
+        <Security
+          action={action}
+          pending={pending}
+          endSessionWith={endSessionWith}
+        />
+      )}
       {tab === "preferences" && (
         <section className="settings-section">
           <h2>A workspace that feels like you</h2>

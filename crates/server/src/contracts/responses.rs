@@ -220,6 +220,13 @@ pub struct PublicationSummary {
     pub updated_at: DateTime<Utc>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
+pub struct ReplacementStatus {
+    pub original: PublicationSummary,
+    /// Null means no linked replacement is currently visible; a request may still be running.
+    #[schema(required = true)]
+    pub replacement: Option<PublicationSummary>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct ScheduleRequestIntent {
     pub version: i32,
     pub channel_ids: Vec<Uuid>,
@@ -406,6 +413,18 @@ pub struct ProviderStatus {
     pub reason: Option<String>,
     #[schema(required = true)]
     pub x_upload: Option<XUploadStatus>,
+    #[schema(required = true)]
+    pub meta_delivery: Option<MetaDeliveryStatus>,
+    #[schema(required = true)]
+    pub linkedin_delivery: Option<MetaDeliveryStatus>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct MetaDeliveryStatus {
+    pub phase: XUploadPhase,
+    pub attempt_id: Uuid,
+    pub checkpoint_id: Uuid,
+    pub retry_allowed: bool,
+    pub reason: String,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct XUploadStatus {

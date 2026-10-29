@@ -11,7 +11,9 @@ ancestry intact. Main merge `a60b531` has exactly the application tree reviewed
 at `3b4445b`. Reviewed continuation PRs through #23 include owner/brand/session
 recovery, scoped CLI/MCP, worker health, provider removal fences, media
 metadata, idea organization, durable scheduling receipts, production provider
-wiring, X video, and connection/manual/reply recovery UI.
+wiring, X video, and connection/manual/reply recovery UI. Bluesky video and
+its explicit quota-rejection retry correction also landed through PR #26.
+Live provider access remains unverified.
 
 A fresh independent reviewer exercised the built image through first-owner
 setup, invalid setup secret/timezone, empty initial data, manual channel,
@@ -35,10 +37,10 @@ dev database/media remain preserved separately.
 
 | Milestone | State |
 | --- | --- |
-| Meta formats #24 | Frozen `38e83e5`, practical independent review passed. Facebook Page Reels and Instagram/Threads carousels; live access unverified. Lands with its consumer UI. |
-| Content/owner UI #25 | Correction active after review found an unknown queued replacement could be dismissed while the original was sending. A narrow audit-linked read endpoint will recover exact replacement identity. Templates, queued edits/priority, brand archive/restore, owner sessions/password and Meta recovery are in this milestone. |
-| Bluesky video #26 | Frozen candidate/testing. Job/blob checkpoints, stable record identity, PDS compatibility guard and bounded notification reads. Replies remain unfinished and disabled. |
-| LinkedIn media #27 | Testing image/video stages and exact-ID owner recovery. Member grants preserved; organization opt-in/discovery remains unfinished. |
+| Meta formats #24 / correction #28 | Merged at `6ae032d` after fresh review of frozen `394ea493`. Accepted Facebook Reel processing remains sending/uncertain and cannot become an ordinary cancelable queued item. The cumulative merge also landed #24 and #27. |
+| Content/owner UI #25 | Merged at `acf0892` after fresh review of frozen `800f225`. Audit-linked replacement recovery, templates, queued edits/priority, brand archive/restore, owner sessions/password, Meta and LinkedIn recovery are included. Seventeen focused browser scenarios and real API workflows passed. |
+| Bluesky video #26 | Merged at `1320d7e` after fresh review of explicit quota-rejection retry. Job/blob checkpoints, stable record identity, PDS compatibility guard and bounded notification reads are included. Replies remain unfinished and disabled. |
+| LinkedIn media #27 | Member image/video stages and exact-ID owner recovery passed practical independent review at `899c370` and landed through cumulative #28. Organization opt-in/discovery remains unfinished. |
 
 Each consequential revision still receives a brand-new read-only reviewer.
 All implementation/review agents use `gpt-6.1-terra` at `max`, with at most three
@@ -58,7 +60,10 @@ Exact times retain UTC microseconds. Media description writes use CAS versions;
 new publication snapshots freeze their descriptions.
 
 Provider upload/container IDs and public-write boundaries survive worker claims.
-Unknown public outcomes never cause blind automatic reposting. X recovery binds
+Unknown public outcomes must not cause blind automatic reposting. For an accepted
+remote operation that may still finish, a stopped local sender and an absent post
+are insufficient evidence to retry: the remote operation must have definitively
+ended without publication. X recovery binds
 owner inspection and sender-stopped attestation to observed attempt/checkpoint
 IDs, then requires explicit reset and retry. Reply recovery uses observed
 revision and active-executor guards. An owner attestation is not provider proof;
@@ -72,8 +77,8 @@ posts, Buffer changes or unrelated services are authorized.
 
 ## Remaining full scope and cleanup
 
-Finish the active reviewed milestones and publish the latest qualified local
-image. Additional local implementation still includes X threads, standard
+The reviewed source milestones through #28 have landed; the combined local
+image is being packaged and qualified. Additional local implementation still includes X threads, standard
 Facebook Page video, Instagram Stories eligibility, Threads/Bluesky replies,
 LinkedIn organization opt-in, expanded Pinterest formats/reads, Google Business
 Profile direct support and safe Google grant-family handling. Bluesky entryway

@@ -1,14 +1,115 @@
 import { Field } from "./components/shared";
+import { Button } from "./components/ui/button";
 export function ProviderOptions({
   provider,
+  capabilities,
   value,
   onChange,
 }: {
   provider: string;
+  capabilities: unknown;
   value: Record<string, unknown>;
   onChange: (v: Record<string, unknown>) => void;
 }) {
   const set = (key: string, v: unknown) => onChange({ ...value, [key]: v });
+  const caps =
+    capabilities && typeof capabilities === "object"
+      ? (capabilities as Record<string, unknown>)
+      : {};
+  const formats = Array.isArray(caps.formats) ? caps.formats : [];
+  if (provider === "facebook") {
+    const permissions =
+      caps.permissions && typeof caps.permissions === "object"
+        ? (caps.permissions as Record<string, unknown>)
+        : {};
+    const actions =
+      permissions.actions && typeof permissions.actions === "object"
+        ? (permissions.actions as Record<string, unknown>)
+        : {};
+    const reel =
+      actions.reel && typeof actions.reel === "object"
+        ? (actions.reel as Record<string, unknown>)
+        : null;
+    const advertised =
+      formats.includes("reel") &&
+      reel !== null &&
+      ["granted", "missing", "unknown"].includes(String(reel.status));
+    if (!advertised)
+      return value.format === "reel" ? (
+        <section className="provider-options form-stack">
+          <p className="muted">
+            This draft is saved as a Reel, but this server does not advertise
+            Reel permission status. The Reel choice is retained until you change
+            it or update the server.
+          </p>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => {
+              const next = { ...value };
+              delete next.format;
+              onChange(next);
+            }}
+          >
+            Change to text or image
+          </Button>
+        </section>
+      ) : null;
+    return (
+      <section className="provider-options form-stack">
+        <Field label="Facebook post format">
+          <select
+            value={value.format === "reel" ? "reel" : ""}
+            onChange={(event) => {
+              const next = { ...value };
+              if (event.target.value) next.format = "reel";
+              else delete next.format;
+              onChange(next);
+            }}
+          >
+            <option value="">Text or image</option>
+            <option value="reel">Reel</option>
+          </select>
+        </Field>
+        {value.format === "reel" && (
+          <p className="muted">
+            Use one MP4 without a video description. Page permissions and
+            account eligibility apply.{" "}
+            {reel?.status === "missing"
+              ? "The last permission check reported missing Reel permissions."
+              : reel?.status !== "granted"
+                ? "Reel permission status is not confirmed."
+                : "Reported Reel permissions are present; account eligibility is not yet verified."}
+          </p>
+        )}
+      </section>
+    );
+  }
+  if (
+    (provider === "instagram" || provider === "threads") &&
+    formats.includes("carousel")
+  )
+    return (
+      <section className="provider-options form-stack">
+        <p className="muted">
+          A carousel uses 2–10 attachments in their selected order. Use
+          supported JPEG images or MP4 videos; Threads also accepts PNG images.
+          Stories require manual handoff.
+        </p>
+        {provider === "threads" && (
+          <Field label="Who can reply?">
+            <select
+              value={String(value.reply_control ?? "everyone")}
+              onChange={(event) => set("reply_control", event.target.value)}
+            >
+              <option value="everyone">Everyone</option>
+              <option value="accounts_you_follow">Accounts you follow</option>
+              <option value="mentioned_only">Mentioned accounts</option>
+            </select>
+          </Field>
+        )}
+      </section>
+    );
   if (provider === "x")
     return (
       <section className="provider-options form-stack">

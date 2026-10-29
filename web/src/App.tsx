@@ -19,6 +19,8 @@ import { Composer } from "./Composer";
 import { titles, zone } from "./navigation";
 import { useWorkspace } from "./useWorkspace";
 import { usePendingSchedule } from "./usePendingSchedule";
+import { isCurrentReplacement } from "./replacementIntent";
+import { usePendingReplacement } from "./usePendingReplacement";
 import { usePendingMedia } from "./usePendingMedia";
 import { Calendar } from "./views/Calendar";
 import { ConnectionFlow } from "./views/ConnectionFlow";
@@ -69,10 +71,21 @@ export default function App() {
     reconcileMedia,
     go,
     createBrand,
+    endSessionWith,
   } = workspace;
   const pendingSchedule = usePendingSchedule(brandId, ready === true);
+  const pendingReplacement = usePendingReplacement(
+    pendingSchedule.key,
+    brandId,
+  );
   const pendingMedia = usePendingMedia(ready ? brandId : "", reconcileMedia);
   const [reviewMediaId, setReviewMediaId] = useState<string | null>(null);
+  const [confirmReplacementReview, setConfirmReplacementReview] =
+    useState(false);
+  useEffect(
+    () => setConfirmReplacementReview(false),
+    [pendingReplacement.review],
+  );
   useEffect(() => setReviewMediaId(null), [brandId]);
   const reviewMedia = media.find((item) => item.id === reviewMediaId);
   if (ready === null) return <Busy />;
@@ -178,6 +191,110 @@ export default function App() {
                 </Button>
               </div>
             )}
+            {(pendingReplacement.intent || pendingReplacement.error) && (
+              <div className="notice" role="status">
+                <div>
+                  <p>
+                    {pendingReplacement.intent
+                      ? isCurrentReplacement(pendingReplacement.intent) &&
+                        pendingReplacement.intent.rejection
+                        ? "The server rejected this replacement. Review the original before starting another publication."
+                        : "A queued replacement has an unconfirmed outcome. Check it before starting another publication."
+                      : pendingReplacement.error}
+                  </p>
+                  {pendingReplacement.intent && (
+                    <p>
+                      Original:{" "}
+                      {publications.find(
+                        (p) =>
+                          p.id === pendingReplacement.intent?.publicationId,
+                      )?.payload.title || "Untitled publication"}{" "}
+                      · <code>{pendingReplacement.intent.publicationId}</code>.
+                      Check its outcome before taking another action. If it is
+                      still queued, you can cancel the original and check again.
+                    </p>
+                  )}
+                  {pendingReplacement.intent && pendingReplacement.error && (
+                    <p>{pendingReplacement.error}</p>
+                  )}
+                  {pendingReplacement.review && (
+                    <div className="form-stack">
+                      <p>
+                        Original:{" "}
+                        {pendingReplacement.review.status.original.state.replaceAll(
+                          "_",
+                          " ",
+                        )}{" "}
+                        on{" "}
+                        {pendingReplacement.review.status.original.channel_name}{" "}
+                        · revision{" "}
+                        {pendingReplacement.review.status.original.post_version}
+                        .{" "}
+                        {pendingReplacement.review.rejected
+                          ? "The server rejected this replacement request; the original may still publish or be retried."
+                          : "The original reached a terminal state."}
+                      </p>
+                      <p>
+                        {pendingReplacement.review.status.replacement ? (
+                          <>
+                            Linked replacement:{" "}
+                            <code>
+                              {pendingReplacement.review.status.replacement.id}
+                            </code>{" "}
+                            · revision{" "}
+                            {
+                              pendingReplacement.review.status.replacement
+                                .post_version
+                            }{" "}
+                            ·{" "}
+                            {pendingReplacement.review.status.replacement.state.replaceAll(
+                              "_",
+                              " ",
+                            )}
+                            . Inspect it in Publishing before deciding.
+                          </>
+                        ) : (
+                          "No replacement is linked to this original."
+                        )}
+                      </p>
+                      <label className="checkbox-label">
+                        <input
+                          type="checkbox"
+                          checked={confirmReplacementReview}
+                          onChange={(event) =>
+                            setConfirmReplacementReview(event.target.checked)
+                          }
+                        />
+                        I reviewed these outcomes and understand that any new
+                        schedule is a separate action.
+                      </label>
+                      <Button
+                        variant="secondary"
+                        disabled={
+                          !confirmReplacementReview || pendingReplacement.busy
+                        }
+                        onClick={() =>
+                          void pendingReplacement.resolve().then(() => load())
+                        }
+                      >
+                        Finish review
+                      </Button>
+                    </div>
+                  )}
+                </div>
+                {pendingReplacement.intent && (
+                  <Button
+                    variant="secondary"
+                    disabled={pendingReplacement.busy}
+                    onClick={() =>
+                      void pendingReplacement.check().then(() => load())
+                    }
+                  >
+                    Check replacement
+                  </Button>
+                )}
+              </div>
+            )}
             {brand &&
               pendingMedia.brand === brand.id &&
               Object.keys(pendingMedia.intents).length > 0 && (
@@ -222,7 +339,7 @@ export default function App() {
             <div className="content-body" key={brandId}>
               {loading && !brand ? (
                 <Busy />
-              ) : !brand ? (
+              ) : !brand && route !== "settings" ? (
                 <Empty
                   title="A fresh start for your ideas"
                   action={
@@ -266,6 +383,12 @@ export default function App() {
                       )}
                       channels={channels}
                       media={media}
+                      posts={posts}
+                      pendingSchedule={pendingSchedule}
+                      pendingMedia={pendingMedia}
+                      reconcileMedia={reconcileMedia}
+                      onEdit={setComposer}
+                      onRefresh={load}
                       action={action}
                       pending={pending}
                       onCompose={() => setComposer(null)}
@@ -279,7 +402,7 @@ export default function App() {
                   )}
                   {route === "ideas" && (
                     <Ideas
-                      brand={brand}
+                      brand={brand!}
                       ideas={ideas.filter((i) =>
                         matching(
                           i.title + " " + i.text + " " + i.tags.join(" "),
@@ -294,6 +417,8 @@ export default function App() {
                   )}
                   {route === "drafts" && (
                     <Drafts
+                      brand={brand!}
+                      channels={channels}
                       posts={posts.filter((p) =>
                         matching(p.title + " " + p.text),
                       )}
@@ -315,7 +440,7 @@ export default function App() {
                   )}
                   {route === "media" && (
                     <MediaLibrary
-                      brand={brand}
+                      brand={brand!}
                       media={media.filter((m) => matching(m.name))}
                       action={action}
                       pending={pending}
@@ -324,7 +449,7 @@ export default function App() {
                   )}
                   {route === "connections" && (
                     <Connections
-                      brand={brand}
+                      brand={brand!}
                       channels={channels}
                       providers={providers}
                       action={action}
@@ -339,17 +464,18 @@ export default function App() {
                       action={action}
                       pending={pending}
                       health={health}
+                      endSessionWith={endSessionWith}
                     />
                   )}
                   {route === "analytics" && (
                     <Insights
-                      brand={brand}
+                      brand={brand!}
                       channels={channels}
                       kind="analytics"
                     />
                   )}
                   {route === "inbox" && (
-                    <Insights brand={brand} channels={channels} kind="inbox" />
+                    <Insights brand={brand!} channels={channels} kind="inbox" />
                   )}
                 </>
               )}

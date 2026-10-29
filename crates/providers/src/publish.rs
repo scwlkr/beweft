@@ -2,6 +2,7 @@ use crate::*;
 use reqwest::multipart::{Form, Part};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
+pub const BLUESKY_VIDEO_RATE_LIMIT: &str = "Bluesky video limit reached. Wait before retrying.";
 #[derive(Clone)]
 pub enum MediaSource {
     Bytes(Vec<u8>),
@@ -152,6 +153,9 @@ impl Adapter {
                 "media"
             },
         )?;
+        if c.app.provider == "facebook" && p.options["format"] == "reel" {
+            require_permission(c, "reel")?;
+        }
         validate(&c.app.provider, p)?;
         inspect_media(&c.app.provider, p).await?;
         let empty = json!({});

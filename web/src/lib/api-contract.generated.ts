@@ -35,6 +35,7 @@ export type ManualGuidance = { "compose_url": string | null; "guidance": string;
 export type Media = { "alt_text": string; "brand_id": string; "created_at": string; "id": string; "metadata_version": number; "mime": string; "name": string; "size": number; "url": string; };
 export type MediaLimits = { "available_bytes": number; "max_upload_bytes": number; "quota_bytes": number; "reserved_bytes": number; "used_bytes": number; };
 export type MediaMetadata = { "alt_text": string; "id": string; };
+export type MetaDeliveryStatus = { "attempt_id": string; "checkpoint_id": string; "phase": XUploadPhase; "reason": string; "retry_allowed": boolean; };
 export type OkResponse = { "ok": boolean; };
 export type Owner = { "email": string; "id": string; };
 export type PasswordRequest = { "current_password": string; "new_password": string; };
@@ -51,7 +52,7 @@ export type ProviderRemovalStatus = { "provider": string; "revocation_id": strin
 export type ProviderReply = { "created_at": string; "error": string | null; "id": string; "inbox_id": string; "receipt": unknown; "revision": number; "state": string; "text": string; "updated_at": string; };
 export type ProviderReplyRequest = { "expected_last_request_id"?: string | null; "request_id": string; "text": string; };
 export type ProviderReplyResolution = "published" | "not_published";
-export type ProviderStatus = { "reason": string | null; "reset_allowed": boolean; "session_expired": boolean; "x_upload": null | XUploadStatus; };
+export type ProviderStatus = { "linkedin_delivery": null | MetaDeliveryStatus; "meta_delivery": null | MetaDeliveryStatus; "reason": string | null; "reset_allowed": boolean; "session_expired": boolean; "x_upload": null | XUploadStatus; };
 export type ProviderSyncRequest = { "allow_metered"?: boolean | null; };
 export type ProviderSyncResult = { "coverage": string; "errors": Array<string>; "inbox_items": number; "metrics_observed": number; "note": string; };
 export type Publication = { "brand_id": string; "channel_id": string; "channel_name": string; "created_at": string; "external_id": string | null; "external_url": string | null; "id": string; "last_error": string | null; "payload": PublicationPayload; "post_id": string; "post_version": number; "provider": string; "scheduled_at": string; "scheduling_mode": SchedulingMode; "state": PublicationState; "updated_at": string; };
@@ -64,6 +65,7 @@ export type ReconcileRequest = { "external_id"?: string | null; "external_url"?:
 export type ReorderQueueRequest = { "channel_id": string; "publication_ids": Array<string>; };
 export type ReplacePublicationRequest = { "post_version": number; "publication_post_version": number; "scheduled_at": string; };
 export type ReplacedPublication = { "previous_publication_id": string; "publication": Publication; };
+export type ReplacementStatus = { "original": PublicationSummary; "replacement": null | PublicationSummary; };
 export type RescheduleRequest = { "scheduled_at": string; };
 export type ResetExpiredSessionResult = { "next_action": string; "session_reset": boolean; "state": string; };
 export type ResetXUploadRequest = { "confirm_restart": boolean; "observed_attempt_id": string; "observed_checkpoint_id": string; "provider_inspected"?: boolean | null; "sender_stopped": boolean; };
@@ -163,6 +165,7 @@ export interface ApiOperations {
   "GET /api/v1/publications/{id}/provider-status": { request: undefined; response: { "data": ProviderStatus; }; query: {  } };
   "POST /api/v1/publications/{id}/reconcile": { request: ReconcileRequest; response: { "data": Publication; }; query: {  } };
   "POST /api/v1/publications/{id}/replace": { request: ReplacePublicationRequest; response: { "data": ReplacedPublication; }; query: {  } };
+  "GET /api/v1/publications/{id}/replacement-status": { request: undefined; response: { "data": ReplacementStatus; }; query: {  } };
   "POST /api/v1/publications/{id}/reschedule": { request: RescheduleRequest; response: { "data": Publication; }; query: {  } };
   "POST /api/v1/publications/{id}/reset-expired-session": { request: undefined; response: { "data": ResetExpiredSessionResult; }; query: {  } };
   "POST /api/v1/publications/{id}/reset-x-upload": { request: ResetXUploadRequest; response: { "data": ResetExpiredSessionResult; }; query: {  } };

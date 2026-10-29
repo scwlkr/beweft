@@ -28,17 +28,25 @@ pub(super) async fn save_attempt_checkpoint_tx(
     wait_seconds: Option<u64>,
 ) -> Result<Value> {
     let mut cp = cp.clone();
-    let x_checkpoint = cp["stage"]
+    let bluesky_checkpoint = cp["stage"]
         .as_str()
-        .is_some_and(|stage| stage.starts_with("x_"));
-    if x_checkpoint {
+        .is_some_and(|stage| stage.starts_with("bsky_"));
+    let managed_checkpoint = cp["stage"].as_str().is_some_and(|stage| {
+        stage.starts_with("x_")
+            || stage.starts_with("meta_")
+            || stage.starts_with("fb_reel_")
+            || stage.starts_with("linkedin_")
+            || stage.starts_with("bsky_")
+    });
+    if managed_checkpoint {
         cp["attempt_id"] = json!(attempt);
         cp["checkpoint_id"] = json!(Uuid::new_v4());
         if let Some(object) = cp.as_object_mut() {
             object.remove("not_published_attestation");
         }
     }
-    let expiry = if x_checkpoint {
+    let bluesky_processing = cp["stage"] == "bsky_video_processing";
+    let expiry = if (managed_checkpoint && !bluesky_checkpoint) || bluesky_processing {
         cp["expires_after_secs"]
             .as_i64()
             .filter(|seconds| *seconds > 0)
@@ -68,6 +76,13 @@ pub(super) async fn save_attempt_checkpoint_tx(
         return Err(ApiError::conflict(
             "Delivery attempt expired or was replaced before saving provider progress",
         ));
+    }
+    if bluesky_checkpoint && !bluesky_processing {
+        sqlx::query("UPDATE provider_delivery_checkpoints SET expires_at=NULL WHERE publication_id=$1 AND attempt_id=$2")
+            .bind(id)
+            .bind(attempt)
+            .execute(&mut **tx)
+            .await?;
     }
     Ok(cp)
 }

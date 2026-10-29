@@ -34,6 +34,7 @@ include!("provider_db/revocation.rs");
 include!("provider_db/sync_pool.rs");
 include!("provider_db/callback_fence.rs");
 include!("provider_db/bluesky_fence.rs");
+include!("provider_db/bluesky_quota.rs");
 include!("provider_db/provider_gate.rs");
 include!("provider_db/shared_provider.rs");
 include!("provider_db/post_grant_recovery.rs");
@@ -67,5 +68,6 @@ async fn provider_database_security_and_recovery() {
     reply_claim_clock_is_independent_of_waits(&h).await;
     refresh_survives_downstream_rollback(&h).await;
     provider_fetches_committed_media_during_post(&h).await;
+    bluesky_quota_retry_preserves_identity_and_requires_a_finished_sender(&h).await;
     h.state.db.close().await;
 }

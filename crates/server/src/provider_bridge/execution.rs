@@ -127,14 +127,23 @@ async fn fenced_step(
                 saved["stage"] = json!("x_legacy_ambiguous");
             }
             let stage = saved["stage"].as_str().unwrap_or("");
-            if channel.app.provider == "x" && stage.starts_with("x_") {
-                let needs_expiry = matches!(
-                    stage,
-                    "x_video_append" | "x_video_finalize" | "x_video_processing" | "x_video_ready"
-                ) || (matches!(stage, "x_image_media" | "x_post_started")
-                    && saved["media_ids"]
-                        .as_array()
-                        .is_some_and(|ids| !ids.is_empty()));
+            let is_x = channel.app.provider == "x" && stage.starts_with("x_");
+            let is_meta = matches!(channel.app.provider.as_str(), "instagram" | "threads")
+                && stage.starts_with("meta_");
+            let is_reel = channel.app.provider == "facebook" && stage.starts_with("fb_reel_");
+            if is_x || is_meta || is_reel {
+                let needs_expiry = (is_meta || is_reel)
+                    || matches!(
+                        stage,
+                        "x_video_append"
+                            | "x_video_finalize"
+                            | "x_video_processing"
+                            | "x_video_ready"
+                    )
+                    || (matches!(stage, "x_image_media" | "x_post_started")
+                        && saved["media_ids"]
+                            .as_array()
+                            .is_some_and(|ids| !ids.is_empty()));
                 if needs_expiry
                     && timing
                         .as_ref()
@@ -142,27 +151,31 @@ async fn fenced_step(
                 {
                     return Ok(Err(providers::error(
                         FailureKind::Uncertain,
-                        "X media expiry is missing. Inspect the delivery and reset before retrying.",
+                        "Provider session expiry is missing. Inspect the delivery before retrying.",
                     )));
                 }
                 if timing
                     .as_ref()
                     .is_some_and(|row| row.get::<bool, _>("expired"))
                 {
-                    saved["expired"] = json!(true);
-                    let _ = save_attempt_checkpoint_tx(
-                        &mut tx,
-                        state,
-                        id,
-                        attempt,
-                        saved,
-                        stage_started,
-                        None,
-                    )
-                    .await?;
+                    // Preserve the original Meta attempt identity at a public
+                    // boundary; expiry is visible from the database timestamp.
+                    if is_x {
+                        saved["expired"] = json!(true);
+                        let _ = save_attempt_checkpoint_tx(
+                            &mut tx,
+                            state,
+                            id,
+                            attempt,
+                            saved,
+                            stage_started,
+                            None,
+                        )
+                        .await?;
+                    }
                     return Ok(Err(providers::error(
                         FailureKind::ExpiredSession,
-                        "X media expired. Inspect the delivery and use the explicit reset before retrying.",
+                        "Provider media session expired. Inspect the delivery before retrying.",
                     )));
                 }
                 if timing
@@ -175,7 +188,21 @@ async fn fenced_step(
                     .as_str()
                     .and_then(|value| value.parse::<Uuid>().ok());
                 if previous != Some(attempt) {
-                    let is_public = matches!(stage, "x_post_started" | "x_legacy_ambiguous");
+                    let is_public = matches!(
+                        stage,
+                        "x_post_started"
+                            | "x_legacy_ambiguous"
+                            | "meta_public"
+                            | "meta_legacy_ambiguous"
+                            | "fb_reel_public"
+                            | "fb_reel_processing"
+                    );
+                    if is_public && !is_x {
+                        return Ok(Err(providers::error(
+                            FailureKind::Uncertain,
+                            "An earlier Meta publication may have started. Inspect its outcome before retrying.",
+                        )));
+                    }
                     let rebound = save_attempt_checkpoint_tx(
                         &mut tx,
                         state,
@@ -197,14 +224,150 @@ async fn fenced_step(
                 // Refresh and lock waits consume real elapsed time too. Do
                 // not begin the public call unless its bounded stage still
                 // fits inside the original job's remaining time.
-                if stage == "x_post_started"
+                if matches!(stage, "x_post_started" | "meta_public" | "fb_reel_public")
                     && overall
                         .and_then(|deadline| deadline.remaining())
                         .is_none_or(|remaining| remaining < std::time::Duration::from_secs(80))
                 {
                     return Ok(Err(providers::error(
                         FailureKind::Uncertain,
-                        "The X post boundary needs owner inspection before recovery.",
+                        "The public posting boundary needs owner inspection before recovery.",
+                    )));
+                }
+            }
+            if channel.app.provider == "linkedin" && stage.starts_with("linkedin_") {
+                if matches!(stage, "linkedin_image_upload" | "linkedin_video_upload") {
+                    let expiry = saved["upload_expires_ms"].as_i64().unwrap_or(0);
+                    let live: bool = sqlx::query_scalar(
+                        "SELECT $1::bigint > EXTRACT(EPOCH FROM clock_timestamp()) * 1000",
+                    )
+                    .bind(expiry)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    if !live {
+                        return Ok(Err(providers::error(
+                            FailureKind::ExpiredSession,
+                            "LinkedIn upload URL expired; inspect the delivery before restarting.",
+                        )));
+                    }
+                }
+                if timing
+                    .as_ref()
+                    .is_some_and(|row| row.get::<bool, _>("waiting"))
+                {
+                    return Ok(Ok(Step::Wait(saved.clone())));
+                }
+                let previous = saved["attempt_id"]
+                    .as_str()
+                    .and_then(|value| value.parse::<Uuid>().ok());
+                if previous != Some(attempt) {
+                    if stage == "linkedin_post_started" {
+                        return Ok(Err(providers::error(
+                            FailureKind::Uncertain,
+                            "An earlier LinkedIn post may have started. Inspect LinkedIn before resolving it.",
+                        )));
+                    }
+                    let rebound = save_attempt_checkpoint_tx(
+                        &mut tx,
+                        state,
+                        id,
+                        attempt,
+                        saved,
+                        stage_started,
+                        None,
+                    )
+                    .await?;
+                    return Ok(Ok(Step::Checkpoint(rebound)));
+                }
+                if stage == "linkedin_post_started"
+                    && overall
+                        .and_then(|deadline| deadline.remaining())
+                        .is_none_or(|remaining| remaining < std::time::Duration::from_secs(80))
+                {
+                    return Ok(Err(providers::error(
+                        FailureKind::Uncertain,
+                        "The LinkedIn post boundary needs owner inspection before recovery.",
+                    )));
+                }
+            }
+            if channel.app.provider == "bluesky" && stage.starts_with("bsky_") {
+                if stage == "bsky_video_processing" {
+                    if timing
+                        .as_ref()
+                        .is_none_or(|row| !row.get::<bool, _>("has_expiry"))
+                    {
+                        return Ok(Err(providers::error(
+                            FailureKind::Uncertain,
+                            "The Bluesky processing deadline is missing. Check the saved video job before recovery.",
+                        )));
+                    }
+                    if timing
+                        .as_ref()
+                        .is_some_and(|row| row.get::<bool, _>("expired"))
+                    {
+                        return Ok(Err(providers::error(
+                            FailureKind::Uncertain,
+                            "The Bluesky processing window ended. Check the saved video job before continuing.",
+                        )));
+                    }
+                }
+                if timing
+                    .as_ref()
+                    .is_some_and(|row| row.get::<bool, _>("waiting"))
+                {
+                    return Ok(Ok(Step::Wait(saved.clone())));
+                }
+                let previous = saved["attempt_id"]
+                    .as_str()
+                    .and_then(|value| value.parse::<Uuid>().ok());
+                if previous != Some(attempt) {
+                    if stage == "bsky_video_upload_rejected" {
+                        return Ok(Err(providers::error(
+                            FailureKind::Uncertain,
+                            "The Bluesky quota rejection was not released by an explicit retry of its failed attempt.",
+                        )));
+                    }
+                    if stage == "bsky_post_started" {
+                        if let Ok(Some(reconciled)) = adapter.reconcile(&channel, &p, saved).await {
+                            lock_attempt(state, &mut tx, id, attempt, channel_id).await?;
+                            return Ok(Ok(reconciled));
+                        }
+                        return Ok(Err(providers::error(
+                            FailureKind::Uncertain,
+                            "An earlier Bluesky post may have started. Reconcile its record before recovery.",
+                        )));
+                    }
+                    if matches!(
+                        stage,
+                        "bsky_video_upload_started" | "bsky_image_upload_started"
+                    ) {
+                        return Ok(Err(providers::error(
+                            FailureKind::Uncertain,
+                            "An earlier Bluesky upload may have started without a receipt. Inspect it before recovery.",
+                        )));
+                    }
+                    let rebound = save_attempt_checkpoint_tx(
+                        &mut tx,
+                        state,
+                        id,
+                        attempt,
+                        saved,
+                        stage_started,
+                        None,
+                    )
+                    .await?;
+                    return Ok(Ok(Step::Checkpoint(rebound)));
+                }
+                if matches!(
+                    stage,
+                    "bsky_post_started" | "bsky_video_upload_started" | "bsky_image_upload_started"
+                ) && overall
+                    .and_then(|deadline| deadline.remaining())
+                    .is_none_or(|remaining| remaining < std::time::Duration::from_secs(80))
+                {
+                    return Ok(Err(providers::error(
+                        FailureKind::Uncertain,
+                        "The Bluesky write boundary needs inspection before recovery.",
                     )));
                 }
             }
@@ -231,9 +394,18 @@ async fn fenced_step(
                 lock_attempt(state, &mut tx, id, attempt, channel_id).await?;
             }
         }
+        let was_wait = matches!(&result, Ok(Step::Wait(_)));
         if let Ok(Step::Checkpoint(next) | Step::Wait(next)) = &mut result {
-            let wait = if next["stage"] == "x_video_processing" {
-                next["check_after_secs"].as_u64()
+            let wait = if was_wait {
+                match next["stage"].as_str() {
+                    Some("linkedin_image_processing" | "linkedin_video_processing") => Some(3),
+                    Some("x_video_processing" | "bsky_video_processing") => {
+                        next["check_after_secs"].as_u64()
+                    }
+                    _ => next["check_after_secs"]
+                        .as_u64()
+                        .map(|seconds| seconds.clamp(1, 60)),
+                }
             } else {
                 None
             };
@@ -272,11 +444,12 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
     };
     let overall = providers::SuspendInstant::now()
         .and_then(|start| start.deadline(std::time::Duration::from_secs(180)));
-    let mut completed_x_checkpoint = false;
+    let mut completed_managed_checkpoint = false;
     let mut post_started = false;
+    let mut accepted_reel = false;
     for step in 0..48 {
         if overall.and_then(|deadline| deadline.remaining()).is_none() {
-            if completed_x_checkpoint && !post_started {
+            if completed_managed_checkpoint && !post_started {
                 return BridgeOutcome::Continue;
             }
             break;
@@ -284,22 +457,61 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
         match fenced_step(state, id, attempt, channel, overall).await {
             Ok(Ok(Step::Checkpoint(next))) => {
                 let stage = next["stage"].as_str().unwrap_or("");
-                if stage.starts_with("x_") {
-                    completed_x_checkpoint = true;
-                    post_started = stage == "x_post_started" || stage == "x_legacy_ambiguous";
+                if stage == "bsky_video_upload_rejected" {
+                    return BridgeOutcome::Rejected {
+                        reason: providers::BLUESKY_VIDEO_RATE_LIMIT.into(),
+                    };
+                }
+                if stage.starts_with("x_")
+                    || stage.starts_with("meta_")
+                    || stage.starts_with("fb_reel_")
+                    || stage.starts_with("linkedin_")
+                    || stage.starts_with("bsky_")
+                {
+                    completed_managed_checkpoint = true;
+                    accepted_reel = stage == "fb_reel_processing";
+                    post_started = matches!(
+                        stage,
+                        "x_post_started"
+                            | "x_legacy_ambiguous"
+                            | "meta_public"
+                            | "meta_legacy_ambiguous"
+                            | "fb_reel_public"
+                            | "fb_reel_processing"
+                            | "linkedin_post_started"
+                            | "bsky_post_started"
+                            | "bsky_video_upload_started"
+                            | "bsky_image_upload_started"
+                    );
                     let remaining = overall
                         .and_then(|deadline| deadline.remaining())
                         .unwrap_or_default();
                     if post_started {
                         if remaining < std::time::Duration::from_secs(80) {
-                            return BridgeOutcome::Uncertain { reason: "The X post may have started. Inspect its outcome before retrying.".into() };
+                            return BridgeOutcome::Uncertain { reason: "The provider write may have started. Inspect its outcome before retrying.".into() };
                         }
                     } else if step >= 11 || remaining < std::time::Duration::from_secs(80) {
                         return BridgeOutcome::Continue;
                     }
                 }
             }
-            Ok(Ok(Step::Wait(next))) if next["stage"] == "x_video_processing" => {
+            Ok(Ok(Step::Wait(next))) if next["stage"] == "fb_reel_processing" => {
+                return BridgeOutcome::Uncertain {
+                    reason: "Facebook accepted the Reel and is still processing it. Check provider status before resolving its outcome.".into(),
+                };
+            }
+            Ok(Ok(Step::Wait(next)))
+                if next["stage"].as_str().is_some_and(|stage| {
+                    stage == "x_video_processing"
+                        || stage == "bsky_video_processing"
+                        || stage.starts_with("meta_")
+                        || stage.starts_with("fb_reel_")
+                        || matches!(
+                            stage,
+                            "linkedin_image_processing" | "linkedin_video_processing"
+                        )
+                }) =>
+            {
                 return BridgeOutcome::Continue;
             }
             Ok(Ok(Step::Wait(_))) => tokio::time::sleep(std::time::Duration::from_secs(3)).await,
@@ -314,6 +526,12 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                     receipt,
                 };
             }
+            // Once Facebook accepted a public finish, even an authorization,
+            // rate-limit, validation, or status-read rejection cannot prove it
+            // stopped. Keep the existing checkpoint for read-only recovery.
+            Ok(Err(e)) if accepted_reel => {
+                return BridgeOutcome::Uncertain { reason: e.message };
+            }
             Ok(Err(e))
                 if matches!(
                     e.kind,
@@ -323,10 +541,24 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                 return BridgeOutcome::Uncertain { reason: e.message };
             }
             Ok(Err(e)) => return BridgeOutcome::Rejected { reason: e.message },
-            Err(e)
-                if e.1 == "delivery_paused"
-                    && (step == 0 || (completed_x_checkpoint && !post_started)) =>
-            {
+            Err(e) if e.1 == "delivery_paused" && step == 0 => {
+                // A legacy queued checkpoint may already represent an accepted
+                // public Reel. A pause racing its first claim must not put it
+                // back in the ordinary queue.
+                match super::preparation::checkpoint(state, id).await {
+                    Ok(Some(cp))
+                        if matches!(
+                            cp["stage"].as_str(),
+                            Some("fb_reel_public" | "fb_reel_processing")
+                        ) =>
+                    {
+                        return BridgeOutcome::Uncertain { reason: "The Facebook Reel may already be processing. Inspect its outcome before retrying.".into() };
+                    }
+                    Ok(_) => return BridgeOutcome::Continue,
+                    Err(error) => return BridgeOutcome::Uncertain { reason: error.2 },
+                }
+            }
+            Err(e) if e.1 == "delivery_paused" && completed_managed_checkpoint && !post_started => {
                 return BridgeOutcome::Continue;
             }
             Err(e) => return BridgeOutcome::Uncertain { reason: e.2 },
