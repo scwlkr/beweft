@@ -104,6 +104,13 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
         self.record("GET " + path)
+        if path == "/xrpc/app.bsky.notification.listNotifications":
+            assert self.headers.get("Authorization") == "Bearer bluesky-access-fixture"
+            assert self.headers.get("atproto-proxy") == "did:web:api.bsky.app#bsky_notif"
+            assert urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query) == {"limit":["50"]}
+            notification = {"uri":"at://did:plc:other/app.bsky.feed.post/fixture", "reason":"mention",
+                            "author":{"handle":"other.bsky.social"}, "record":{"text":"Hello"}}
+            return self.respond({"notifications":[notification, notification, {"uri":"at://ignored", "reason":"follow"}]})
         if path == "/xrpc/com.atproto.server.getSession":
             assert self.headers.get("Authorization") == "Bearer bluesky-access-fixture"
             return self.respond({"did":"did:plc:fixture", "emailConfirmed":True,
@@ -494,6 +501,10 @@ def run():
             assert installed_bsky["capabilities"]["fixture_marker"] == "preserved"
             assert installed_bsky["capabilities"]["permissions"]["actions"]["media"]["status"] == "unknown"
             assert sql(f"SELECT capabilities->'formats' FROM channels WHERE id='{bsky['id']}'") == '["text", "image"]'
+            assert request(f"/channels/{bsky['id']}/sync", {})["inbox_items"] == 1
+            assert request(f"/channels/{bsky['id']}/sync", {})["inbox_items"] == 1
+            assert sql(f"SELECT count(*) FROM provider_inbox WHERE channel_id='{bsky['id']}'") == "1"
+            assert installed_bsky["capabilities"]["reply"] is False
             assert fb["connection_status"] == "connected" and fb["manual_guidance"] is None
             assert fb["capabilities"]["verification"] == "identity_verified_publishing_unverified"
             assert fb["capabilities"]["permissions"]["actions"]["publish"]["status"] == "granted"

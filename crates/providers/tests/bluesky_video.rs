@@ -42,6 +42,16 @@ async fn provider(State(fixture): State<Arc<Mutex<Fixture>>>, request: Request) 
             .collect();
     let mut f = fixture.lock().unwrap();
     match (method.as_str(), path.as_str()) {
+        ("GET", "/xrpc/app.bsky.notification.listNotifications") => {
+            assert_eq!(headers["authorization"], "Bearer fixture-access");
+            assert_eq!(headers["atproto-proxy"], "did:web:api.bsky.app#bsky_notif");
+            assert_eq!(query["limit"], "50");
+            if f.mode == "invalid_notifications" {
+                return Json(json!({})).into_response();
+            }
+            let notification = json!({"uri":"at://did:plc:other/app.bsky.feed.post/fixture", "reason":"mention", "author":{"handle":"other.bsky.social"}, "record":{"text":"Hello"}});
+            Json(json!({"notifications":[notification, notification, {"uri":"at://ignored","reason":"follow"}]})).into_response()
+        }
         ("GET", "/xrpc/com.atproto.server.getSession") => {
             assert_eq!(headers["authorization"], "Bearer fixture-access");
             let endpoint = if f.mode == "invalid_pds" {
@@ -188,6 +198,17 @@ async fn video_receipts_survive_processing_and_reconcile_complete_records() {
     let c = channel();
     let p = publication();
 
+    let adapter = Adapter::fixture(&origin).unwrap();
+    let items = adapter.inbox(&c, &[]).await.unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].text, "Hello");
+    fixture.lock().unwrap().mode = "invalid_notifications".into();
+    assert_eq!(
+        adapter.inbox(&c, &[]).await.err().unwrap().kind,
+        FailureKind::Unavailable
+    );
+    fixture.lock().unwrap().mode.clear();
+
     let Step::Checkpoint(prepared) = step(&origin, &c, &p, None).await else {
         panic!()
     };
@@ -227,7 +248,6 @@ async fn video_receipts_survive_processing_and_reconcile_complete_records() {
     };
     assert_eq!(job["job_id"], "job-1");
     assert!(!job.to_string().contains("fixture-service-token"));
-    let adapter = Adapter::fixture(&origin).unwrap();
     let Some(Step::Checkpoint(waiting)) = adapter.reconcile(&c, &p, &job).await.unwrap() else {
         panic!()
     };
