@@ -32,6 +32,7 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
     let router = Router::new()
         .route("/start/{provider}", post(connections::start))
         .route("/callback/{provider}", get(connections::callback))
+        .route("/destinations/{id}", get(connections::flow_destinations))
         .route("/complete/{id}", post(connections::complete))
         .route("/disconnect/{id}", post(connections::disconnect))
         .route("/ack/{provider}", post(connections::acknowledge_revocation))
@@ -86,6 +87,32 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
             cookie,
         )
     }
+    async fn assert_uncertain(response: reqwest::Response, secrets: &[&str]) {
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.text().await.unwrap();
+        for secret in secrets {
+            assert!(!body.contains(secret), "error response exposed a secret");
+        }
+        let value: Value = serde_json::from_str(&body).unwrap();
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("in progress"));
+        assert!(message.contains("outcome is unknown if interrupted"));
+        assert!(message.contains("access may already have been granted"));
+        assert!(message.contains("check and remove any app access"));
+        assert!(message.contains("before starting a new authorization"));
+    }
+    async fn assert_missing_recovery(response: reqwest::Response, secrets: &[&str]) {
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.text().await.unwrap();
+        for secret in secrets {
+            assert!(!body.contains(secret), "error response exposed a secret");
+        }
+        let value: Value = serde_json::from_str(&body).unwrap();
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("If an authorization was interrupted"));
+        assert!(message.contains("check and remove any app access"));
+        assert!(message.contains("before starting a new authorization"));
+    }
     let callback = |state: &str, cookie: &str| {
         client
             .get(format!("{base}/callback/youtube"))
@@ -112,8 +139,24 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
             .header("x-beweft-request", "1")
             .json(&json!({"destination_id":"destination"}))
     };
+    let destinations = |flow: &str| {
+        client
+            .get(format!("{base}/destinations/{flow}"))
+            .header(header::COOKIE, &session)
+    };
 
-    let (_, pending_state, pending_cookie) = start(&client, &base, &session, brand, channel).await;
+    let (pending_flow, pending_state, pending_cookie) =
+        start(&client, &base, &session, brand, channel).await;
+    for response in [
+        destinations(&pending_flow).send().await.unwrap(),
+        complete(&pending_flow).send().await.unwrap(),
+    ] {
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let value: Value = response.json().await.unwrap();
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("has not completed"));
+        assert!(!message.contains("remove"));
+    }
     let (_, after_state, after_cookie) = start(&client, &base, &session, brand, channel).await;
     let (_, busy_state, busy_cookie) = start(&client, &base, &session, brand, channel).await;
     let (active_flow, active_state, active_cookie) =
@@ -128,6 +171,32 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
     )
     .await
     .unwrap();
+    let active_secrets = [
+        "fixture-code",
+        "rotated",
+        "rotated-refresh",
+        &h.session,
+        &active_state,
+        active_cookie.split_once('=').unwrap().1,
+    ];
+    assert_uncertain(
+        destinations(&active_flow).send().await.unwrap(),
+        &active_secrets,
+    )
+    .await;
+    assert_uncertain(
+        complete(&active_flow).send().await.unwrap(),
+        &active_secrets,
+    )
+    .await;
+    assert_uncertain(
+        callback(&active_state, &active_cookie)
+            .send()
+            .await
+            .unwrap(),
+        &active_secrets,
+    )
+    .await;
     let busy = callback(&busy_state, &busy_cookie).send().await.unwrap();
     assert_eq!(busy.status(), StatusCode::CONFLICT);
     let body: Value = busy.json().await.unwrap();
@@ -220,6 +289,40 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
         complete(&fresh).send().await.unwrap().status(),
         StatusCode::OK
     );
+    for response in [
+        callback(&fresh_state, &fresh_cookie).send().await.unwrap(),
+        destinations(&fresh).send().await.unwrap(),
+        complete(&fresh).send().await.unwrap(),
+    ] {
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.text().await.unwrap();
+        for secret in [
+            "fixture-code",
+            "rotated",
+            "rotated-refresh",
+            &h.session,
+            &fresh_state,
+            fresh_cookie.split_once('=').unwrap().1,
+        ] {
+            assert!(!body.contains(secret), "error response exposed a secret");
+        }
+        let value: Value = serde_json::from_str(&body).unwrap();
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("already completed"));
+        assert!(!message.contains("remove"));
+    }
+    let wrong_correlation = callback(&fresh_state, "beweft_oauth=wrong-correlation")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_correlation.status(), StatusCode::BAD_REQUEST);
+    let value: Value = wrong_correlation.json().await.unwrap();
+    assert!(
+        !value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already completed")
+    );
     let (legacy, legacy_state, legacy_cookie) =
         start(&client, &base, &session, brand, channel).await;
     sqlx::query("UPDATE connection_flows SET oauth_generation=NULL WHERE id=$1")
@@ -263,13 +366,14 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
     headers.insert(header::COOKIE, cookie.parse().unwrap());
     h.provider.exchange_block.store(1, Ordering::SeqCst);
     let app_state = h.state.clone();
+    let callback_state = state.clone();
     let canceled_task = tokio::spawn(async move {
         connections::callback(
             State(app_state),
             headers,
             Path("youtube".into()),
             Query(connections::Callback {
-                state: Some(state),
+                state: Some(callback_state),
                 code: Some("fixture-code".into()),
                 error: None,
             }),
@@ -300,11 +404,92 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
     assert_eq!(row, (true, true));
     probe.commit().await.unwrap();
     h.provider.exchange_block.store(0, Ordering::SeqCst);
+    h.provider.exchange_release.notify_one();
+    let canceled_secrets = [
+        "fixture-code",
+        "rotated",
+        "rotated-refresh",
+        &h.session,
+        &state,
+        cookie.split_once('=').unwrap().1,
+    ];
+    let after_cancel = h.provider.exchange_requests.load(Ordering::SeqCst);
+    assert_uncertain(
+        destinations(&canceled).send().await.unwrap(),
+        &canceled_secrets,
+    )
+    .await;
+    assert_uncertain(complete(&canceled).send().await.unwrap(), &canceled_secrets).await;
+    assert_uncertain(
+        callback(&state, &cookie).send().await.unwrap(),
+        &canceled_secrets,
+    )
+    .await;
+    for response in [
+        client
+            .get(format!("{base}/callback/youtube"))
+            .query(&[("state", state.as_str()), ("code", "fixture-code")])
+            .send()
+            .await
+            .unwrap(),
+        client
+            .get(format!("{base}/callback/youtube"))
+            .header(header::COOKIE, &cookie)
+            .query(&[("code", "fixture-code")])
+            .send()
+            .await
+            .unwrap(),
+    ] {
+        assert_missing_recovery(response, &canceled_secrets).await;
+    }
+    assert_eq!(
+        h.provider.exchange_requests.load(Ordering::SeqCst),
+        after_cancel
+    );
+    // Expiry alone does not turn an interrupted exchange into a known failure.
+    sqlx::query("UPDATE connection_flows SET expires_at=now()-interval '1 second' WHERE id=$1")
+        .bind(Uuid::parse_str(&canceled).unwrap())
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+    assert_uncertain(
+        destinations(&canceled).send().await.unwrap(),
+        &canceled_secrets,
+    )
+    .await;
+    assert_uncertain(complete(&canceled).send().await.unwrap(), &canceled_secrets).await;
+    assert_uncertain(
+        callback(&state, &cookie).send().await.unwrap(),
+        &canceled_secrets,
+    )
+    .await;
     assert_eq!(disconnect().send().await.unwrap().status(), StatusCode::OK);
     assert_eq!(ack().send().await.unwrap().status(), StatusCode::OK);
     assert_eq!(
         complete(&canceled).send().await.unwrap().status(),
         StatusCode::BAD_REQUEST
+    );
+    // Starting another flow cleans up expired rows; recovery must still be
+    // conditional and actionable when the original flow is no longer stored.
+    sqlx::query("DELETE FROM connection_flows WHERE id=$1")
+        .bind(Uuid::parse_str(&canceled).unwrap())
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+    assert_missing_recovery(
+        destinations(&canceled).send().await.unwrap(),
+        &canceled_secrets,
+    )
+    .await;
+    assert_missing_recovery(complete(&canceled).send().await.unwrap(), &canceled_secrets).await;
+    assert_missing_recovery(
+        callback(&state, &cookie).send().await.unwrap(),
+        &canceled_secrets,
+    )
+    .await;
+    assert_eq!(
+        h.provider.exchange_requests.load(Ordering::SeqCst),
+        after_cancel
     );
     sqlx::query("DELETE FROM connection_flows WHERE brand_id=$1")
         .bind(brand)

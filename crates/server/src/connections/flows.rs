@@ -1,4 +1,7 @@
 use super::*;
+
+const UNCERTAIN_AUTHORIZATION: &str = "Provider authorization is in progress, or its outcome is unknown if interrupted. Provider access may already have been granted. If it was interrupted, check and remove any app access at the provider before starting a new authorization.";
+
 pub async fn start(
     State(state): State<AppState>,
     auth: Auth,
@@ -74,7 +77,7 @@ pub async fn callback(
     let state_value = query
         .state
         .filter(|s| s.len() <= 256)
-        .ok_or_else(|| ApiError::bad("Missing OAuth state; start again"))?;
+        .ok_or_else(|| ApiError::bad("Missing OAuth state. If an authorization was interrupted, check and remove any app access at the provider before starting a new authorization; otherwise, start a new authorization."))?;
     let correlation = headers
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
@@ -82,8 +85,34 @@ pub async fn callback(
             s.split(';')
                 .find_map(|p| p.trim().strip_prefix("beweft_oauth="))
         })
-        .ok_or_else(|| ApiError::bad("Connection browser session expired; start again"))?;
-    let row=sqlx::query("UPDATE connection_flows f SET consumed_at=now() WHERE state_hash=$1 AND correlation_hash=$2 AND provider=$3 AND expires_at>now() AND consumed_at IS NULL AND EXISTS(SELECT 1 FROM sessions s WHERE s.token_hash=f.session_hash AND s.owner_id=f.owner_id AND s.expires_at>now()) RETURNING id,encrypted_verifier,encrypted_app,oauth_generation").bind(crypto::digest(&state_value)).bind(crypto::digest(correlation)).bind(&provider).fetch_optional(&state.db).await?.ok_or_else(||ApiError::bad("Connection expired or was already used; start again"))?;
+        .ok_or_else(|| ApiError::bad("Connection browser session expired. If an authorization was interrupted, check and remove any app access at the provider before starting a new authorization; otherwise, start a new authorization."))?;
+    let state_hash = crypto::digest(&state_value);
+    let correlation_hash = crypto::digest(correlation);
+    let row=sqlx::query("UPDATE connection_flows f SET consumed_at=now() WHERE state_hash=$1 AND correlation_hash=$2 AND provider=$3 AND expires_at>now() AND consumed_at IS NULL AND EXISTS(SELECT 1 FROM sessions s WHERE s.token_hash=f.session_hash AND s.owner_id=f.owner_id AND s.expires_at>now()) RETURNING id,encrypted_verifier,encrypted_app,oauth_generation").bind(&state_hash).bind(&correlation_hash).bind(&provider).fetch_optional(&state.db).await?;
+    let Some(row) = row else {
+        // The same browser state and a live originating session are required
+        // even for this status-only replay response.
+        let previous = sqlx::query("SELECT consumed_at IS NOT NULL AS consumed, completed_at IS NOT NULL AS completed, encrypted_candidates IS NOT NULL AS has_candidates, expires_at>now() AS unexpired FROM connection_flows f WHERE state_hash=$1 AND correlation_hash=$2 AND provider=$3 AND EXISTS(SELECT 1 FROM sessions s WHERE s.token_hash=f.session_hash AND s.owner_id=f.owner_id AND s.expires_at>now())")
+            .bind(&state_hash).bind(&correlation_hash).bind(&provider).fetch_optional(&state.db).await?;
+        let message = if let Some(previous) = previous {
+            if previous.get::<bool, _>("completed") {
+                "This connection was already completed."
+            } else if previous.get::<bool, _>("consumed")
+                && !previous.get::<bool, _>("has_candidates")
+            {
+                UNCERTAIN_AUTHORIZATION
+            } else if previous.get::<bool, _>("has_candidates")
+                && previous.get::<bool, _>("unexpired")
+            {
+                "This authorization has already returned; continue connection setup."
+            } else {
+                "Connection expired; start a new authorization."
+            }
+        } else {
+            "Connection expired or was already used. If an authorization was interrupted, check and remove any app access at the provider before starting a new authorization."
+        };
+        return Err(ApiError::bad(message));
+    };
     if query.error.is_some() {
         return Ok(Redirect::to("/settings?connection_error=consent_declined").into_response());
     }
@@ -181,8 +210,24 @@ async fn flow(
     id: Uuid,
 ) -> Result<(sqlx::postgres::PgRow, Vec<Channel>)> {
     auth.owner_session()?;
-    let row=sqlx::query("SELECT * FROM connection_flows WHERE id=$1 AND owner_id=$2 AND session_hash=$3 AND expires_at>now() AND completed_at IS NULL").bind(id).bind(auth.owner_id).bind(session_hash(headers)?).fetch_optional(&state.db).await?.ok_or_else(||ApiError::bad("Connection flow expired; start again"))?;
+    let row=sqlx::query("SELECT *,expires_at>now() AS unexpired FROM connection_flows WHERE id=$1 AND owner_id=$2 AND session_hash=$3").bind(id).bind(auth.owner_id).bind(session_hash(headers)?).fetch_optional(&state.db).await?.ok_or_else(||ApiError::bad("Connection flow expired or is unavailable. If an authorization was interrupted, check and remove any app access at the provider before starting a new authorization."))?;
     let encrypted: Option<String> = row.get("encrypted_candidates");
+    if row
+        .get::<Option<chrono::DateTime<chrono::Utc>>, _>("completed_at")
+        .is_some()
+    {
+        return Err(ApiError::bad("This connection was already completed."));
+    }
+    if encrypted.is_none()
+        && row
+            .get::<Option<chrono::DateTime<chrono::Utc>>, _>("consumed_at")
+            .is_some()
+    {
+        return Err(ApiError::bad(UNCERTAIN_AUTHORIZATION));
+    }
+    if !row.get::<bool, _>("unexpired") {
+        return Err(ApiError::bad("Connection flow expired; start again"));
+    }
     let plain = crypto::decrypt(
         key(state)?,
         id,
