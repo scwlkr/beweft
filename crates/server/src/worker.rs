@@ -17,7 +17,7 @@ pub async fn tick(state: &AppState, worker_id: &str) -> anyhow::Result<bool> {
     sqlx::query("INSERT INTO worker_heartbeats(id,last_seen) VALUES($1,now()) ON CONFLICT(id) DO UPDATE SET last_seen=now()").bind(worker_id).execute(&state.db).await?;
     recover_stale(state).await?;
     let mut tx = state.db.begin().await?;
-    let candidate: Option<Uuid> = sqlx::query_scalar("SELECT p.channel_id FROM publications p JOIN channels c ON c.id=p.channel_id JOIN brands b ON b.id=c.brand_id WHERE b.archived_at IS NULL AND p.state='queued' AND p.scheduled_at<=now() AND NOT c.paused ORDER BY p.scheduled_at LIMIT 1").fetch_optional(&mut *tx).await?;
+    let candidate: Option<Uuid> = sqlx::query_scalar("SELECT p.channel_id FROM publications p JOIN channels c ON c.id=p.channel_id JOIN brands b ON b.id=c.brand_id WHERE b.archived_at IS NULL AND p.state='queued' AND p.scheduled_at<=now() AND NOT c.paused AND (c.provider IN ('manual','fixture') OR c.connection_status='connected') ORDER BY p.scheduled_at LIMIT 1").fetch_optional(&mut *tx).await?;
     let Some(channel) = candidate else {
         tx.commit().await?;
         return Ok(false);
@@ -33,7 +33,7 @@ pub async fn tick(state: &AppState, worker_id: &str) -> anyhow::Result<bool> {
         .await
         .map_err(|e| anyhow::anyhow!("{}", e.2))?;
     // Re-read after the shared channel lock. A concurrent disconnect/pause may have changed eligibility.
-    let Some(row)=sqlx::query("SELECT p.id,p.channel_id,c.provider FROM publications p JOIN channels c ON c.id=p.channel_id JOIN brands b ON b.id=c.brand_id WHERE b.archived_at IS NULL AND p.channel_id=$1 AND p.state='queued' AND p.scheduled_at<=now() AND NOT c.paused ORDER BY p.scheduled_at FOR UPDATE OF p SKIP LOCKED LIMIT 1").bind(channel).fetch_optional(&mut *tx).await? else {tx.commit().await?;return Ok(false);};
+    let Some(row)=sqlx::query("SELECT p.id,p.channel_id,c.provider FROM publications p JOIN channels c ON c.id=p.channel_id JOIN brands b ON b.id=c.brand_id WHERE b.archived_at IS NULL AND p.channel_id=$1 AND p.state='queued' AND p.scheduled_at<=now() AND NOT c.paused AND (c.provider IN ('manual','fixture') OR c.connection_status='connected') ORDER BY p.scheduled_at FOR UPDATE OF p SKIP LOCKED LIMIT 1").bind(channel).fetch_optional(&mut *tx).await? else {tx.commit().await?;return Ok(false);};
     let id: Uuid = row.get("id");
     let provider: String = row.get("provider");
     let attempt = Uuid::new_v4();
@@ -104,12 +104,11 @@ pub async fn finish_attempt(
     tx.commit().await?;
     Ok(true)
 }
-pub async fn run(state: AppState) -> anyhow::Result<()> {
+pub async fn run(state: AppState, id: String) -> anyhow::Result<()> {
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     };
-    let id = format!("worker-{}", Uuid::new_v4());
     let stopped = Arc::new(AtomicBool::new(false));
     let signal_stop = stopped.clone();
     let signal_task = tokio::spawn(async move {

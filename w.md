@@ -4,14 +4,14 @@ Status: the owner resumed the full autonomous build on 2026-10-29 with three
 implementation workers and the orchestrator. Current assignments, integration
 decisions and verification boundaries are in
 [the active delivery record](docs/orchestration-current.md).
-Draft PR #9 preserves the pilot's brand-recovery work and an unresolved review
-finding. Nothing from that pilot has yet been merged or deployed.
-CLI/MCP qualification PR #10 is integrated in the handoff branch; shared schema
-updates, scheduling request recovery and self-host delivery remain in progress.
+Brand/session fixes from PRs #9 and #11, CLI/MCP qualification from PR #10,
+named-worker health from PR #13, and provider removal fencing from PR #12 are
+merged into the integration branch. Scheduling request recovery, media editing,
+idea organization and self-host delivery are active checkpoints.
 Results and workflow improvements: [cycle 1](docs/orchestration-cycle-1.md).
-Start continuation with [ORCHESTRATOR-HANDOFF.md](ORCHESTRATOR-HANDOFF.md), which
-contains the launch prompt, five-agent ownership, PR stack and unresolved review
-findings. No previous implementation agents remain active. Research decisions are
+Start continuation with [the active delivery record](docs/orchestration-current.md);
+[ORCHESTRATOR-HANDOFF.md](ORCHESTRATOR-HANDOFF.md) preserves the original launch
+requirements and historical stack. Research decisions are
 in `docs/research/` and `docs/architecture.md`. REA is installed for local Codex;
 the authorized passive Buffer inventory is recorded in `docs/research/buffer.md`.
 Provider implementation and

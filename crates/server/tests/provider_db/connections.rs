@@ -152,7 +152,7 @@ async fn refresh_serialization_and_grant_binding(h: &Harness) {
         &serde_json::to_string(&vec![candidate]).unwrap(),
     )
     .unwrap();
-    sqlx::query("INSERT INTO connection_flows(id,provider,owner_id,brand_id,session_hash,state_hash,correlation_hash,encrypted_verifier,reconnect_channel_id,expires_at,encrypted_candidates) VALUES($1,'mastodon',$2,$3,$4,$5,'unused','unused',$6,now()+interval '10 minutes',$7)").bind(flow).bind(h.auth.owner_id).bind(h.brand).bind(crypto::digest(&h.session)).bind(flow.to_string()).bind(id).bind(encrypted).execute(&h.state.db).await.unwrap();
+    sqlx::query("INSERT INTO connection_flows(id,provider,owner_id,brand_id,session_hash,state_hash,correlation_hash,encrypted_verifier,reconnect_channel_id,expires_at,encrypted_candidates,oauth_generation) VALUES($1,'mastodon',$2,$3,$4,$5,'unused','unused',$6,now()+interval '10 minutes',$7,COALESCE((SELECT oauth_generation FROM provider_oauth_fences WHERE provider='mastodon'),0))").bind(flow).bind(h.auth.owner_id).bind(h.brand).bind(crypto::digest(&h.session)).bind(flow.to_string()).bind(id).bind(encrypted).execute(&h.state.db).await.unwrap();
     assert!(
         connections::complete(
             State(h.state.clone()),

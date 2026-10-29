@@ -7,10 +7,11 @@ This is working status, not a release claim. Hosting remains local until the
 owner chooses a server and domain. Example production values must stay clearly
 marked placeholders. No live provider publication has been authorized for tests.
 
-The subsequent bounded cycle-1 trial is recorded in `docs/orchestration-cycle-1.md`.
-Draft PR #9 retains partial brand-recovery improvements and passing browser
-checks, with a remaining review blocker. It is not merged into this branch or
-main. Two pre-existing browser authentication follow-ups were also recorded.
+The bounded cycle-1 trial is recorded in `docs/orchestration-cycle-1.md`.
+Its brand-list and browser-session follow-ups were subsequently resolved in
+PR #11 and integrated through PR #9. CLI/MCP qualification (#10), named-worker
+health (#13) and provider removal fencing (#12) also landed in the integration
+branch. Main still awaits the full stack's integrated delivery checks.
 
 ## Complete
 

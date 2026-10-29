@@ -1,95 +1,91 @@
 # Active delivery record
 
 The owner resumed the full build on 2026-10-29. This record supersedes paused
-status in the historical handoff, not the requirements or unresolved findings.
-It describes work in progress; it is not a release or live-provider claim.
+status in the historical handoff. Work remains in progress; no live-provider
+qualification or completed release is claimed.
 
 ## Integration
 
-Verified starting integration branch: `codex/orchestrator-handoff`,
-`f442efafbc69fda4e86369dd76244b4795cc10c3`. Main remains at the durable-core
-delivery. Open PRs #4–#8 preserve the original stack; #9 preserves the bounded
-brand-recovery trial. No implementation changes were discarded at resumption.
+Integration branch: `codex/orchestrator-handoff`, provider-fence merge `e90403e`.
+Main remains at durable-core PR #3. Open PRs #4–#8 preserve the original stack.
+Reviewed additions land through merge commits; the completed stack will land
+without squashing an ancestor beneath open descendants.
 
-Reviewed fixes land into their explicit stack branches. The final stack will
-land through a merge commit after integrated checks and fresh review, preserving
-ancestor commits and PR history. Do not squash a parent beneath open descendants.
-The owner authorizes merges without a routine human gate; automated checks and
-brand-new independent reviews remain required.
+The owner authorizes autonomous merges. Automated checks and a brand-new
+read-only reviewer for every consequential code revision remain required.
+All workers/reviewers use fresh contexts with `gpt-6.1-terra` at `max`, within
+three active children plus the orchestrator. Each milestone freezes its SHA.
 
-## First assignments
+## Integrated checkpoints
 
-All workers and reviewers use fresh contexts with `gpt-6.1-terra` at `max`.
-There are at most three active children; a completed worker releases capacity
-for a new read-only reviewer. Implementers never serve as their own independent
-reviewer. Each milestone freezes a committed SHA and returns a compact report.
+- PR #10, CLI/MCP qualification: `92761c9`. Real API and subprocess checks cover
+  scoped access, upload handles, bounded cursor pages and large valid bodies.
+  Percent-encoded query handling has a nonblocking restriction queued for the
+  next CLI slice. Scheduling receipt recovery remains to add.
+- PR #11 passed fresh review at `c45f2f2` and landed through preserved PR #9 at
+  `5a42e6e`. Brand discovery/fallback ordering and browser-session boundaries
+  are covered, including stale responses, direct 401s and delayed sign-out.
+  The integrated build passed all 66 isolated Chromium scenarios at this merge.
+- PR #13, named-worker health: `c8e7760`. The probe reads the configured worker's
+  fresh heartbeat without starting a worker, migrations or scheduler. Isolated
+  process/PostgreSQL, hostile environment and actual Docker-health checks passed.
+- PR #12, provider removal fencing: `e90403e`, reviewed head `5cfe0bb`.
+  Disconnect sends no direct-provider revocation request. A durable fence blocks
+  reconnect until owner-attested access removal; same-provider siblings retain
+  credentials/queues but conservatively require reconnection. Fixtures cover
+  every direct provider, stale grants/callbacks, busy operations and pool pressure.
+  The review's final sync-guidance finding was adjudicated nonblocking: recovery
+  explicitly waits for active work, inspects connected channels and permits
+  removal only of orphaned access. Disconnect itself waits for channel locks.
+  Provider routes and the pre-disconnect warning remain to wire into production.
 
-| Lane | Branch | First acceptance boundary |
+## Active contracts and checkpoints
+
+| Lane | Checkpoint | Next acceptance boundary |
 | --- | --- | --- |
-| Core/providers A+B | `codex/core-provider-recovery` | Remote revocation fences stale OAuth candidates and concurrent reconnect completion; deterministic blocked-revoke test. |
-| Web C | `codex/web-recovery-delivery` | Authoritative overlapping brand snapshots, durable scheduling response-loss recovery and related session races. Based on preserved PR #9. |
-| CLI/operations D+E | `codex/cli-operations-delivery` | Real API/CLI/MCP subprocess qualification and scoped file/token access; then installation/recovery rehearsal. |
+| Core/providers A+B | Durable scheduling request receipts, migration 0009 | Concurrent/replayed requests, lost responses, rollback, exact timestamp normalization and bounded summary recovery; then production provider wiring and formats. |
+| Web C | PR #14 scheduling; #15 media descriptions; #16 idea organization | Media CAS fix `518d5e3` is back in implementation after review found a cross-view pending-save bypass and invalid-text recovery trap. Scheduling must use the real 0009 receipt API. Ideas and preserved manual guidance await review/integration. |
+| CLI/operations D+E | Self-host operations, based on named-worker health | Full image, fresh install, restart, safe backup/restore and upgrade rehearsal; then schedule receipt tools. |
 
-Core owns server routes, worker behavior, provider modules, migrations and
-generated API exports. Web owns client code and browser tests, except generated
-contracts. CLI/operations owns agent interfaces, packaging and operator scripts.
-The orchestrator owns integration, delivery status and cross-lane decisions.
+Core owns server/worker/providers/migrations/generated exports. Web owns client
+and browser tests, plus a narrow loan for media metadata CAS and authorized GET:
+migration 0010 adds `metadata_version`; PATCH requires a matching version and
+increments it. Generated files receive a coordinated source-driven refresh.
+Operations owns CLI/MCP, packaging and operator scripts. The orchestrator owns
+contracts, integration, docs, delivery readiness and final cleanup.
 
-Migration `0008` is reserved for revocation fencing. Core and web must agree a
-durable schedule-request contract: the existing revision/channel unique index
-excludes canceled publications and cannot alone make request replay safe.
-The worker health interface must check a named instance's fresh heartbeat and
-exit without starting a scheduler; core implements it and operations wires it.
+New web scheduling writes persist a UUID and immutable normalized mutation.
+Backend request replay precedes current-version/time checks and returns original
+publication IDs even after cancellation/replacement. GET receipts return bounded
+publication summaries. A missing receipt cannot prove an in-flight write ended.
+PR #17 at `56fb0ba` passed its focused fixtures but fresh review found a pool
+exhaustion defect: dropping a timed-out SQLx lock query did not end its database
+wait. Nonblocking request admission passed fresh review at `ec5305f`; repeated
+retries leave receipt/auth reads usable. That review found one further receipt
+bound: provider-derived or existing channel names can exceed the client response
+limit. Explicit summary display-field bounds are being added.
+Timestamps accept at most six fractional digits and normalize exactly to UTC;
+client comparison must preserve microseconds, not truncate through Date.parse.
 
-## Review checkpoints
-
-Focused PRs are open against the preserved stack; none of these checkpoints is
-a delivered release:
-
-- PR #10 is merged into the integration branch at `92761c9`. It adds CLI/MCP
-  qualification and safe upload handles. Fresh review exposed
-  missing media inspection and unbounded list reads; the second checkpoint adds
-  scoped media reads and bounded cursor pages. Further review found upload
-  timeout and request/response envelope limits that reject valid API operations.
-  Reviewed fixes now handle these bounds and complete bounded multipart bodies.
-  The final review passed the functional checks; a nonblocking restriction on
-  percent-encoded raw query values remains for the next agent-interface slice.
-  Operations is now implementing named-worker health checks in a focused PR.
-- PR #11: brand-list ordering and browser sessions, targeting PR #9's branch.
-  Fresh review reproduced cross-tab stale 401s, a queued sign-out revoking a
-  later login, and repeated first-brand submission. The worker is fixing those
-  boundaries using a non-secret shared authentication epoch under the existing
-  same-origin lock. Scheduling WIP is separately preserved on
-  `codex/web-schedule-recovery`; it must not be merged as completed recovery.
-- PR #12: disconnect/reconnect revocation fencing. Fresh review reproduced
-  missing fencing for already-unusable grants and sync callers exhausting the
-  database pool before reaching the nonblocking sync guard. The revised policy
-  makes Google access removal an explicit owner action, keeps a durable fence
-  until confirmation, and initiates no Google grant-wide revoke itself. It does
-  not claim Google propagation or live qualification has been verified.
-
-Every consequential revision goes to a new read-only reviewer. Prior reviewers'
-temporary resources have been cleaned and their managed worktrees retired
-through Codex. Implementation worktrees remain active and owned by their lanes.
-Operations may implement the narrow named-worker health interface; core retains
-provider dispatch and schema ownership. The compact scheduling response added
-for agent clients must preserve the default full web response and remain
-compatible with the upcoming durable request-ID contract.
+Media saves persist owner/brand/asset/base-version/text before PATCH. Unknown
+outcomes stay unresolved; same-CAS retry is explicit. A read at the base version
+cannot prove a pending write ended. A later version fences the old write; UI
+cache reconciliation must be monotonic and status accessible in the dialog.
 
 ## Runtime and resources
 
-The existing local API at `http://localhost:3000/healthz` returned `status: ok`
-at resumption. It is the retained earlier preview, not a verified current build.
-The existing project PostgreSQL container remains available on loopback 55439.
-Private configuration stays in ignored `.local` files. Other projects' services
-and the user's browsers are outside cleanup ownership.
+The retained preview at localhost:3000 is an earlier API/worker build, not the
+current integrated release. Its served web bundle was rebuilt during checks.
+The project PostgreSQL container remains on loopback 55439. Private settings
+stay ignored. Other projects' services and normal browsers are protected.
 
-Workers use managed worktrees and owned disposable test databases/directories.
-Mutable build output is isolated when concurrent builds could change binaries.
-Retain only resources needed for unfinished work or review, then clean them and
-retire completed managed worktrees through Codex. The orchestrator owns final
-cleanup verification and the useful running installation.
+Root workspace build and all 66 browser scenarios passed at `5a42e6e`. Root
+binaries predate the worker-health/provider merges; broader integrated checks
+follow the remaining contract and workflow merges. No live provider account,
+public post, paid call or Buffer queue mutation was used.
 
-No new provider connection, public post, paid call or Buffer queue mutation is
-authorized for testing. Hosting stays local with server/domain placeholders.
-Missing adapter code remains implementation work, not an external blocker.
+Workers own isolated test databases/processes/artifacts. Shared mutable outputs
+are avoided; retained builds are tied to a source SHA. Finished review worktrees
+are retired through Codex. The orchestrator owns final cleanup and a useful
+running local installation. Hosting remains placeholders until the owner chooses
+a server/domain. Missing adapter code is unfinished work, not an external blocker.

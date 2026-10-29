@@ -1,4 +1,5 @@
 use super::*;
+use sqlx::Acquire;
 pub async fn sync(
     State(state): State<AppState>,
     auth: Auth,
@@ -6,25 +7,47 @@ pub async fn sync(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>> {
     auth.scope("publishing:write")?;
+    // A sync keeps one connection through refresh and network reads. Reserve at
+    // least one pool slot for other work and reject excess before acquiring one.
+    let _permit = state
+        .sync_slots
+        .try_acquire()
+        .map_err(|_| ApiError::conflict("Sync capacity is busy; try again shortly"))?;
     auth.brand(catalog::channel_brand(&state, id).await?)?;
-    let c = connections::load_channel(&state, id).await?;
+    // Keep the nonblocking sync lock across the separately committed refresh and
+    // the downstream sync, using one pool connection throughout. A cancelled
+    // query may have acquired a session lock before its result was received, so
+    // close this connection on every exit instead of returning a lock to the pool.
+    let mut db = state.db.acquire().await?;
+    db.close_on_drop();
+    let lock: i64 = id.as_u128() as i64;
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(lock)
+        .fetch_one(&mut *db)
+        .await?;
+    if !acquired {
+        return Err(ApiError::conflict("This channel is already syncing"));
+    }
+    let mut refresh = db.begin().await?;
+    let refreshed = connections::load_channel_tx(&state, &mut refresh, id, None).await;
+    refresh.commit().await?;
+    refreshed?;
+
+    // Reacquire the channel row for the full sync so disconnect cannot revoke
+    // a grant in use; downstream failures cannot roll back a rotated token.
+    let mut guard = db.begin().await?;
+    let c = connections::load_stored_channel_tx(&state, &mut guard, id).await?;
     if c.app.provider == "x" && body["allow_metered"].as_bool() != Some(true) {
         return Err(ApiError::bad(
             "X reads can incur charges. Set allow_metered=true only after approving provider costs.",
         ));
     }
-    // Bound network work and avoid overlapping polling requests for one account.
-    let mut guard = state.db.begin().await?;
-    let lock: i64 = id.as_u128() as i64;
-    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-        .bind(lock)
-        .fetch_one(&mut *guard)
-        .await?;
-    if !acquired {
-        return Err(ApiError::conflict("This channel is already syncing"));
-    }
-    let result = sync_inner(&state, &mut guard, id, &c).await;
-    // Transaction advisory locks are released on commit or cancellation/rollback.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        sync_inner(&state, &mut guard, id, &c),
+    )
+    .await
+    .map_err(|_| ApiError::conflict("Provider sync timed out; try again"))?;
     guard.commit().await?;
     result
 }
