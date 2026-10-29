@@ -154,7 +154,8 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
             ("x", "image/gif") => 15 * 1024 * 1024,
             ("x", t) if t.starts_with("image/") => 5 * 1024 * 1024,
             ("x", _) => 256 * 1024 * 1024,
-            ("bluesky", _) => 2_000_000,
+            ("bluesky", t) if t.starts_with("image/") => 2_000_000,
+            ("bluesky", _) => 300_000_000,
             ("instagram" | "threads", t) if t.starts_with("image/") => 8 * 1024 * 1024,
             ("mastodon", t) if t.starts_with("image/") => 16 * 1024 * 1024,
             ("mastodon", _) => 99 * 1024 * 1024,
@@ -220,7 +221,7 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
                 ));
             }
         }
-        if provider == "bluesky" && (width > 4000 || height > 4000) {
+        if provider == "bluesky" && image(m) && (width > 4000 || height > 4000) {
             return Err(invalid(
                 "Bluesky images must fit within 4000 by 4000 pixels",
             ));
@@ -246,6 +247,7 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
                 "mastodon" => 3600.0,
                 "youtube" => 43200.0,
                 "x" => 1200.0,
+                "bluesky" => 600.0,
                 _ => 900.0,
             };
             let minimum = match provider {

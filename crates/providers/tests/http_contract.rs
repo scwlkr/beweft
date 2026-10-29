@@ -17,6 +17,7 @@ struct Fixture {
     requests: Vec<(String, Value)>,
     lost_write: bool,
     record: Value,
+    record_uri: String,
     session_origin: String,
 }
 async fn provider(State(state): State<Arc<Mutex<Fixture>>>, request: Request) -> Response {
@@ -79,10 +80,14 @@ async fn provider(State(state): State<Arc<Mutex<Fixture>>>, request: Request) ->
         }
         "/xrpc/com.atproto.repo.createRecord" => {
             state.record = body["record"].clone();
-            json!({"uri":format!("at://account-1/app.bsky.feed.post/{}",body["rkey"].as_str().unwrap()),"cid":"cid-1"})
+            state.record_uri = format!(
+                "at://account-1/app.bsky.feed.post/{}",
+                body["rkey"].as_str().unwrap()
+            );
+            json!({"uri":state.record_uri,"cid":"cid-1"})
         }
         "/xrpc/com.atproto.repo.getRecord" => {
-            json!({"uri":"at://account-1/app.bsky.feed.post/fixed","cid":"cid-1","value":state.record})
+            json!({"uri":state.record_uri,"cid":"cid-1","value":state.record})
         }
         "/rest/posts" => {
             let mut r = StatusCode::CREATED.into_response();

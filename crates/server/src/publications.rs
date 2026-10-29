@@ -246,6 +246,9 @@ async fn change(
             "Inspect provider status and reset the X checkpoint before retrying",
         ));
     }
+    if action == "retry" && current == "failed" && provider == "bluesky" {
+        crate::provider_bridge::prepare_bluesky_video_retry_tx(state, &mut tx, id).await?;
+    }
     let mut scheduled_at = row.get::<chrono::DateTime<Utc>, _>("scheduled_at");
     let target = match action {
         "cancel" if ["queued", "manual_required", "failed"].contains(&current.as_str()) => {

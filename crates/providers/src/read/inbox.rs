@@ -115,15 +115,25 @@ impl Adapter {
                                 instance_origin(&c.app)?
                             ),
                             token,
-                        )?,
+                        )?
+                        .header("atproto-proxy", "did:web:api.bsky.app#bsky_appview"),
                         false,
                     )
                     .await?;
-                for n in v["notifications"].as_array().unwrap_or(&vec![]) {
+                let notifications = v["notifications"].as_array().ok_or_else(|| {
+                    error(
+                        FailureKind::Unavailable,
+                        "Bluesky returned an invalid notification page",
+                    )
+                })?;
+                for n in notifications {
                     if !matches!(n["reason"].as_str(), Some("mention" | "reply" | "quote")) {
                         continue;
                     }
                     if let Some(id) = n["uri"].as_str() {
+                        if items.iter().any(|item: &InboxItem| item.id == id) {
+                            continue;
+                        }
                         items.push(InboxItem {
                             reply_context: None,
                             id: id.into(),

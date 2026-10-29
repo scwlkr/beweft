@@ -192,9 +192,9 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
         }
         "bluesky" => {
             post_limit(p, 300)?;
-            if p.media.len() > 4 || p.media.iter().any(|m| !image(m)) {
+            if p.media.len() > 4 || p.media.iter().any(|m| !image(m) && m.mime != "video/mp4") {
                 return Err(invalid(
-                    "Bluesky adapter supports up to four images. Video uses manual handoff.",
+                    "Bluesky supports up to four images or one MP4 video",
                 ));
             }
         }
