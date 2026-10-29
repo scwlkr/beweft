@@ -324,8 +324,8 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
         .unwrap();
     assert!(wait < inspect && inspect < remove && remove < confirm);
 
-    // A committed marker remains recoverable even while its row is locked by
-    // a concurrent operation; the response neither waits nor mutates it.
+    // If another operation holds the row, report busy and require a current
+    // recheck rather than issuing possibly stale manual-removal instructions.
     let mut locked = h.state.db.begin().await.unwrap();
     sqlx::query("SELECT provider FROM provider_oauth_fences WHERE provider='youtube' FOR UPDATE")
         .fetch_one(&mut *locked)
@@ -337,13 +337,20 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let locked_body: Value = response.json().await.unwrap();
-    assert_eq!(locked_body["error"]["message"], message);
+    let locked_message = locked_body["error"]["message"].as_str().unwrap();
+    assert!(locked_message.contains("retry and check the current provider status"));
+    assert!(!locked_message.contains("connected-app settings"));
     locked.rollback().await.unwrap();
     let (first_repeat, second_repeat) = tokio::join!(repeat(), repeat());
     for response in [first_repeat.unwrap(), second_repeat.unwrap()] {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let body: Value = response.json().await.unwrap();
-        assert_eq!(body["error"]["message"], message);
+        let current = body["error"]["message"].as_str().unwrap();
+        assert!(
+            current == message
+                || (current.contains("retry and check the current provider status")
+                    && !current.contains("connected-app settings"))
+        );
     }
     let pending_after: (i64, Option<Uuid>) = sqlx::query_as(
         "SELECT oauth_generation,revocation_id FROM provider_oauth_fences WHERE provider='youtube'",

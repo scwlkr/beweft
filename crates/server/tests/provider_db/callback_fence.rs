@@ -103,6 +103,18 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
         assert!(message.contains("remove only orphaned access"));
         assert!(message.contains("before starting a new authorization"));
     }
+    async fn assert_busy(response: reqwest::Response, secrets: &[&str]) {
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response.text().await.unwrap();
+        for secret in secrets {
+            assert!(!body.contains(secret), "busy response exposed a secret");
+        }
+        let value: Value = serde_json::from_str(&body).unwrap();
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("retry and check the current provider status"));
+        assert!(!message.contains("connected-app settings"));
+        assert!(!message.contains("remove only orphaned access"));
+    }
     async fn assert_missing_recovery(response: reqwest::Response, secrets: &[&str]) {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response.text().await.unwrap();
@@ -182,17 +194,17 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
         &active_state,
         active_cookie.split_once('=').unwrap().1,
     ];
-    assert_uncertain(
+    assert_busy(
         destinations(&active_flow).send().await.unwrap(),
         &active_secrets,
     )
     .await;
-    assert_uncertain(
+    assert_busy(
         complete(&active_flow).send().await.unwrap(),
         &active_secrets,
     )
     .await;
-    assert_uncertain(
+    assert_busy(
         callback(&active_state, &active_cookie)
             .send()
             .await
@@ -204,16 +216,14 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
     assert_eq!(busy.status(), StatusCode::CONFLICT);
     let body: Value = busy.json().await.unwrap();
     let message = body["error"]["message"].as_str().unwrap();
-    assert!(message.contains("consumed") && message.contains("starting a new authorization"));
-    assert!(message.contains("First inspect your connected channels"));
-    assert_eq!(
-        callback(&busy_state, &busy_cookie)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::BAD_REQUEST
-    );
+    assert!(message.contains("consumed") && message.contains("start a new authorization"));
+    assert!(message.contains("retry and check the current provider status"));
+    assert!(!message.contains("connected-app settings"));
+    assert_busy(
+        callback(&busy_state, &busy_cookie).send().await.unwrap(),
+        &active_secrets,
+    )
+    .await;
     assert_eq!(
         h.provider.exchange_requests.load(Ordering::SeqCst),
         before + 1
@@ -535,7 +545,7 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
         destinations(&near_expiry).send().await.unwrap(),
         complete(&near_expiry).send().await.unwrap(),
     ] {
-        assert_uncertain(response, &near_secrets).await;
+        assert_busy(response, &near_secrets).await;
     }
     h.provider.exchange_block.store(0, Ordering::SeqCst);
     h.provider.exchange_release.notify_one();

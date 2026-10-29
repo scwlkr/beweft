@@ -1,6 +1,6 @@
 use super::*;
 
-const RECOVERY_GUIDANCE: &str = "Wait for any authorization still in progress to finish. First inspect your connected channels for this destination. If it did not connect, check provider access and remove only orphaned access before starting a new authorization; shared access may serve other channels.";
+const RECOVERY_GUIDANCE: &str = "Wait for any provider operation or authorization still in progress to finish, then check the current provider status. First inspect your connected channels for this destination. If it did not connect, check provider access and remove only orphaned access before starting a new authorization; shared access may serve other channels.";
 
 pub(super) fn recovery(message: &str) -> String {
     format!("{message} {RECOVERY_GUIDANCE}")
@@ -9,7 +9,10 @@ pub(super) fn recovery(message: &str) -> String {
 // After provider consent, even a local validation or database failure can
 // leave remote access behind. Preserve the original status and safe message.
 pub(super) fn post_grant_error(error: ApiError) -> ApiError {
-    if error.2.contains(RECOVERY_GUIDANCE) {
+    if error.2.contains(RECOVERY_GUIDANCE)
+        || error.2.contains(super::apps::PROVIDER_BUSY_MESSAGE)
+        || error.2.contains(super::apps::PENDING_REMOVAL_MESSAGE)
+    {
         return error;
     }
     ApiError(
@@ -26,6 +29,13 @@ fn uncertain_authorization() -> String {
     recovery(
         "Provider authorization is in progress, or its outcome is unknown if interrupted. Provider access may already have been granted.",
     )
+}
+
+async fn require_recovery_admission(state: &AppState, provider: &str) -> Result<()> {
+    let mut tx = state.db.begin().await?;
+    super::apps::require_open_oauth_gate(super::apps::oauth_gate(&mut tx, provider, false).await?)?;
+    tx.commit().await?;
+    Ok(())
 }
 
 pub async fn start(
@@ -135,12 +145,22 @@ pub async fn callback(
             } else if previous.get::<bool, _>("consumed")
                 && !previous.get::<bool, _>("has_candidates")
             {
+                require_recovery_admission(&state, &provider)
+                    .await
+                    .map_err(|error| {
+                        ApiError(
+                            error.0,
+                            error.1,
+                            format!("This authorization was consumed. {}", error.2),
+                        )
+                    })?;
                 uncertain_authorization()
             } else if previous.get::<bool, _>("has_candidates")
                 && previous.get::<bool, _>("unexpired")
             {
                 "This authorization has already returned; continue connection setup.".to_owned()
             } else {
+                require_recovery_admission(&state, &provider).await?;
                 recovery("Connection expired; provider consent or access may exist.")
             }
         } else {
@@ -180,7 +200,7 @@ pub async fn callback(
         .and_then(super::apps::require_open_oauth_gate)
         .map_err(|error| {
             if error.0 == axum::http::StatusCode::CONFLICT {
-                ApiError::conflict(recovery("This authorization was consumed. If provider access removal is pending, complete and confirm it; otherwise wait for the current operation to finish."))
+                ApiError(error.0, error.1, format!("This authorization was consumed. {} Once the current provider status permits, start a new authorization.", error.2))
             } else {
                 error
             }
@@ -294,9 +314,11 @@ async fn flow(
             .get::<Option<chrono::DateTime<chrono::Utc>>, _>("consumed_at")
             .is_some()
     {
+        require_recovery_admission(state, &row.get::<String, _>("provider")).await?;
         return Err(ApiError::bad(uncertain_authorization()));
     }
     if !row.get::<bool, _>("unexpired") {
+        require_recovery_admission(state, &row.get::<String, _>("provider")).await?;
         return Err(ApiError::bad(recovery(
             "Connection flow expired; provider consent or access may exist.",
         )));
@@ -308,8 +330,14 @@ async fn flow(
             .map_err(|_| ApiError::bad("Connection candidates could not be decrypted"))?;
         serde_json::from_str(&plain)
             .map_err(|_| ApiError::bad("Stored connection candidates are invalid"))
-    })()
-    .map_err(post_grant_error)?;
+    })();
+    let candidates = match candidates {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            require_recovery_admission(state, &row.get::<String, _>("provider")).await?;
+            return Err(post_grant_error(error));
+        }
+    };
     Ok((row, candidates))
 }
 pub async fn flow_destinations(

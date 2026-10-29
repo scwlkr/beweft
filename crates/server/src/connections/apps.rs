@@ -1,4 +1,16 @@
 use super::*;
+
+pub(super) const PROVIDER_BUSY_MESSAGE: &str = "A provider operation is in progress. Wait for it to finish, then retry and check the current provider status before any manual removal.";
+pub(super) const PENDING_REMOVAL_MESSAGE: &str = "Provider removal is pending. Wait for any provider operation still in progress to finish. Removing access at the provider may affect other channels and unrelated accounts. First inspect your channels, then remove the affected access in the provider's connected-app settings. Only after removal is complete, confirm it before connecting again.";
+
+pub(super) fn provider_operation_key(provider: &str) -> String {
+    format!("provider-operation:{provider}")
+}
+
+pub(super) fn provider_busy_error() -> ApiError {
+    ApiError::conflict(PROVIDER_BUSY_MESSAGE)
+}
+
 /// Serialize OAuth completion and revocation for the provider, including remote I/O.
 /// A busy gate fails promptly so other requests do not wait on the provider timeout.
 pub(super) async fn oauth_gate(
@@ -8,9 +20,7 @@ pub(super) async fn oauth_gate(
 ) -> Result<Option<(i64, Option<Uuid>)>> {
     fn gate_error(error: sqlx::Error) -> ApiError {
         if matches!(&error, sqlx::Error::Database(db) if db.code().as_deref() == Some("55P03")) {
-            ApiError::conflict(
-                "Provider revocation or another connection operation is in progress; try again",
-            )
+            provider_busy_error()
         } else {
             error.into()
         }
@@ -19,6 +29,17 @@ pub(super) async fn oauth_gate(
         .execute(&mut **tx)
         .await
         .map_err(gate_error)?;
+    // Disconnect holds the same key at session scope across its local commit
+    // and remote revoke. All other gate users fail promptly while it is held.
+    let admitted: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(provider_operation_key(provider))
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(gate_error)?;
+    if !admitted {
+        return Err(provider_busy_error());
+    }
     let query = if wait {
         "SELECT oauth_generation,revocation_id FROM provider_oauth_fences WHERE provider=$1 FOR UPDATE"
     } else {
@@ -40,9 +61,7 @@ pub(super) async fn oauth_gate(
                 .await
                 .map_err(gate_error)?;
         if !creator {
-            return Err(ApiError::conflict(
-                "Provider revocation or another connection operation is in progress; try again",
-            ));
+            return Err(provider_busy_error());
         }
         row = sqlx::query(query)
             .bind(provider)
@@ -63,9 +82,7 @@ pub(super) async fn oauth_gate(
 }
 
 pub(super) fn pending_removal_error() -> ApiError {
-    ApiError::conflict(
-        "Provider removal is pending. Wait for any provider operation still in progress to finish. Removing access at the provider may affect other channels and unrelated accounts. First inspect your channels, then remove the affected access in the provider's connected-app settings. Only after removal is complete, confirm it before connecting again.",
-    )
+    ApiError::conflict(PENDING_REMOVAL_MESSAGE)
 }
 
 pub(super) fn require_open_oauth_gate(gate: Option<(i64, Option<Uuid>)>) -> Result<i64> {

@@ -1,4 +1,5 @@
 use super::*;
+use sqlx::Acquire;
 pub(super) async fn store_channel(
     state: &AppState,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -243,21 +244,22 @@ pub async fn disconnect(
         .bind(id)
         .fetch_one(&state.db)
         .await?;
-    let mut tx = state.db.begin().await?;
+    // Retain this session-level provider latch across both transactions. A
+    // cancelled lock request may already have succeeded on the server, so
+    // never return this connection to the pool with a session lock attached.
+    let mut db = state.db.acquire().await?;
+    db.close_on_drop();
+    let admitted: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtextextended($1,0))")
+        .bind(super::apps::provider_operation_key(&provider))
+        .fetch_one(&mut *db)
+        .await?;
+    if !admitted {
+        return Err(super::apps::provider_busy_error());
+    }
+    let mut tx = db.begin().await?;
     sqlx::query("SET LOCAL lock_timeout = '5s'")
         .execute(&mut *tx)
         .await?;
-    // A committed pending marker remains readable while another operation
-    // holds the gate. Return the same recovery steps without waiting for it.
-    let pending: Option<Uuid> =
-        sqlx::query_scalar("SELECT revocation_id FROM provider_oauth_fences WHERE provider=$1")
-            .bind(&provider)
-            .fetch_optional(&mut *tx)
-            .await?
-            .flatten();
-    if pending.is_some() {
-        return Err(super::apps::pending_removal_error());
-    }
     let gate = super::apps::oauth_gate(&mut tx, &provider, false).await?;
     if gate.is_some_and(|(_, pending)| pending.is_some()) {
         return Err(super::apps::pending_removal_error());
@@ -272,10 +274,7 @@ pub async fn disconnect(
     .fetch_one(&mut *tx)
     .await?;
     let has_grant_hint: bool = target.get("has_grant");
-    if provider == "youtube"
-        && !has_grant_hint
-        && target.get::<String, _>("connection_status") == "disconnected"
-    {
+    if !has_grant_hint && target.get::<String, _>("connection_status") == "disconnected" {
         // A prior completed disconnect already crossed the removal boundary.
         // Do not revoke a fresh sibling's grant when this request is repeated.
         tx.commit().await?;
@@ -350,16 +349,20 @@ pub async fn disconnect(
     let revoked = if let (Some(c), Some(revocation_id)) = (channel, revocation_id) {
         // Keep the provider gate locked until remote I/O returns. The committed marker
         // survives crashes and uncertain outcomes; an owner must resolve those manually.
-        let mut revoke_tx = state.db.begin().await?;
+        let mut revoke_tx = db.begin().await?;
         sqlx::query("SET LOCAL lock_timeout = '5s'")
             .execute(&mut *revoke_tx)
             .await?;
         let gate = super::apps::oauth_gate(&mut revoke_tx, &provider, true).await?;
         let revoked = if gate.is_some_and(|(_, pending)| pending == Some(revocation_id)) {
-            match adapter_for(&c.app).await {
-                Ok(adapter) => adapter.revoke(&c).await.unwrap_or(false),
-                Err(_) => false,
-            }
+            tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                match adapter_for(&c.app).await {
+                    Ok(adapter) => adapter.revoke(&c).await.unwrap_or(false),
+                    Err(_) => false,
+                }
+            })
+            .await
+            .unwrap_or(false)
         } else {
             false
         };

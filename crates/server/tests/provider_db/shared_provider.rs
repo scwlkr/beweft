@@ -1,5 +1,5 @@
 async fn disconnect_fences_shared_provider_channels(h: &Harness) {
-    use axum::routing::post;
+    use axum::routing::{get, post};
     use std::time::Duration;
 
     h.app("linkedin", "shared-client", None).await;
@@ -58,12 +58,15 @@ async fn disconnect_fences_shared_provider_channels(h: &Harness) {
     let router = Router::new()
         .route("/disconnect/{id}", post(connections::disconnect))
         .route("/start/{provider}", post(connections::start))
+        .route("/callback/{provider}", get(connections::callback))
+        .route("/complete/{id}", post(connections::complete))
         .route("/ack/{provider}", post(connections::acknowledge_revocation))
         .with_state(h.state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(8))
         .build()
         .unwrap();
@@ -173,11 +176,90 @@ async fn disconnect_fences_shared_provider_channels(h: &Harness) {
         .unwrap();
     assert_eq!(status, "reconnect_required");
 
+    // A new sibling authorization created after confirmation remains usable
+    // when the already-disconnected target is disconnected again.
+    let response = client
+        .post(format!("{base}/start/linkedin"))
+        .header(header::COOKIE, &session)
+        .header("x-beweft-request", "1")
+        .json(&json!({"brand_id":brands[1],"reconnect_channel_id":ids[1]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let value: Value = response.json().await.unwrap();
+    let flow = value["data"]["flow_id"].as_str().unwrap().to_owned();
+    let url = url::Url::parse(value["data"]["authorization_url"].as_str().unwrap()).unwrap();
+    let state = url
+        .query_pairs()
+        .find(|(key, _)| key == "state")
+        .unwrap()
+        .1
+        .to_string();
+    let response = client
+        .get(format!("{base}/callback/linkedin"))
+        .header(header::COOKIE, &cookie)
+        .query(&[("state", state.as_str()), ("code", "fixture-code")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let fence_before: (i64, Option<Uuid>) = sqlx::query_as("SELECT oauth_generation,revocation_id FROM provider_oauth_fences WHERE provider='linkedin'")
+        .fetch_one(&h.state.db).await.unwrap();
+    let repeated: Value = disconnect(ids[0])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(repeated["data"]["channels_requiring_reconnection"], 0);
+    assert!(
+        repeated["data"]["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("already disconnected")
+    );
+    let fence_after: (i64, Option<Uuid>) = sqlx::query_as("SELECT oauth_generation,revocation_id FROM provider_oauth_fences WHERE provider='linkedin'")
+        .fetch_one(&h.state.db).await.unwrap();
+    assert_eq!(fence_after, fence_before);
+    let response = client
+        .post(format!("{base}/complete/{flow}"))
+        .header(header::COOKIE, &session)
+        .header("x-beweft-request", "1")
+        .json(&json!({"destination_id":"shared-account"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let status: String = sqlx::query_scalar("SELECT connection_status FROM channels WHERE id=$1")
+        .bind(ids[1])
+        .fetch_one(&h.state.db)
+        .await
+        .unwrap();
+    assert_eq!(status, "connected");
+    let queued: String = sqlx::query_scalar("SELECT state FROM publications WHERE id=$1")
+        .bind(publication)
+        .fetch_one(&h.state.db)
+        .await
+        .unwrap();
+    assert_eq!(queued, "queued");
+
     // With no target grant and no remote operation, a connected sibling is not
     // marked unhealthy and the response directs the owner only to orphaned access.
     let no_grant = Uuid::new_v4();
     let connected = Uuid::new_v4();
-    sqlx::query("INSERT INTO channels(id,brand_id,name,provider,connection_status) VALUES($1,$2,'No grant','linkedin','disconnected')")
+    sqlx::query("INSERT INTO channels(id,brand_id,name,provider,connection_status) VALUES($1,$2,'No grant','linkedin','reconnect_required')")
         .bind(no_grant).bind(brands[0]).execute(&h.state.db).await.unwrap();
     sqlx::query("INSERT INTO channels(id,brand_id,name,provider,encrypted_credentials,connection_identity,connection_status) VALUES($1,$2,'Connected','linkedin',$3,'another-account','connected')")
         .bind(connected).bind(brands[0]).bind("fixture ciphertext").execute(&h.state.db).await.unwrap();
@@ -259,6 +341,11 @@ async fn disconnect_fences_shared_provider_channels(h: &Harness) {
         .unwrap();
     sqlx::query("DELETE FROM posts WHERE id=$1")
         .bind(post_id)
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM connection_flows WHERE brand_id=ANY($1)")
+        .bind(&brands[..])
         .execute(&h.state.db)
         .await
         .unwrap();
