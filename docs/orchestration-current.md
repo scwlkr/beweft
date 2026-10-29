@@ -44,7 +44,7 @@ three active children plus the orchestrator. Each milestone freezes its SHA.
 | Lane | Checkpoint | Next acceptance boundary |
 | --- | --- | --- |
 | Core/providers A+B | Durable scheduling request receipts, migration 0009 | Concurrent/replayed requests, lost responses, rollback, exact timestamp normalization and bounded summary recovery; then production provider wiring and formats. |
-| Web C | PR #14 scheduling; #15 media descriptions; #16 idea organization | Media CAS fix `518d5e3` is in fresh review. Scheduling must use the real 0009 receipt API. Ideas and preserved manual guidance await review/integration. |
+| Web C | PR #14 scheduling; #15 media descriptions; #16 idea organization | Media CAS fix `518d5e3` is back in implementation after review found a cross-view pending-save bypass and invalid-text recovery trap. Scheduling must use the real 0009 receipt API. Ideas and preserved manual guidance await review/integration. |
 | CLI/operations D+E | Self-host operations, based on named-worker health | Full image, fresh install, restart, safe backup/restore and upgrade rehearsal; then schedule receipt tools. |
 
 Core owns server/worker/providers/migrations/generated exports. Web owns client
@@ -58,6 +58,9 @@ New web scheduling writes persist a UUID and immutable normalized mutation.
 Backend request replay precedes current-version/time checks and returns original
 publication IDs even after cancellation/replacement. GET receipts return bounded
 publication summaries. A missing receipt cannot prove an in-flight write ended.
+PR #17 at `56fb0ba` passed its focused fixtures but fresh review found a pool
+exhaustion defect: dropping a timed-out SQLx lock query did not end its database
+wait. Nonblocking request admission and repeated-retry recovery are being fixed.
 Timestamps accept at most six fractional digits and normalize exactly to UTC;
 client comparison must preserve microseconds, not truncate through Date.parse.
 
