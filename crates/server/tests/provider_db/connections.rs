@@ -90,6 +90,7 @@ async fn refresh_serialization_and_grant_binding(h: &Harness) {
     let c = Channel {
         app,
         identity: Identity {
+            parent: None,
             id: "destination".into(),
             name: "Fixture".into(),
             username: None,
@@ -133,6 +134,7 @@ async fn refresh_serialization_and_grant_binding(h: &Harness) {
     let candidate = Channel {
         app,
         identity: Identity {
+            parent: None,
             id: "destination".into(),
             name: "Different origin".into(),
             username: None,

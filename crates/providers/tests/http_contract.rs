@@ -109,6 +109,7 @@ async fn provider(State(state): State<Arc<Mutex<Fixture>>>, request: Request) ->
 fn channel(provider: &str) -> Channel {
     Channel {
         identity: Identity {
+            parent: None,
             id: "account-1".into(),
             name: "Fixture".into(),
             username: None,

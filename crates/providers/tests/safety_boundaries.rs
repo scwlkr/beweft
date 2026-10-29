@@ -36,6 +36,7 @@ fn channel(provider: &str) -> Channel {
             instance_url: Some("https://home.example".into()),
         },
         identity: Identity {
+            parent: None,
             id: "self".into(),
             name: "Self".into(),
             username: None,

@@ -17,6 +17,7 @@ async fn provider_gate_orders_manual_removal_and_recovery(h: &Harness) {
         let grant = Channel {
             app: app.clone(),
             identity: Identity {
+                parent: None,
                 id: format!("masto-{index}"),
                 name: "Fixture".into(),
                 username: None,

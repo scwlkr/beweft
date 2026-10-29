@@ -17,6 +17,7 @@ pub fn scopes(provider: &str) -> Vec<String> {
             "https://www.googleapis.com/auth/youtube.force-ssl",
             "https://www.googleapis.com/auth/yt-analytics.readonly",
         ],
+        "google_business" => vec!["https://www.googleapis.com/auth/business.manage"],
         "facebook" => vec![
             "pages_show_list",
             "pages_read_engagement",
@@ -54,7 +55,7 @@ pub fn scopes(provider: &str) -> Vec<String> {
 fn auth_endpoint(app: &AppConfig) -> Result<String> {
     Ok(match app.provider.as_str() {
         "x" => "https://x.com/i/oauth2/authorize".into(),
-        "youtube" => "https://accounts.google.com/o/oauth2/v2/auth".into(),
+        "youtube" | "google_business" => "https://accounts.google.com/o/oauth2/v2/auth".into(),
         "facebook" => "https://www.facebook.com/v23.0/dialog/oauth".into(),
         "instagram" => "https://www.instagram.com/oauth/authorize".into(),
         "threads" => "https://threads.net/oauth/authorize".into(),
@@ -67,7 +68,7 @@ fn auth_endpoint(app: &AppConfig) -> Result<String> {
 fn token_endpoint(app: &AppConfig) -> Result<String> {
     Ok(match app.provider.as_str() {
         "x" => "https://api.x.com/2/oauth2/token".into(),
-        "youtube" => "https://oauth2.googleapis.com/token".into(),
+        "youtube" | "google_business" => "https://oauth2.googleapis.com/token".into(),
         "facebook" => "https://graph.facebook.com/v23.0/oauth/access_token".into(),
         "instagram" => "https://api.instagram.com/oauth/access_token".into(),
         "threads" => "https://graph.threads.net/oauth/access_token".into(),
@@ -101,14 +102,17 @@ pub fn authorization_url(
             .append_pair("response_type", "code")
             .append_pair("state", state)
             .append_pair("scope", &requested);
-        if matches!(app.provider.as_str(), "x" | "youtube" | "mastodon") {
+        if matches!(
+            app.provider.as_str(),
+            "x" | "youtube" | "google_business" | "mastodon"
+        ) {
             q.append_pair(
                 "code_challenge",
                 &URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
             )
             .append_pair("code_challenge_method", "S256");
         }
-        if app.provider == "youtube" {
+        if matches!(app.provider.as_str(), "youtube" | "google_business") {
             q.append_pair("access_type", "offline")
                 .append_pair("prompt", "consent");
         }
@@ -148,5 +152,6 @@ fn parse_tokens(v: &Value, original: Option<&Tokens>) -> Result<Tokens> {
     })
 }
 
+mod google_business;
 mod identity;
 mod tokens;

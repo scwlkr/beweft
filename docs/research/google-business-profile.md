@@ -82,12 +82,11 @@ protocol only; project approval, account eligibility, media ingestion, and
 actual publication remain unverified until separately qualified.
 [Business Profile API FAQ](https://developers.google.com/my-business/content/faq).
 
-## Draft implementation contract
+## Historical implementation design
 
-This section is a design checkpoint, not a description of implemented
-behavior. The shared Google-family gate and stable location identity have
-initial architectural agreement; the client warning and handling of app
-configuration during pending removal still need coordinated review.
+This was the design checkpoint for the direct adapter. The current behavior,
+client contract and remaining qualifications are documented in
+[provider setup](../provider-setup.md) and [the API contract](../api-contract.md).
 
 - Conservatively use one Google authorization family for YouTube and
   Business Profile, regardless of configured client ID or account. Reuse the
@@ -101,8 +100,7 @@ configuration during pending removal still need coordinated review.
   providers until the owner attests that intended access removal is finished.
   The client must explain the cross-provider effect, current and prior Google
   app projects, and relevant Google accounts. Owner attestation is not
-  provider proof. Consider rejecting app edits while removal is pending; that
-  policy and wording remain for review. Older running app versions do not
+  provider proof. App edits are rejected while removal is pending. Older running app versions do not
   understand the shared family, so stop old API and worker processes before
   enabling the new adapter.
 - Select the account/location pair returned by Google and retain the selected

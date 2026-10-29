@@ -127,6 +127,27 @@ async fn fenced_step(
                 saved["stage"] = json!("x_legacy_ambiguous");
             }
             let stage = saved["stage"].as_str().unwrap_or("");
+            if channel.app.provider == "google_business" {
+                let previous = saved["attempt_id"]
+                    .as_str()
+                    .and_then(|value| value.parse::<Uuid>().ok());
+                if previous != Some(attempt) {
+                    return Ok(Err(providers::error(
+                        FailureKind::Uncertain,
+                        "An earlier Google post may have started. Inspect its exact attempt before recovery.",
+                    )));
+                }
+                if stage == "google_post_started"
+                    && overall
+                        .and_then(|deadline| deadline.remaining())
+                        .is_none_or(|remaining| remaining < std::time::Duration::from_secs(80))
+                {
+                    return Ok(Err(providers::error(
+                        FailureKind::Uncertain,
+                        "The Google posting boundary needs inspection before recovery.",
+                    )));
+                }
+            }
             let is_x = channel.app.provider == "x" && stage.starts_with("x_");
             let is_meta = matches!(channel.app.provider.as_str(), "instagram" | "threads")
                 && stage.starts_with("meta_");
@@ -395,7 +416,9 @@ async fn fenced_step(
             }
         }
         let was_wait = matches!(&result, Ok(Step::Wait(_)));
-        if let Ok(Step::Checkpoint(next) | Step::Wait(next)) = &mut result {
+        if let Ok(Step::Checkpoint(next) | Step::Wait(next)) = &mut result
+            && !(was_wait && next["stage"] == "google_post_processing")
+        {
             let wait = if was_wait {
                 match next["stage"].as_str() {
                     Some("linkedin_image_processing" | "linkedin_video_processing") => Some(3),
@@ -447,6 +470,7 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
     let mut completed_managed_checkpoint = false;
     let mut post_started = false;
     let mut accepted_reel = false;
+    let mut accepted_google = false;
     for step in 0..48 {
         if overall.and_then(|deadline| deadline.remaining()).is_none() {
             if completed_managed_checkpoint && !post_started {
@@ -462,14 +486,23 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                         reason: providers::BLUESKY_VIDEO_RATE_LIMIT.into(),
                     };
                 }
+                if stage == "google_post_rejected" {
+                    return BridgeOutcome::Rejected {
+                        reason:
+                            "Google rejected this post. An explicit retry may create a new post."
+                                .into(),
+                    };
+                }
                 if stage.starts_with("x_")
                     || stage.starts_with("meta_")
                     || stage.starts_with("fb_reel_")
                     || stage.starts_with("linkedin_")
                     || stage.starts_with("bsky_")
+                    || stage.starts_with("google_post_")
                 {
                     completed_managed_checkpoint = true;
                     accepted_reel = stage == "fb_reel_processing";
+                    accepted_google = stage == "google_post_processing";
                     post_started = matches!(
                         stage,
                         "x_post_started"
@@ -482,6 +515,8 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                             | "bsky_post_started"
                             | "bsky_video_upload_started"
                             | "bsky_image_upload_started"
+                            | "google_post_started"
+                            | "google_post_processing"
                     );
                     let remaining = overall
                         .and_then(|deadline| deadline.remaining())
@@ -499,6 +534,9 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                 return BridgeOutcome::Uncertain {
                     reason: "Facebook accepted the Reel and is still processing it. Check provider status before resolving its outcome.".into(),
                 };
+            }
+            Ok(Ok(Step::Wait(next))) if next["stage"] == "google_post_processing" => {
+                return BridgeOutcome::Uncertain { reason: "Google accepted the post and may still publish it. Check its saved status before resolving the outcome.".into() };
             }
             Ok(Ok(Step::Wait(next)))
                 if next["stage"].as_str().is_some_and(|stage| {
@@ -532,6 +570,9 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
             Ok(Err(e)) if accepted_reel => {
                 return BridgeOutcome::Uncertain { reason: e.message };
             }
+            Ok(Err(e)) if accepted_google => {
+                return BridgeOutcome::Uncertain { reason: e.message };
+            }
             Ok(Err(e))
                 if matches!(
                     e.kind,
@@ -553,6 +594,13 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                         ) =>
                     {
                         return BridgeOutcome::Uncertain { reason: "The Facebook Reel may already be processing. Inspect its outcome before retrying.".into() };
+                    }
+                    Ok(Some(cp))
+                        if cp["stage"]
+                            .as_str()
+                            .is_some_and(|s| s.starts_with("google_post_")) =>
+                    {
+                        return BridgeOutcome::Uncertain { reason: "The Google post may already have started. Inspect its outcome before retrying.".into() };
                     }
                     Ok(_) => return BridgeOutcome::Continue,
                     Err(error) => return BridgeOutcome::Uncertain { reason: error.2 },

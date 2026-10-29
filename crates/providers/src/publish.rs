@@ -131,6 +131,8 @@ pub use inspection::inspect_media;
 pub use validation::validate;
 mod bluesky;
 mod facebook;
+mod google_business;
+pub use google_business::google_public_origin;
 mod linkedin;
 mod mastodon;
 mod meta;
@@ -163,6 +165,7 @@ impl Adapter {
         match c.app.provider.as_str() {
             "x" => self.publish_x(c, p, cp).await,
             "youtube" => self.publish_youtube(c, p, cp).await,
+            "google_business" => self.publish_google_business(c, p, cp).await,
             "facebook" => self.publish_facebook(c, p, cp).await,
             "instagram" | "threads" => self.publish_meta(c, p, cp).await,
             "mastodon" => self.publish_mastodon(c, p, cp).await,

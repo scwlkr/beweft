@@ -22,15 +22,18 @@ media limits, populated migrations, scheduling/replacement uncertainty, owner
 workflows, browser behavior, provider adapter/router fixtures and CLI/MCP.
 The built baseline image passed normal local UI/API/worker use. A real
 image/schema 7→14 upgrade and matching old-image/data/media/key rollback passed.
-The combined image through #28 is being packaged for the retained installation;
-its final runtime qualification will be recorded in the orchestration record.
+The combined image through #28 passed fresh independent qualification and was
+installed backup-first before the 16:30 target. Its exact image/source and runtime
+checks are recorded in the orchestration record.
 
 ## Remaining feasible product work
 
 X threads, ordinary Facebook Page video, Instagram Stories eligibility,
 Threads/Bluesky replies, LinkedIn organization opt-in, expanded Pinterest
-formats/reads, Google Business Profile direct posting and Google grant-family
-handling remain local implementation work. Bluesky entryway-to-PDS onboarding
+formats/reads, and Google Business Profile reviews, replies and insights
+remain local implementation work. Google Business Profile direct posting and
+shared Google grant handling are implemented and fixture-tested on this branch;
+provider project approval, eligibility and live publication remain unverified. Bluesky entryway-to-PDS onboarding
 and reconnect/queue migration are also unfinished. Do not classify missing code
 as an external account-approval block or claim universal inbox/analytics support.
 

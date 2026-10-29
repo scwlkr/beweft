@@ -18,6 +18,7 @@ async fn disconnect_fences_shared_provider_channels(h: &Harness) {
         let grant = Channel {
             app: app.clone(),
             identity: Identity {
+                parent: None,
                 id: if index == 2 {
                     "unrelated-account"
                 } else {
@@ -301,6 +302,7 @@ async fn disconnect_fences_shared_provider_channels(h: &Harness) {
         let grant = Channel {
             app: app.clone(),
             identity: Identity {
+                parent: None,
                 id: format!("masto-{index}"),
                 name: "Fixture".into(),
                 username: None,
@@ -407,6 +409,7 @@ async fn every_direct_provider_uses_owner_managed_removal(h: &Harness) {
         let grant = Channel {
             app: connections::app_config(&h.state, provider).await.unwrap(),
             identity: Identity {
+                parent: None,
                 id: "fixture".into(),
                 name: "Fixture".into(),
                 username: None,
@@ -439,12 +442,12 @@ async fn every_direct_provider_uses_owner_managed_removal(h: &Harness) {
         assert_eq!(result["data"]["provider_revoked"], false, "{provider}");
         let action = result["data"]["next_action"].as_str().unwrap();
         assert!(
-            action.contains("inspect") && action.contains("confirm"),
+            action.to_ascii_lowercase().contains("inspect") && action.contains("confirm"),
             "{provider}: {action}"
         );
         let marker: Option<Uuid> =
             sqlx::query_scalar("SELECT revocation_id FROM provider_oauth_fences WHERE provider=$1")
-                .bind(provider)
+                .bind(if provider == "google_business" { "youtube" } else { provider })
                 .fetch_one(&h.state.db)
                 .await
                 .unwrap();

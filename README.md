@@ -9,12 +9,14 @@ The project is in active development. See the
 [orchestrator handoff](ORCHESTRATOR-HANDOFF.md) for the current work and review
 boundaries.
 
-The first application slice contains a Rust/Axum API, PostgreSQL storage, and a
-separate durable publishing worker. It supports owner authentication, scoped
-API tokens, brands, drafts, media, posting schedules, manual handoff, and
-publication recovery. The full web interface, direct provider integration and
-self-host packaging are being integrated; this is not yet a complete release.
-
+The reviewed local application includes a React web workspace, Rust/Axum API,
+PostgreSQL storage, durable publishing worker, and scoped Rust CLI/MCP. It
+supports owner authentication, multiple brands, ideas/templates, drafts/channel
+variants, media descriptions, queue and exact schedules, manual handoff,
+publication recovery, brand and owner security controls, and self-host operations.
+The combined local image has passed independent workflow and restart checks.
+Additional provider formats remain in development; see the delivery record for
+the precise remaining scope.
 To build a local self-hosted installation, see the
 [installation, backup, restore and upgrade guide](docs/self-hosting.md). It uses
 Docker Compose, keeps credentials in a private installation directory, and does
