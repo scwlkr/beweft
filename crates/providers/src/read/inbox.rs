@@ -116,7 +116,7 @@ impl Adapter {
                             ),
                             token,
                         )?
-                        .header("atproto-proxy", "did:web:api.bsky.app#bsky_notif"),
+                        .header("atproto-proxy", "did:web:api.bsky.app#bsky_appview"),
                         false,
                     )
                     .await?;

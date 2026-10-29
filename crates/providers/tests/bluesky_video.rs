@@ -44,7 +44,10 @@ async fn provider(State(fixture): State<Arc<Mutex<Fixture>>>, request: Request) 
     match (method.as_str(), path.as_str()) {
         ("GET", "/xrpc/app.bsky.notification.listNotifications") => {
             assert_eq!(headers["authorization"], "Bearer fixture-access");
-            assert_eq!(headers["atproto-proxy"], "did:web:api.bsky.app#bsky_notif");
+            assert_eq!(
+                headers["atproto-proxy"],
+                "did:web:api.bsky.app#bsky_appview"
+            );
             assert_eq!(query["limit"], "50");
             if f.mode == "invalid_notifications" {
                 return Json(json!({})).into_response();
@@ -54,16 +57,16 @@ async fn provider(State(fixture): State<Arc<Mutex<Fixture>>>, request: Request) 
         }
         ("GET", "/xrpc/com.atproto.server.getSession") => {
             assert_eq!(headers["authorization"], "Bearer fixture-access");
-            let endpoint = if f.mode == "invalid_pds" {
-                "http://127.0.0.1"
-            } else {
-                "https://assigned.pds.fixture"
+            let endpoint = match f.mode.as_str() {
+                "invalid_pds" => "http://127.0.0.1",
+                "different_pds" => "https://assigned.pds.fixture",
+                _ => "https://pds.fixture",
             };
             Json(json!({"did":"did:plc:fixture","emailConfirmed":f.mode != "unconfirmed","didDoc":{"id":"did:plc:fixture","service":[{"id":"#atproto_pds","serviceEndpoint":endpoint}]}})).into_response()
         }
         ("GET", "/xrpc/com.atproto.server.getServiceAuth") => {
             assert_eq!(headers["authorization"], "Bearer fixture-access");
-            assert_eq!(query["aud"], "did:web:assigned.pds.fixture");
+            assert_eq!(query["aud"], "did:web:pds.fixture");
             assert_eq!(query["lxm"], "com.atproto.repo.uploadBlob");
             let ttl = query["exp"].parse::<i64>().unwrap() - chrono::Utc::now().timestamp();
             assert!((1700..=1800).contains(&ttl));
@@ -237,6 +240,14 @@ async fn video_receipts_survive_processing_and_reconcile_complete_records() {
             .kind,
         FailureKind::Rejected
     );
+    fixture.lock().unwrap().mode = "different_pds".into();
+    let mismatch = adapter
+        .publish_step(&c, &p, Some(&preflight))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(mismatch.kind, FailureKind::Rejected);
+    assert!(mismatch.message.contains("different PDS"));
     assert_eq!(fixture.lock().unwrap().uploads, 0);
     fixture.lock().unwrap().mode.clear();
     let Step::Checkpoint(upload) = step(&origin, &c, &p, Some(&preflight)).await else {

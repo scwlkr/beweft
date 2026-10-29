@@ -106,7 +106,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         self.record("GET " + path)
         if path == "/xrpc/app.bsky.notification.listNotifications":
             assert self.headers.get("Authorization") == "Bearer bluesky-access-fixture"
-            assert self.headers.get("atproto-proxy") == "did:web:api.bsky.app#bsky_notif"
+            assert self.headers.get("atproto-proxy") == "did:web:api.bsky.app#bsky_appview"
             assert urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query) == {"limit":["50"]}
             notification = {"uri":"at://did:plc:other/app.bsky.feed.post/fixture", "reason":"mention",
                             "author":{"handle":"other.bsky.social"}, "record":{"text":"Hello"}}
@@ -114,10 +114,10 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         if path == "/xrpc/com.atproto.server.getSession":
             assert self.headers.get("Authorization") == "Bearer bluesky-access-fixture"
             return self.respond({"did":"did:plc:fixture", "emailConfirmed":True,
-                                 "didDoc":{"id":"did:plc:fixture", "service":[{"id":"#atproto_pds", "serviceEndpoint":"https://assigned.pds.fixture"}]}})
+                                 "didDoc":{"id":"did:plc:fixture", "service":[{"id":"#atproto_pds", "serviceEndpoint":"https://pds.fixture"}]}})
         if path == "/xrpc/com.atproto.server.getServiceAuth":
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
-            assert query["aud"] == ["did:web:assigned.pds.fixture"] and query["lxm"] == ["com.atproto.repo.uploadBlob"]
+            assert query["aud"] == ["did:web:pds.fixture"] and query["lxm"] == ["com.atproto.repo.uploadBlob"]
             assert self.headers.get("Authorization") == "Bearer bluesky-access-fixture"
             return self.respond({"token":"video-service-fixture"})
         if path == "/xrpc/app.bsky.video.getJobStatus":
@@ -457,7 +457,7 @@ def run():
             request("/provider-apps/facebook", {"client_id":"facebook-client", "client_secret":"fixture-secret"}, "PUT")
             request("/provider-apps/x", {"client_id":"x-client", "client_secret":"fixture-secret"}, "PUT")
             request("/provider-apps/youtube", {"client_id":"youtube-client", "client_secret":"fixture-secret"}, "PUT")
-            request("/provider-apps/bluesky", {"client_id":""}, "PUT")
+            request("/provider-apps/bluesky", {"client_id":"", "instance_url":"https://pds.fixture"}, "PUT")
             apps = request("/provider-apps")
             assert all("client_secret" not in item and "revocation_id" in item for item in apps)
             assert next(item for item in request("/providers") if item["id"] == "facebook")["configuration"] == "configured"

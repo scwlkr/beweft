@@ -234,6 +234,11 @@ impl Adapter {
                 pds.instance_url = Some(endpoint.to_owned());
                 let pds_origin = instance_origin(&pds)
                     .map_err(|_| invalid("Bluesky returned an invalid PDS origin"))?;
+                if pds_origin != origin {
+                    return Err(invalid(
+                        "This account uses a different PDS. Check the Bluesky provider setup before connecting at that approved origin.",
+                    ));
+                }
                 let host = Url::parse(&pds_origin)
                     .ok()
                     .and_then(|url| url.host_str().map(str::to_owned))

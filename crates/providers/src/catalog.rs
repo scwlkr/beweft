@@ -80,7 +80,7 @@ pub fn capabilities() -> Vec<Capabilities> {
             analytics: true,
             inbox: true,
             reply: false,
-            reason: "Connect using an app password. Video eligibility and daily limits apply; replies use manual handoff.",
+            reason: "Configure the account's PDS origin and connect with an app password. Video eligibility and daily limits apply; replies use manual handoff.",
         },
         Capabilities {
             id: "linkedin",
