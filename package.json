@@ -1,0 +1,14 @@
+{
+  "name": "beweft-workspace",
+  "private": true,
+  "packageManager": "pnpm@11.15.0",
+  "scripts": {
+    "dev": "pnpm --filter @beweft/web dev",
+    "build": "pnpm --filter @beweft/web build",
+    "check": "pnpm --filter @beweft/web check",
+    "test:e2e": "pnpm --filter @beweft/web test:e2e"
+  },
+  "devDependencies": {
+    "prettier": "3.6.2"
+  }
+}
