@@ -1,25 +1,39 @@
 import { Send } from "lucide-react";
-import { useState } from "react";
 import { z } from "zod";
-import { api } from "../api";
+import { ReplyResolution } from "./ReplyResolution";
+import { useReply } from "./useReply";
 import { ErrorNotice, Field } from "../components/shared";
 import { Button } from "../components/ui/button";
 import { Dialog } from "../components/ui/dialog";
 import { ItemSchema } from "./insight-contracts";
 export function Reply({
   item,
+  brandId,
   onClose,
   onSent,
 }: {
   item: z.infer<typeof ItemSchema>;
+  brandId: string;
   onClose: () => void;
   onSent: () => Promise<void>;
 }) {
-  const [text, setText] = useState("");
-  const [outcome, setOutcome] = useState("");
-  const [requestId, setRequestId] = useState(crypto.randomUUID());
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  const {
+    text,
+    setText,
+    attempt,
+    pending,
+    busy,
+    ready,
+    error,
+    check,
+    send,
+    another,
+    resolve,
+    locked,
+  } = useReply(brandId, item);
+  const unresolved =
+    attempt && ["uncertain", "sending"].includes(attempt.state);
+  const terminal = attempt && ["published", "failed"].includes(attempt.state);
   return (
     <Dialog
       open
@@ -29,42 +43,9 @@ export function Reply({
     >
       <form
         className="form-stack"
-        onSubmit={async (e) => {
-          e.preventDefault();
-          setBusy(true);
-          setError("");
-          try {
-            const result = await api(
-              `/inbox/${item.id}/reply`,
-              z.object({
-                state: z.string(),
-                error: z.string().nullable().optional(),
-              }),
-              "POST",
-              {
-                text,
-                request_id: requestId,
-              },
-            );
-            setOutcome(result.state);
-            if (result.state !== "published") {
-              setError(
-                result.error ??
-                  "Reply outcome is not confirmed. Inspect the network before sending another reply.",
-              );
-              return;
-            }
-            await onSent();
-            onClose();
-          } catch (e) {
-            setOutcome("uncertain");
-            setError(
-              (e as Error).message +
-                " Check the existing outcome before sending another reply.",
-            );
-          } finally {
-            setBusy(false);
-          }
+        onSubmit={(event) => {
+          event.preventDefault();
+          void send();
         }}
       >
         <p className="detail-copy post-copy">{item.item.text}</p>
@@ -95,24 +76,85 @@ export function Reply({
         <Field label="Your reply">
           <textarea
             required
-            disabled={busy || ["uncertain", "sending"].includes(outcome)}
+            disabled={locked}
             rows={5}
             value={text}
-            onChange={(e) => {
-              setText(e.target.value);
-              setRequestId(crypto.randomUUID());
-            }}
+            onChange={(e) => setText(e.target.value)}
           />
         </Field>
         {error && <ErrorNotice message={error} />}
-        <Button disabled={busy}>
-          <Send size={16} />
-          {busy
-            ? "Sending…"
-            : outcome === "uncertain" || outcome === "sending"
-              ? "Check existing reply outcome"
-              : "Send reply"}
-        </Button>
+        {attempt && (
+          <div className="notice" role="status">
+            <div>
+              <strong>Server reply outcome: {attempt.state}</strong>
+              <p>Request {attempt.id}</p>
+              {attempt.receipt &&
+              typeof attempt.receipt === "object" &&
+              "verification" in attempt.receipt &&
+              attempt.receipt.verification === "owner_attestation" ? (
+                <p>
+                  Owner attestation: this outcome was recorded after the owner
+                  checked the network; it is not provider API confirmation.
+                </p>
+              ) : null}
+              {unresolved && (
+                <p>
+                  The server has an unresolved attempt. New replies are blocked;
+                  inspect the network and check this attempt again.
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+        {attempt?.state === "uncertain" && (
+          <ReplyResolution disabled={busy || !ready} onResolve={resolve} />
+        )}
+        {!attempt && pending && (
+          <p role="status">
+            The original request is remembered on this device, but no durable
+            server outcome is available yet. Checking never sends a reply.
+          </p>
+        )}
+        <div className="inline-actions">
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={busy}
+            onClick={() => void check()}
+          >
+            {busy ? "Checking…" : "Check existing reply outcome"}
+          </Button>
+          {terminal ? (
+            <>
+              <Button
+                type="button"
+                disabled={
+                  busy ||
+                  !ready ||
+                  (!!pending && pending.request_id !== attempt.id)
+                }
+                onClick={another}
+              >
+                Write another reply
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={busy}
+                onClick={() => void onSent().then(onClose)}
+              >
+                Done
+              </Button>
+            </>
+          ) : (
+            !unresolved && (
+              <Button disabled={busy || !ready || !text.trim()}>
+                <Send size={16} />
+                {pending ? "Retry original reply" : "Send reply"}
+              </Button>
+            )
+          )}
+        </div>
       </form>
     </Dialog>
   );

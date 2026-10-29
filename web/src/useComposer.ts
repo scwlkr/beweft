@@ -67,7 +67,14 @@ export function useComposer({
       initial?.variants?.map((v) => [v.channel_id, v.options ?? {}]) ?? [],
     ),
   );
-  const [tab, setTab] = useState("all");
+  const [requestedTab, setTab] = useState("all");
+  const tab =
+    requestedTab === "all" || selected.includes(requestedTab)
+      ? requestedTab
+      : "all";
+  useEffect(() => {
+    if (requestedTab !== tab) setTab(tab);
+  }, [requestedTab, tab]);
   const [mediaOpen, setMediaOpen] = useState(false);
   const [mode, setMode] = useState<"draft" | "queue" | "exact">(
     initialDate ? "exact" : "draft",

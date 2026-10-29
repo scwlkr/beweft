@@ -28,3 +28,9 @@ The following are explicit unfinished workflows, not external provider blockers:
 - YouTube exposes privacy, audience, synthetic-media disclosure, and category. It uses the post title as the public video title. License choice is not implemented.
 
 Direct provider setup, destination selection, reconnection/disconnection, metrics, inbox read/reply, and explicit metered-X sync controls are implemented in the web client against the provider slice contract. This is not a claim that any live provider account or publication has been verified.
+
+## Reply recovery
+
+The reply dialog reads `GET /inbox/:id/replies` before enabling a send and again before a new POST. Server attempts establish outcomes; sending or uncertain attempts block new replies. A pending request UUID and original text are stored on this browser, scoped by owner, brand, channel, and inbox item, before transmission. This survives closure/reload and permits only an explicit retry of the same request if no server attempt exists. Confirmed terminal results clear that local pending record. No credentials are stored there. A recovery read failure blocks sending.
+
+`GET /inbox/:id/replies` must return owner-scoped durable rows `{id,inbox_id,text,state,receipt,error,created_at,updated_at}`, including unresolved attempts; stale sending attempts appear uncertain without a provider call. The server must atomically block a fresh request UUID while that conversation has a sending/uncertain attempt, since browser checks alone cannot prevent concurrent-tab races. Explicit owner resolution uses `POST /inbox/:id/replies/:request_id/resolve` with `{resolution:"published"|"not_published",note,external_url?}` and returns the durable row. This records an attestation and never sends a reply. These endpoints belong to the coordinated provider slice; browser regression fixtures exercise the client contract separately from live provider qualification.

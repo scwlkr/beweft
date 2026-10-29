@@ -292,7 +292,13 @@ export function Insights({
         </Dialog>
       )}
       {reply && (
-        <Reply item={reply} onClose={() => setReply(null)} onSent={load} />
+        <Reply
+          key={`${brand.id}:${reply.channel_id}:${reply.id}`}
+          brandId={brand.id}
+          item={reply}
+          onClose={() => setReply(null)}
+          onSent={load}
+        />
       )}
     </>
   );

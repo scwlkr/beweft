@@ -8,7 +8,7 @@ const Permissions = z.object({
       z.object({
         status: z.enum(["granted", "missing", "unknown"]),
         required_scopes: z.array(z.string()),
-        missing_scopes: z.array(z.string()),
+        missing_scopes: z.array(z.string()).nullable(),
       }),
     ),
   }),
@@ -36,8 +36,10 @@ export function ChannelPermissions({
           <div key={action}>
             <dt>{action}</dt>
             <dd>
-              {grant.status}
-              {grant.missing_scopes.length > 0 &&
+              {grant.status === "unknown"
+                ? "Unknown · Provider has not confirmed this permission"
+                : grant.status}
+              {!!grant.missing_scopes?.length &&
                 ` · Reconnect for: ${grant.missing_scopes.join(", ")}`}
             </dd>
           </div>
