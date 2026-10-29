@@ -192,6 +192,8 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             assert self.headers.get("Content-Type") == "video/mp4" and len(body) > 0
             if self.bsky_mode == "lost_upload":
                 return self.respond({}, 502)
+            if self.bsky_mode == "quota":
+                return self.respond({"error":"RateLimitExceeded"}, 429)
             return self.respond({"jobStatus":{"jobId":"fixture-job", "did":"did:plc:fixture", "state":"JOB_STATE_CREATED"}})
         if path == "/xrpc/com.atproto.repo.createRecord":
             value = json.loads(body)
@@ -845,6 +847,47 @@ def run():
             assert request(f"/publications/{bounded['id']}/provider-reconcile", {})["state"] == "queued"
             wait_for(lambda: state_is(bounded["id"], "published"), "Bluesky job after explicit probe", seconds=25)
             assert Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0) == before_upload
+
+            # A definite quota rejection ends the attempt as failed. Clearing
+            # quota alone does nothing; an explicit retry resumes the same
+            # publication and performs one successful upload and one post.
+            Fixture.bsky_mode = "quota"
+            Fixture.bsky_polls = 0
+            before_upload = Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0)
+            before_post = Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0)
+            limited = schedule(brand, bsky["id"], "Explicit Bluesky quota retry", [bsky_asset["id"]])
+            limited_failed = wait_for(lambda: state_is(limited["id"], "failed"), "definite Bluesky quota rejection")
+            assert "limit reached" in limited_failed["last_error"]
+            original_attempt = sql(f"SELECT attempt_id FROM provider_delivery_checkpoints WHERE publication_id='{limited['id']}'")
+            assert sql(f"SELECT state||':'||(receipt->>'verification') FROM publication_attempts WHERE id='{original_attempt}'") == "failed:rejected"
+            assert Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0) == before_upload + 1
+            assert Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0) == before_post
+            Fixture.bsky_mode = "normal"
+            time.sleep(3)
+            assert publication(limited["id"])["state"] == "failed"
+            assert Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0) == before_upload + 1
+            request(f"/publications/{limited['id']}/retry", {})
+            wait_for(lambda: state_is(limited["id"], "published"), "explicit Bluesky quota retry", seconds=30)
+            assert Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0) == before_upload + 2
+            assert Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0) == before_post + 1
+            assert Fixture.bsky_record["text"] == "Explicit Bluesky quota retry"
+            assert Fixture.bsky_record["embed"]["alt"] == "Later library edit"
+
+            # A checkpoint whose sender did not durably finish rejected must
+            # not be converted to a fresh upload, even if a stale queued claim
+            # is constructed. No newer attempt can manufacture that evidence.
+            Fixture.bsky_mode = "quota"
+            stale = schedule(brand, bsky["id"], "Stale quota checkpoint", [bsky_asset["id"]])
+            wait_for(lambda: state_is(stale["id"], "failed"), "stale quota setup")
+            stale_attempt = sql(f"SELECT attempt_id FROM provider_delivery_checkpoints WHERE publication_id='{stale['id']}'")
+            sql(f"UPDATE publication_attempts SET state='uncertain' WHERE id='{stale_attempt}'")
+            before_upload = Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0)
+            before_post = Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0)
+            request(f"/publications/{stale['id']}/retry", {}, expected=409)
+            sql(f"UPDATE publications SET state='queued',scheduled_at=clock_timestamp() WHERE id='{stale['id']}'")
+            wait_for(lambda: state_is(stale["id"], "uncertain"), "stale quota attempt quarantine")
+            assert Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0) == before_upload
+            assert Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0) == before_post
 
             # A lost upload has no queryable job ID. Even an owner resolution
             # and retry cannot cause an automatic second upload or public post.

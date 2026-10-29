@@ -239,6 +239,12 @@ async fn fenced_step(
                     .as_str()
                     .and_then(|value| value.parse::<Uuid>().ok());
                 if previous != Some(attempt) {
+                    if stage == "bsky_video_upload_rejected" {
+                        return Ok(Err(providers::error(
+                            FailureKind::Uncertain,
+                            "The Bluesky quota rejection was not released by an explicit retry of its failed attempt.",
+                        )));
+                    }
                     if stage == "bsky_post_started" {
                         if let Ok(Some(reconciled)) = adapter.reconcile(&channel, &p, saved).await {
                             lock_attempt(state, &mut tx, id, attempt, channel_id).await?;
@@ -362,6 +368,11 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
         match fenced_step(state, id, attempt, channel, overall).await {
             Ok(Ok(Step::Checkpoint(next))) => {
                 let stage = next["stage"].as_str().unwrap_or("");
+                if stage == "bsky_video_upload_rejected" {
+                    return BridgeOutcome::Rejected {
+                        reason: providers::BLUESKY_VIDEO_RATE_LIMIT.into(),
+                    };
+                }
                 if stage.starts_with("x_") || stage.starts_with("bsky_") {
                     completed_x_checkpoint = true;
                     post_started = matches!(

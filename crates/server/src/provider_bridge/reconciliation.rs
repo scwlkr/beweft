@@ -2,6 +2,38 @@ use super::delivery::save_checkpoint_tx;
 use super::preparation::{checkpoint, checkpoint_on, load_publication_on};
 use super::*;
 
+/// A definite private-upload rejection can be restarted only by the explicit
+/// retry transaction after that exact sender has durably finished as rejected.
+pub(crate) async fn prepare_bluesky_video_retry_tx(
+    state: &AppState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: Uuid,
+) -> Result<()> {
+    let Some(mut cp) = checkpoint_on(state, tx, id).await? else {
+        return Ok(());
+    };
+    if cp["stage"] != "bsky_video_upload_rejected" {
+        return Ok(());
+    }
+    let attempt = cp["attempt_id"]
+        .as_str()
+        .and_then(|value| value.parse::<Uuid>().ok())
+        .ok_or_else(|| {
+            ApiError::conflict("The Bluesky rejection has no valid originating attempt")
+        })?;
+    let confirmed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM provider_delivery_checkpoints cp JOIN publication_attempts a ON a.id=cp.attempt_id AND a.publication_id=cp.publication_id WHERE cp.publication_id=$1 AND cp.attempt_id=$2 AND a.state='failed' AND a.error=$3 AND a.receipt->>'verification'='rejected')")
+        .bind(id).bind(attempt).bind(providers::BLUESKY_VIDEO_RATE_LIMIT)
+        .fetch_one(&mut **tx).await?;
+    if !confirmed {
+        return Err(ApiError::conflict(
+            "The original Bluesky upload attempt has no completed rejection. Inspect its outcome before recovery.",
+        ));
+    }
+    cp["stage"] = json!("bsky_video_preflight");
+    save_checkpoint_tx(tx, state, id, &cp).await?;
+    Ok(())
+}
+
 /// Legacy X image checkpoints predate the public-write boundary. Their
 /// database identities make them observable without a new provider request.
 pub(crate) async fn x_checkpoint_on(

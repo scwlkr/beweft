@@ -89,6 +89,9 @@ async fn provider(State(fixture): State<Arc<Mutex<Fixture>>>, request: Request) 
             if f.mode == "lost_upload" {
                 return (StatusCode::BAD_GATEWAY, "lost").into_response();
             }
+            if f.mode == "quota" {
+                return (StatusCode::TOO_MANY_REQUESTS, "quota").into_response();
+            }
             if f.mode == "already_exists" {
                 return (StatusCode::CONFLICT, Json(json!({"jobId":"job-1","did":"did:plc:fixture","state":"JOB_STATE_COMPLETED","error":"already_exists","blob":blob()}))).into_response();
             }
@@ -254,6 +257,24 @@ async fn video_receipts_survive_processing_and_reconcile_complete_records() {
         panic!()
     };
     assert_eq!(upload["stage"], "bsky_video_upload_started");
+    fixture.lock().unwrap().mode = "quota".into();
+    let Step::Checkpoint(rejected) = step(&origin, &c, &p, Some(&upload)).await else {
+        panic!("a definite quota rejection must be checkpointed")
+    };
+    assert_eq!(rejected["stage"], "bsky_video_upload_rejected");
+    assert_eq!(rejected["rkey"], prepared["rkey"]);
+    assert_eq!(rejected["created_at"], prepared["created_at"]);
+    assert_eq!(rejected["blobs"], prepared["blobs"]);
+    assert_eq!(
+        adapter
+            .publish_step(&c, &p, Some(&rejected))
+            .await
+            .err()
+            .unwrap()
+            .kind,
+        FailureKind::RateLimited
+    );
+    fixture.lock().unwrap().mode.clear();
     let Step::Wait(job) = step(&origin, &c, &p, Some(&upload)).await else {
         panic!()
     };

@@ -287,15 +287,18 @@ impl Adapter {
                     )
                     .await?;
                 let status = response.status();
+                if status.as_u16() == 429 {
+                    // This response definitively rejected the private upload.
+                    // Persist it before allowing a deliberate later retry.
+                    let mut next = cp.clone();
+                    next["stage"] = json!("bsky_video_upload_rejected");
+                    return Ok(Step::Checkpoint(next));
+                }
                 if !status.is_success() && status.as_u16() != 409 {
                     return Err(match status.as_u16() {
                         401 => error(
                             FailureKind::Authentication,
                             "Bluesky authorization expired or was revoked. Reconnect this channel.",
-                        ),
-                        429 => error(
-                            FailureKind::RateLimited,
-                            "Bluesky video limit reached. Wait before retrying.",
                         ),
                         500..=599 => uncertain("Bluesky video upload outcome is unknown"),
                         _ => invalid(
@@ -313,6 +316,9 @@ impl Adapter {
                     ));
                 }
                 job_step(&value, c, cp, None)
+            }
+            "bsky_video_upload_rejected" => {
+                Err(error(FailureKind::RateLimited, BLUESKY_VIDEO_RATE_LIMIT))
             }
             "bsky_video_processing" => {
                 let job_id = field(cp, "job_id")?;
