@@ -49,8 +49,8 @@ three active children plus the orchestrator. Each milestone freezes its SHA.
 | Lane | Checkpoint | Next acceptance boundary |
 | --- | --- | --- |
 | Core/providers A+B | PR #19 metadata preconditions reviewed; provider wiring started | Integrate #15/#19, then qualify production routes and worker dispatch; practical formats still follow. |
-| Web C | PR #14 scheduling; #15 media descriptions; #16 idea organization | PR #15 `bde3d2e` isolates corrupt canonical asset records, but fresh review found a scoped key with no asset separator was ignored; namespace classification and a truthful-status test assertion are being corrected. Ideas #16 is merged. Scheduling and preserved manual guidance await integration. |
-| CLI/operations D+E | PR #18 `89edd85`, full image and rehearsal | Independent review found interruption/shutdown races, mutable image identity and a nondurable restored-worker hold; corrections and fresh review precede delivery. |
+| Web C | PR #14 scheduling; #15 media descriptions; #16 idea organization | PR #15 `7e62ad3` fixes known-key isolation and scoped namespace gaps; fresh review is underway. Ideas #16 is merged. Scheduling and preserved manual guidance await integration. |
+| CLI/operations D+E | PR #18 recovery corrections | The second fresh review confirmed earlier fixes but found an unbounded downtime lookup, project ownership collision, unpinned PostgreSQL and helper-volume cleanup; these are being corrected. |
 
 Core owns server/worker/providers/migrations/generated exports. Web owns client
 and browser tests, plus a narrow loan for media metadata CAS and authorized GET:
