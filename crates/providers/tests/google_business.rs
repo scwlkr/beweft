@@ -284,7 +284,7 @@ async fn supported_options_are_mapped_and_unsupported_data_rejected() {
         mime: "image/jpeg".into(),
         source: MediaSource::Bytes(bytes),
         public_url: Some("https://fixture.google.com/expiring".into()),
-        alt_text: String::new(),
+        alt_text: "A saved description for other channels".into(),
     }];
     p.options = json!({"topic_type":"EVENT","language_code":"en-US","event":{"title":"Sale","start_date":"2026-11-03","start_time":"09:30","end_date":"2026-11-04","end_time":"17:00"},"call_to_action":{"type":"BOOK","url":"https://example.invalid/book"}});
     validate("google_business", &p).unwrap();
@@ -301,6 +301,12 @@ async fn supported_options_are_mapped_and_unsupported_data_rejected() {
         "https://fixture.google.com/expiring"
     );
     assert_eq!(body["media"][0]["mediaFormat"], "PHOTO");
+    assert_eq!(body["media"][0].as_object().unwrap().len(), 2);
+    assert!(body["media"][0].get("description").is_none());
+    assert_eq!(
+        p.media[0].alt_text,
+        "A saved description for other channels"
+    );
     assert_eq!(body["callToAction"]["actionType"], "BOOK");
     let event = p.options["event"].clone();
     p.options = json!({"topic_type":"OFFER","event":event,"offer":{"coupon_code":"SAVE","redeem_online_url":"https://example.invalid/redeem","terms_conditions":"Example"}});
@@ -316,9 +322,7 @@ async fn supported_options_are_mapped_and_unsupported_data_rejected() {
     p.options = json!({"unknown":true});
     assert!(validate("google_business", &p).is_err());
     p.options = json!({});
-    p.media[0].alt_text = "not silently dropped".into();
-    assert!(validate("google_business", &p).is_err());
-    p.media[0].alt_text.clear();
+    assert!(validate("google_business", &p).is_ok());
     p.media[0].mime = "video/mp4".into();
     assert!(validate("google_business", &p).is_err());
     server.abort();

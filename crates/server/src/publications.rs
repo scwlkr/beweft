@@ -166,7 +166,7 @@ async fn change(
         .fetch_one(&mut *tx)
         .await?;
     crate::schedules::lock_channel(&mut tx, channel).await?;
-    let row=sqlx::query("SELECT p.*,c.provider FROM publications p JOIN channels c ON c.id=p.channel_id WHERE p.id=$1 FOR UPDATE OF p").bind(id).fetch_one(&mut *tx).await?;
+    let row=sqlx::query("SELECT p.*,c.provider,c.connection_identity FROM publications p JOIN channels c ON c.id=p.channel_id WHERE p.id=$1 FOR UPDATE OF p").bind(id).fetch_one(&mut *tx).await?;
     auth.brand(row.get("brand_id"))?;
     if ["retry", "reschedule"].contains(&action) {
         crate::brand_admin::active(&mut tx, row.get("brand_id")).await?;
@@ -418,6 +418,19 @@ async fn change(
         }
     }
     let mut external_id = body["external_id"].as_str();
+    if provider == "google_business"
+        && action == "reconcile"
+        && target == "published"
+        && let Some(supplied) = external_id
+    {
+        let location: Option<String> = row.get("connection_identity");
+        let location = location.ok_or_else(|| ApiError::conflict("Google channel location is unavailable; omit the external ID and inspect the original delivery"))?;
+        beweft_providers::google_post_name_for_location(supplied, &location).map_err(|_| {
+            ApiError::bad(
+                "Google post ID must be a canonical resource name for this channel's location",
+            )
+        })?;
+    }
     if provider == "google_business"
         && action == "reconcile"
         && target == "published"
