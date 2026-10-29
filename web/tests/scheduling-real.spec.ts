@@ -1076,13 +1076,6 @@ test("retirement of an unverifiable deleted draft leaves the outcome unresolved"
 test("retirement cannot replace a different schedule already bound to the same ID", async () => {
   await withWorkspace(async (page, context, write) => {
     const f = await setup(page, context, write);
-    const other = await write("/posts", {
-      brand_id: f.brand.id,
-      title: "Other draft",
-      text: "Different schedule",
-      media_ids: [],
-      variants: [{ channel_id: f.channel.id }],
-    });
     let body: any;
     await page.route(routeFor(f.post.id), (route) => {
       body = route.request().postDataJSON();
@@ -1093,6 +1086,13 @@ test("retirement cannot replace a different schedule already bound to the same I
       page.getByRole("button", { name: "Stop original schedule" }),
     ).toBeEnabled();
     const saved = await pending(page, f.key);
+    const other = await write("/posts", {
+      brand_id: f.brand.id,
+      title: "Other draft",
+      text: "Different schedule",
+      media_ids: [],
+      variants: [{ channel_id: f.channel.id }],
+    });
     const otherResponse = await context.request.post(
       `/api/v1/posts/${other.id}/schedule?view=summary`,
       {
