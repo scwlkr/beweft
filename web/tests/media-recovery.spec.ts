@@ -116,7 +116,10 @@ test("a pre-commit save stays pending through navigation and a same-CAS retry fe
       alpha.id,
     );
     await page.goto("/#media");
-    await page.getByRole("button", { name: /delayed-alpha\.png/ }).click();
+    await page
+      .locator(".media-grid")
+      .getByRole("button", { name: /delayed-alpha\.png/ })
+      .click();
     await page
       .getByLabel("Description", { exact: true })
       .fill("The first intent");
@@ -133,7 +136,10 @@ test("a pre-commit save stays pending through navigation and a same-CAS retry fe
       await page
         .getByRole("button", { name: "Media library", exact: true })
         .click();
-      await page.getByRole("button", { name: /delayed-alpha\.png/ }).click();
+      await page
+        .locator(".media-grid")
+        .getByRole("button", { name: /delayed-alpha\.png/ })
+        .click();
       await expect(page.getByLabel("Description", { exact: true })).toHaveValue(
         "The first intent",
       );
@@ -147,7 +153,9 @@ test("a pre-commit save stays pending through navigation and a same-CAS retry fe
       await page.getByRole("button", { name: "Close dialog" }).click();
       await page.getByLabel("Current brand").selectOption(beta.id);
       await expect(
-        page.getByRole("button", { name: /delayed-beta\.png/ }),
+        page
+          .locator(".media-grid")
+          .getByRole("button", { name: /delayed-beta\.png/ }),
       ).toBeVisible();
       const failRead = (route: import("@playwright/test").Route) =>
         route.request().method() === "GET"
@@ -163,7 +171,10 @@ test("a pre-commit save stays pending through navigation and a same-CAS retry fe
           : route.continue();
       await page.route(`**/api/v1/media/${item.id}`, failRead);
       await page.getByLabel("Current brand").selectOption(alpha.id);
-      await page.getByRole("button", { name: /delayed-alpha\.png/ }).click();
+      await page
+        .locator(".media-grid")
+        .getByRole("button", { name: /delayed-alpha\.png/ })
+        .click();
       await expect(
         page.getByLabel("Description", { exact: true }),
       ).toBeDisabled();
@@ -213,7 +224,10 @@ test("a lost committed response is recovered after reload without another write"
       await route.abort("failed");
     });
     await page.goto("/#media");
-    await page.getByRole("button", { name: /lost\.png/ }).click();
+    await page
+      .locator(".media-grid")
+      .getByRole("button", { name: /lost\.png/ })
+      .click();
     await page
       .getByLabel("Description", { exact: true })
       .fill("Committed before response loss");
@@ -226,7 +240,10 @@ test("a lost committed response is recovered after reload without another write"
       alt_text: "Committed before response loss",
     });
     await page.reload();
-    await page.getByRole("button", { name: /lost\.png/ }).click();
+    await page
+      .locator(".media-grid")
+      .getByRole("button", { name: /lost\.png/ })
+      .click();
     await expect(page.getByLabel("Description", { exact: true })).toBeEnabled();
     await expect(page.getByLabel("Description", { exact: true })).toHaveValue(
       "Committed before response loss",
@@ -273,7 +290,10 @@ test("failed post-save refresh blocks editing and does not announce saved", asyn
     };
     await page.route(`**/api/v1/media/${item.id}`, handler);
     await page.goto("/#media");
-    await page.getByRole("button", { name: /refresh\.png/ }).click();
+    await page
+      .locator(".media-grid")
+      .getByRole("button", { name: /refresh\.png/ })
+      .click();
     await page
       .getByLabel("Description", { exact: true })
       .fill("Committed but not refreshed");
@@ -319,7 +339,10 @@ test("a late old response cannot replace a newer description or its edits", asyn
     });
     try {
       await page.goto("/#media");
-      await page.getByRole("button", { name: /late\.png/ }).click();
+      await page
+        .locator(".media-grid")
+        .getByRole("button", { name: /late\.png/ })
+        .click();
       await page
         .getByLabel("Description", { exact: true })
         .fill("Older saved text");
@@ -333,7 +356,10 @@ test("a late old response cannot replace a newer description or its edits", asyn
       await page
         .getByRole("button", { name: "Media library", exact: true })
         .click();
-      await page.getByRole("button", { name: /late\.png/ }).click();
+      await page
+        .locator(".media-grid")
+        .getByRole("button", { name: /late\.png/ })
+        .click();
       await expect(page.getByLabel("Description", { exact: true })).toHaveValue(
         "Older saved text",
       );
@@ -382,7 +408,10 @@ test("external updates reject stale saves and refresh retains unsaved text until
       brand.id,
     );
     await page.goto("/#media");
-    await page.getByRole("button", { name: /conflict\.png/ }).click();
+    await page
+      .locator(".media-grid")
+      .getByRole("button", { name: /conflict\.png/ })
+      .click();
     await page
       .getByLabel("Description", { exact: true })
       .fill("My stale description");
@@ -441,8 +470,14 @@ test("another tab's pending edit preserves unsaved text and does not send it", a
     await first.goto("/#media");
     const other = await context.newPage();
     await other.goto("/#media");
-    await first.getByRole("button", { name: /shared\.png/ }).click();
-    await other.getByRole("button", { name: /shared\.png/ }).click();
+    await first
+      .locator(".media-grid")
+      .getByRole("button", { name: /shared\.png/ })
+      .click();
+    await other
+      .locator(".media-grid")
+      .getByRole("button", { name: /shared\.png/ })
+      .click();
     await first
       .getByLabel("Description", { exact: true })
       .fill("First tab description");
@@ -509,7 +544,10 @@ test("a queued claim after sign-out creates no stale intent or media write", asy
     await old.goto("/#media");
     const other = await context.newPage();
     await other.goto("/#media");
-    await old.getByRole("button", { name: /session\.png/ }).click();
+    await old
+      .locator(".media-grid")
+      .getByRole("button", { name: /session\.png/ })
+      .click();
     await old
       .getByLabel("Description", { exact: true })
       .fill("Must not be sent");
@@ -576,7 +614,10 @@ test("a queued claim after sign-out creates no stale intent or media write", asy
         .getByLabel("Password", { exact: true })
         .fill(process.env.BEWEFT_TEST_PASSWORD!);
       await other.getByRole("button", { name: "Sign in", exact: true }).click();
-      await other.getByRole("button", { name: /session\.png/ }).click();
+      await other
+        .locator(".media-grid")
+        .getByRole("button", { name: /session\.png/ })
+        .click();
       await expect(
         other.getByLabel("Description", { exact: true }),
       ).toBeEnabled();
@@ -615,7 +656,10 @@ test("an already-sent unknown edit survives sign-out and fences after reauthenti
     await old.goto("/#media");
     const other = await context.newPage();
     await other.goto("/#media");
-    await old.getByRole("button", { name: /unknown-session\.png/ }).click();
+    await old
+      .locator(".media-grid")
+      .getByRole("button", { name: /unknown-session\.png/ })
+      .click();
     await old
       .getByLabel("Description", { exact: true })
       .fill("Unknown across sessions");
@@ -640,7 +684,10 @@ test("an already-sent unknown edit survives sign-out and fences after reauthenti
         .getByLabel("Password", { exact: true })
         .fill(process.env.BEWEFT_TEST_PASSWORD!);
       await other.getByRole("button", { name: "Sign in", exact: true }).click();
-      await other.getByRole("button", { name: /unknown-session\.png/ }).click();
+      await other
+        .locator(".media-grid")
+        .getByRole("button", { name: /unknown-session\.png/ })
+        .click();
       await expect(
         other.getByLabel("Description", { exact: true }),
       ).toBeDisabled();
@@ -687,7 +734,10 @@ test("a late response for a resolved save cannot replace a newer same-dialog edi
     });
     try {
       await page.goto("/#media");
-      await page.getByRole("button", { name: /same-dialog\.png/ }).click();
+      await page
+        .locator(".media-grid")
+        .getByRole("button", { name: /same-dialog\.png/ })
+        .click();
       await page
         .getByLabel("Description", { exact: true })
         .fill("Original saved value");
@@ -763,7 +813,10 @@ test("a failed earlier response cannot leave a stale error after a successful re
     });
     try {
       await page.goto("/#media");
-      await page.getByRole("button", { name: /overlap\.png/ }).click();
+      await page
+        .locator(".media-grid")
+        .getByRole("button", { name: /overlap\.png/ })
+        .click();
       await page.getByLabel("Description", { exact: true }).fill("Saved once");
       await page.getByRole("button", { name: "Save description" }).click();
       await committed.promise;
@@ -800,7 +853,10 @@ test("unavailable intent storage blocks the write and lets the same edit recover
       brand.id,
     );
     await page.goto("/#media");
-    await page.getByRole("button", { name: /storage\.png/ }).click();
+    await page
+      .locator(".media-grid")
+      .getByRole("button", { name: /storage\.png/ })
+      .click();
     await page
       .getByLabel("Description", { exact: true })
       .fill("Keep this description");

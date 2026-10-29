@@ -346,6 +346,12 @@ pub async fn update(
     Json(body): Json<crate::contracts::UpdateMediaRequest>,
 ) -> Result<Json<Value>> {
     auth.scope("drafts:write")?;
+    if body.alt_text.contains('\0') {
+        return Err(ApiError::bad_code(
+            "media_description_contains_nul",
+            "Media descriptions cannot contain NUL characters",
+        ));
+    }
     if body.alt_text.chars().count() > 2000 {
         return Err(ApiError::bad("Alt text must be at most 2,000 characters"));
     }

@@ -6,7 +6,7 @@ qualification or completed release is claimed.
 
 ## Integration
 
-Integration branch: `codex/orchestrator-handoff`, scheduling-receipt merge `6a351f0`.
+Integration branch: `codex/orchestrator-handoff`, ideas merge `9bcc379`.
 Main remains at durable-core PR #3. Open PRs #4–#8 preserve the original stack.
 Reviewed additions land through merge commits; the completed stack will land
 without squashing an ancestor beneath open descendants.
@@ -39,13 +39,18 @@ three active children plus the orchestrator. Each milestone freezes its SHA.
   removal only of orphaned access. Disconnect itself waits for channel locks.
   Provider routes and the pre-disconnect warning remain to wire into production.
 
+- PR #16, idea organization: `9bcc379`, reviewed head `a770e43`. Real API
+  browser scenarios cover board stages, groups, tags including literal `all`,
+  deletion, outages, mobile layout and delayed actions across brand changes.
+  Full screen-reader and keyboard qualification was not separately performed.
+
 ## Active contracts and checkpoints
 
 | Lane | Checkpoint | Next acceptance boundary |
 | --- | --- | --- |
-| Core/providers A+B | Scheduling receipts merged; metadata precondition contract next | Atomic metadata-version checks for exact selected-media snapshots; then production provider wiring and formats. |
-| Web C | PR #14 scheduling; #15 media descriptions; #16 idea organization | Media CAS fix `518d5e3` is back in implementation after review found a cross-view pending-save bypass and invalid-text recovery trap. Scheduling must use the real 0009 receipt API. Ideas and preserved manual guidance await review/integration. |
-| CLI/operations D+E | Self-host operations, based on named-worker health | Full image, fresh install, restart, safe backup/restore and upgrade rehearsal; then schedule receipt tools. |
+| Core/providers A+B | PR #19 metadata preconditions reviewed; provider wiring started | Integrate #15/#19, then qualify production routes and worker dispatch; practical formats still follow. |
+| Web C | PR #14 scheduling; #15 media descriptions; #16 idea organization | PR #15 `7e62ad3` fixes known-key isolation and scoped namespace gaps; fresh review is underway. Ideas #16 is merged. Scheduling and preserved manual guidance await integration. |
+| CLI/operations D+E | PR #18 recovery corrections | The second fresh review confirmed earlier fixes but found an unbounded downtime lookup, project ownership collision, unpinned PostgreSQL and helper-volume cleanup; these are being corrected. |
 
 Core owns server/worker/providers/migrations/generated exports. Web owns client
 and browser tests, plus a narrow loan for media metadata CAS and authorized GET:
@@ -62,7 +67,9 @@ PR #17 passed fresh independent review at `55eab7c` and merged at `6a351f0`.
 Nonblocking admission leaves recovery/authentication reads usable under repeated
 same-key retries. Compact summary display fields cap channel names at 100 and
 provider labels at 64 Unicode characters, including for existing rows. Large
-escaped/multibyte label fixtures keep receipts below 100 KB with original IDs.
+escaped/multibyte label fixtures without a media-version map keep receipts
+  below 100 KB with original IDs. The 1,000-entry map boundary in PR #19
+  measured 123,182 bytes; the contract does not impose a 100 KB ceiling.
 Web and CLI consumers still require adoption; backend availability alone does
 not close the browser scheduling uncertainty finding.
 Timestamps accept at most six fractional digits and normalize exactly to UTC;
@@ -71,8 +78,13 @@ client comparison must preserve microseconds, not truncate through Date.parse.
 The next schedule contract adds an optional normalized media-version map to the
 immutable request and receipt. New clients will supply the complete effective
 media union; the server will lock and check versions in the snapshot transaction.
-This is planned contract work, not yet implemented. It prevents an unknown
-schedule after reload from silently snapshotting later description edits.
+PR #19 passed fresh independent review at `b126474`, including legacy UUID
+spellings, populated migration, edit races, scoped receipts, complete rollback
+and concurrent mismatch retries. Read responses normalize known UUID fields
+without changing stored draft JSON or historical publication payloads. Its merge
+awaits #15 and the inherited web dependency conflict; client adoption is still
+unfinished. The contract prevents an unknown schedule after reload from silently
+snapshotting later description edits.
 
 Media saves persist owner/brand/asset/base-version/text before PATCH. Unknown
 outcomes stay unresolved; same-CAS retry is explicit. A read at the base version

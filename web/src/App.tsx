@@ -8,6 +8,7 @@ import {
   Search,
   X,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 import { Auth } from "./Auth";
 import { BrandDialog } from "./BrandDialog";
 import { Unicorn } from "./components/brand";
@@ -17,13 +18,14 @@ import { Button } from "./components/ui/button";
 import { Composer } from "./Composer";
 import { titles, zone } from "./navigation";
 import { useWorkspace } from "./useWorkspace";
+import { usePendingMedia } from "./usePendingMedia";
 import { Calendar } from "./views/Calendar";
 import { ConnectionFlow } from "./views/ConnectionFlow";
 import { Connections } from "./views/Connections";
 import { Drafts } from "./views/Drafts";
 import { Ideas } from "./views/Ideas";
 import { Insights } from "./views/Insights";
-import { MediaLibrary } from "./views/MediaLibrary";
+import { MediaDetails, MediaLibrary } from "./views/MediaLibrary";
 import { Queue } from "./views/Queue";
 import { Settings } from "./views/Settings";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
@@ -67,6 +69,10 @@ export default function App() {
     go,
     createBrand,
   } = workspace;
+  const pendingMedia = usePendingMedia(ready ? brandId : "", reconcileMedia);
+  const [reviewMediaId, setReviewMediaId] = useState<string | null>(null);
+  useEffect(() => setReviewMediaId(null), [brandId]);
+  const reviewMedia = media.find((item) => item.id === reviewMediaId);
   if (ready === null) return <Busy />;
   if (!ready)
     return (
@@ -156,6 +162,47 @@ export default function App() {
               )}
             </header>
             {error && <ErrorNotice message={error} />}
+            {brand &&
+              pendingMedia.brand === brand.id &&
+              Object.keys(pendingMedia.intents).length > 0 && (
+                <div className="quiet-note" role="status">
+                  <p>
+                    Some media descriptions are unconfirmed. Review them before
+                    scheduling posts that use them.
+                  </p>
+                  {Object.keys(pendingMedia.intents).map((id) => {
+                    const item = media.find((row) => row.id === id);
+                    return item ? (
+                      <Button
+                        key={id}
+                        variant="secondary"
+                        onClick={() => setReviewMediaId(id)}
+                      >
+                        Review {item.name}
+                      </Button>
+                    ) : null;
+                  })}
+                </div>
+              )}
+            {brand && pendingMedia.error && (
+              <div className="quiet-note" role="status">
+                <p>{pendingMedia.error}</p>
+                <Button variant="secondary" onClick={pendingMedia.retry}>
+                  Check media again
+                </Button>
+              </div>
+            )}
+            {brand && Object.keys(pendingMedia.assetErrors).length > 0 && (
+              <div className="quiet-note" role="status">
+                <p>
+                  Some media descriptions could not be checked. Posts using
+                  those assets remain blocked.
+                </p>
+                <Button variant="secondary" onClick={pendingMedia.retry}>
+                  Check media again
+                </Button>
+              </div>
+            )}
             <div className="content-body" key={brandId}>
               {loading && !brand ? (
                 <Busy />
@@ -218,7 +265,9 @@ export default function App() {
                     <Ideas
                       brand={brand}
                       ideas={ideas.filter((i) =>
-                        matching(i.title + " " + i.text),
+                        matching(
+                          i.title + " " + i.text + " " + i.tags.join(" "),
+                        ),
                       )}
                       action={action}
                       pending={pending}
@@ -347,6 +396,20 @@ export default function App() {
             initialDate={composer?.composeDate}
             onClose={() => setComposer(undefined)}
             onSaved={load}
+            pendingMedia={pendingMedia}
+            reconcileMedia={reconcileMedia}
+            onReviewMedia={setReviewMediaId}
+          />
+        )}
+        {reviewMedia && brand && (
+          <MediaDetails
+            key={reviewMedia.id}
+            selected={reviewMedia}
+            action={action}
+            pending={pending}
+            limit={null}
+            reconcileMedia={reconcileMedia}
+            onClose={() => setReviewMediaId(null)}
           />
         )}
       </div>
