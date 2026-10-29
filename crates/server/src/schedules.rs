@@ -74,7 +74,8 @@ pub async fn next_slot(tx: &mut Transaction<'_, Postgres>, channel: Uuid) -> Res
             .fetch_all(&mut **tx)
             .await?;
     if rules.is_empty() {
-        return Err(ApiError::bad(
+        return Err(ApiError::bad_code(
+            "missing_posting_schedule",
             "This channel needs a posting schedule or an exact date",
         ));
     }
@@ -116,7 +117,8 @@ pub async fn next_slot_after(
             return Ok(candidate);
         }
     }
-    Err(ApiError::conflict(
+    Err(ApiError::conflict_code(
+        "posting_slots_unavailable",
         "No free posting slot in the next 60 days",
     ))
 }
@@ -177,7 +179,8 @@ pub async fn schedule_post(
         .as_i64()
         .ok_or_else(|| ApiError::bad("version is required"))?;
     if expected_version != i64::from(post.get::<i32, _>("version")) {
-        return Err(ApiError::conflict(
+        return Err(ApiError::conflict_code(
+            "post_version_conflict",
             "Draft changed; reload before scheduling",
         ));
     }

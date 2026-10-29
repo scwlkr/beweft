@@ -10,6 +10,38 @@ pub struct Api {
     origin: Url,
     token: String,
 }
+// Only local strings are displayed. A remote endpoint can put credentials or
+// arbitrary instructions in its error message or even in an unknown error code.
+fn known_guidance(status: u16, bytes: &[u8]) -> Option<&'static str> {
+    let body: Value = serde_json::from_slice(bytes).ok()?;
+    let code = body.get("error")?.get("code")?.as_str()?;
+    match (status, code) {
+        (400, "post_text_too_long") => {
+            Some("Post and channel variant text must each be at most 100,000 bytes.")
+        }
+        (400, "unsupported_media_type") => Some("Choose JPEG, PNG, GIF, WebP, MP4, or WebM media."),
+        (400, "missing_posting_schedule") => {
+            Some("Add a posting schedule in the workspace or choose an exact date.")
+        }
+        (409, "posting_slots_unavailable") => Some(
+            "No posting slot is available in the next 60 days. Adjust the posting schedule or choose an exact date.",
+        ),
+        (409, "post_version_conflict") => Some(
+            "The draft changed. Read the current post version before submitting a new request.",
+        ),
+        (400, "invalid_cursor") => Some(
+            "The cursor is invalid or incompatible. Restart the listing with a valid limit, the same filters and authorized brand scope.",
+        ),
+        (400, "invalid_page_limit") => Some("Use a page limit from 1 to 10."),
+        (401, "unauthorized") => {
+            Some("The token was rejected. Check whether it is valid or revoked.")
+        }
+        (403, "forbidden") => Some(
+            "Access is denied. Check token scopes, authorized brands, and whether an owner session is required.",
+        ),
+        _ => None,
+    }
+}
 impl Api {
     pub fn from_env() -> Result<Self> {
         let origin = Url::parse(
@@ -115,6 +147,7 @@ impl Api {
             !self.token.is_empty(),
             "Set BEWEFT_TOKEN_FILE or BEWEFT_TOKEN to a scoped API token"
         );
+        let is_write = method != Method::GET;
         let mut request = self
             .client
             .request(method, self.endpoint(path)?)
@@ -123,37 +156,56 @@ impl Api {
         if let Some(body) = body {
             request = request.json(&body);
         }
-        let response = request.send().await.map_err(|_| anyhow::anyhow!("API request failed or timed out; outcome may be unknown. Read authoritative state before retrying a write."))?;
-        self.response(response).await
+        let response = request.send().await.map_err(|_| {
+            if is_write {
+                anyhow::anyhow!("API request failed or timed out; outcome may be unknown. Read authoritative state before retrying a write.")
+            } else {
+                anyhow::anyhow!("API request failed or timed out")
+            }
+        })?;
+        self.response(response, is_write).await
     }
-    async fn response(&self, mut response: reqwest::Response) -> Result<Value> {
+    async fn response(&self, mut response: reqwest::Response, is_write: bool) -> Result<Value> {
         let status = response.status();
-        ensure!(
-            !status.is_redirection(),
-            "API returned a redirect; it was not followed"
-        );
+        if status.is_redirection() {
+            if is_write {
+                bail!(
+                    "API returned a redirect; it was not followed. Outcome may be unknown; inspect authoritative state before retrying a write"
+                );
+            }
+            bail!("API returned a redirect; it was not followed");
+        }
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| {
-            anyhow::anyhow!(
-                "API response was interrupted; inspect authoritative state before retrying a write"
-            )
+            if is_write {
+                anyhow::anyhow!("API response was interrupted; outcome may be unknown. Inspect authoritative state before retrying a write")
+            } else {
+                anyhow::anyhow!("API response was interrupted")
+            }
         })? {
-            ensure!(
-                bytes.len() + chunk.len() <= 16 * 1024 * 1024,
-                "API response exceeds 16 MiB; inspect authoritative state before retrying a write"
-            );
+            if bytes.len() + chunk.len() > 16 * 1024 * 1024 {
+                if is_write {
+                    bail!("API response exceeds 16 MiB; outcome may be unknown. Inspect authoritative state before retrying a write");
+                }
+                bail!("API response exceeds 16 MiB; narrow the query");
+            }
             bytes.extend_from_slice(&chunk);
         }
         if !status.is_success() {
-            // Deliberately omit server messages: a remote endpoint can echo a secret.
-            bail!(
-                "API returned HTTP {}; inspect authoritative state before retrying a write",
-                status.as_u16()
-            );
+            if let Some(guidance) = known_guidance(status.as_u16(), &bytes) {
+                bail!("API returned HTTP {}: {guidance}", status.as_u16());
+            }
+            if is_write {
+                bail!(
+                    "API returned HTTP {}; outcome may be unknown. Inspect authoritative state before retrying a write",
+                    status.as_u16()
+                );
+            }
+            bail!("API returned HTTP {}", status.as_u16());
         }
-        serde_json::from_slice(&bytes).context(
-            "API returned invalid JSON; inspect authoritative state before retrying a write",
-        )
+        serde_json::from_slice(&bytes).with_context(|| if is_write {
+            "API returned invalid JSON; outcome may be unknown. Inspect authoritative state before retrying a write"
+        } else { "API returned invalid JSON" })
     }
     pub async fn upload(&self, brand: &str, path: &Path, file: std::fs::File) -> Result<Value> {
         ensure!(
@@ -190,7 +242,11 @@ impl Api {
             .multipart(form)
             .send()
             .await
-            .map_err(|_| anyhow::anyhow!("Upload failed; inspect media before retrying"))?;
-        self.response(response).await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Upload failed; outcome may be unknown; inspect media before retrying"
+                )
+            })?;
+        self.response(response, true).await
     }
 }

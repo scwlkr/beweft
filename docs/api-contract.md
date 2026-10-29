@@ -4,6 +4,24 @@ Additional implemented content and account workflows are specified in [workflows
 
 Base `/api/v1`. Success `{ "data": ... }`; failure `{ "error": { "code": "...", "message": "..." } }`. Lists return arrays in `data`. IDs are UUID strings; timestamps RFC3339 UTC. JSON requests set `Content-Type: application/json` and `X-Beweft-Request: 1`. Browser calls use cookie credentials. State-changing browser requests must have matching Origin when present; authenticated cookie mutations require the custom header. All endpoints except auth/status, auth/bootstrap and auth/login need authentication. API tokens use `Authorization: Bearer ...`. Read APIs accept valid tokens except token management; writes need the listed scope. Token listing/creation/revocation and logout require an owner cookie session and reject bearer tokens, including admin tokens. Tokens may restrict `brand_ids`; UI sessions have all owner access.
 
+The following stable codes identify correctable rejections. The indicated
+validation happens before a durable change, or its transaction is rolled back:
+
+| HTTP | Code | Meaning |
+| --- | --- | --- |
+| 400 | `post_text_too_long` | Post or channel-variant text exceeds 100,000 bytes. |
+| 400 | `unsupported_media_type` | The file signature is not JPEG, PNG, GIF, WebP, MP4 or WebM. |
+| 400 | `missing_posting_schedule` | A queued channel has no posting rules. |
+| 409 | `posting_slots_unavailable` | No posting-rule slot is free in the next 60 days. |
+| 409 | `post_version_conflict` | The submitted post version is stale. |
+| 400 | `invalid_cursor` | A list cursor is malformed or incompatible with its filters or scope. |
+| 400 | `invalid_page_limit` | The list limit is outside 1–10. |
+
+Existing `unauthorized` (401) and `forbidden` (403) codes indicate authentication
+or access denial. Other failures retain their existing codes. A transport
+failure, interrupted response or unknown error after a write does not establish
+its outcome.
+
 ## Bounded list inspection
 
 GET `/posts`, `/media`, and `/publications` accept optional `limit` (1–10) and

@@ -35,12 +35,18 @@ impl Page {
     ) -> Result<Option<Self>> {
         let Some(limit) = limit else {
             if cursor.is_some() {
-                return Err(ApiError::bad("A cursor requires limit"));
+                return Err(ApiError::bad_code(
+                    "invalid_cursor",
+                    "A cursor requires limit",
+                ));
             }
             return Ok(None);
         };
         if !(1..=10).contains(&limit) {
-            return Err(ApiError::bad("limit must be between 1 and 10"));
+            return Err(ApiError::bad_code(
+                "invalid_page_limit",
+                "limit must be between 1 and 10",
+            ));
         }
         let mut brands = auth.brand_ids.clone();
         brands.sort_unstable();
@@ -50,15 +56,12 @@ impl Page {
             None => None,
             Some(raw) => {
                 if raw.len() > 2048 {
-                    return Err(ApiError::bad("Invalid or incompatible cursor"));
+                    return Err(invalid_cursor());
                 }
-                let bytes = URL_SAFE_NO_PAD
-                    .decode(raw)
-                    .map_err(|_| ApiError::bad("Invalid or incompatible cursor"))?;
-                let value: Cursor = serde_json::from_slice(&bytes)
-                    .map_err(|_| ApiError::bad("Invalid or incompatible cursor"))?;
+                let bytes = URL_SAFE_NO_PAD.decode(raw).map_err(|_| invalid_cursor())?;
+                let value: Cursor = serde_json::from_slice(&bytes).map_err(|_| invalid_cursor())?;
                 if value.version != 1 || value.context != context {
-                    return Err(ApiError::bad("Invalid or incompatible cursor"));
+                    return Err(invalid_cursor());
                 }
                 Some(value)
             }
@@ -91,4 +94,7 @@ impl Page {
             json!({"data":rows.into_iter().map(|(value, _, _)| value).collect::<Vec<_>>(), "next_cursor":next_cursor}),
         ))
     }
+}
+fn invalid_cursor() -> ApiError {
+    ApiError::bad_code("invalid_cursor", "Invalid or incompatible cursor")
 }

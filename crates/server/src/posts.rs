@@ -112,7 +112,10 @@ pub async fn validate_content(db: &PgPool, brand: Uuid, body: &Value) -> Result<
     }
 
     if body["text"].as_str().unwrap_or("").len() > 100_000 {
-        return Err(ApiError::bad("Text must be at most 100,000 bytes"));
+        return Err(ApiError::bad_code(
+            "post_text_too_long",
+            "Text must be at most 100,000 bytes",
+        ));
     }
     let media: Vec<Uuid> =
         serde_json::from_value(body.get("media_ids").cloned().unwrap_or(json!([])))
@@ -144,7 +147,10 @@ pub async fn validate_content(db: &PgPool, brand: Uuid, body: &Value) -> Result<
             ));
         }
         if variant["text"].as_str().is_some_and(|s| s.len() > 100_000) {
-            return Err(ApiError::bad("Variant text is too long"));
+            return Err(ApiError::bad_code(
+                "post_text_too_long",
+                "Variant text must be at most 100,000 bytes",
+            ));
         }
         if let Some(ids) = variant.get("media_ids") {
             let ids: Vec<Uuid> = serde_json::from_value(ids.clone())
@@ -219,7 +225,10 @@ pub async fn update(
     validate_content(&state.db, brand, &merged).await?;
     let updated=sqlx::query("UPDATE posts SET title=$3,text=$4,media_ids=$5,variants=$6,options=$7,version=version+1,updated_at=now() WHERE id=$1 AND version=$2").bind(id).bind(i32::try_from(version).map_err(|_|ApiError::bad("Invalid version"))?).bind(merged["title"].as_str().unwrap_or("")).bind(merged["text"].as_str().unwrap_or("")).bind(&merged["media_ids"]).bind(&merged["variants"]).bind(&merged["options"]).execute(&state.db).await?;
     if updated.rows_affected() == 0 {
-        return Err(ApiError::conflict("Draft changed; reload before saving"));
+        return Err(ApiError::conflict_code(
+            "post_version_conflict",
+            "Draft changed; reload before saving",
+        ));
     }
     Ok(data(get_post(&state.db, id).await?))
 }

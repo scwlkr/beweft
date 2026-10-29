@@ -8,6 +8,7 @@ removes that database and its temporary files on exit. No worker or provider is 
 """
 import base64
 import datetime as dt
+import http.client
 import http.cookiejar
 import http.server
 import json
@@ -227,6 +228,173 @@ def redirect_test(env):
             thread.join(timeout=5)
 
 
+def reflected_error_test(env):
+    """A remote error body must never be echoed, even for an allowlisted code."""
+    marker = "remote-error-reflection-marker"
+    class Host(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+        def respond(self, code, status=400):
+            token = self.headers["Authorization"]
+            body = json.dumps({"error": {"code": code, "message": marker + " " + token}}).encode()
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def do_GET(self):
+            self.respond("untrusted-" + self.headers["Authorization"])
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if body.get("text") == "unknown":
+                self.respond("untrusted-" + self.headers["Authorization"])
+            elif body.get("text") == "wrong-status":
+                self.respond("post_text_too_long", status=500)
+            else:
+                self.respond("post_text_too_long")
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Host)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    test_env = dict(env, BEWEFT_URL=f"http://127.0.0.1:{server.server_port}", BEWEFT_TOKEN="isolated-reflection-token")
+    args = {"body": {"brand_id": "00000000-0000-0000-0000-000000000001", "text": "fixture"}}
+    unknown_args = {"body": dict(args["body"], text="unknown")}
+    wrong_status_args = {"body": dict(args["body"], text="wrong-status")}
+    mcp = Mcp(test_env)
+    try:
+        unknown = cli(test_env, "brands", success=False)
+        known = cli(test_env, "draft-create", "--json", "-", body=args, success=False)
+        assert marker not in unknown and marker not in known and "100,000 bytes" in known
+        assert "HTTP 400" in unknown and "outcome may be unknown" not in unknown
+        unknown_write = cli(test_env, "draft-create", "--json", "-", body=unknown_args, success=False)
+        wrong_status = cli(test_env, "draft-create", "--json", "-", body=wrong_status_args, success=False)
+        assert marker not in unknown_write and "outcome may be unknown" in unknown_write
+        assert "HTTP 500" in wrong_status and "100,000 bytes" not in wrong_status and "authoritative state" in wrong_status
+        mcp.initialize()
+        unknown = mcp.call("brands", error=True)
+        known = mcp.call("draft_create", args, error=True)
+        assert marker not in unknown and marker not in known and "100,000 bytes" in known
+        assert "HTTP 400" in unknown and "outcome may be unknown" not in unknown
+        unknown_write = mcp.call("draft_create", unknown_args, error=True)
+        wrong_status = mcp.call("draft_create", wrong_status_args, error=True)
+        assert marker not in unknown_write and "outcome may be unknown" in unknown_write
+        assert "HTTP 500" in wrong_status and "100,000 bytes" not in wrong_status and "authoritative state" in wrong_status
+    finally:
+        mcp.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def actionable_errors_test(env, read_env, call, brand, channel, upload_root):
+    """Real API rejections produce fixed, useful CLI and MCP guidance."""
+    mcp = Mcp(env)
+    restricted = Mcp(read_env)
+    try:
+        mcp.initialize()
+        restricted.initialize()
+        too_long = {"body": {"brand_id": brand, "text": "x" * 100001}}
+        for error in (cli(env, "draft-create", "--json", "-", body=too_long, success=False), mcp.call("draft_create", too_long, error=True)):
+            assert "HTTP 400" in error and "100,000 bytes" in error and "outcome may be unknown" not in error
+        scope_error = restricted.call("draft_create", {"body": {"brand_id": brand, "text": "denied"}}, error=True)
+        assert "HTTP 403" in scope_error and "scope" in scope_error and "brand" in scope_error
+
+        bad_file = upload_root / "unsupported.bin"
+        bad_file.write_bytes(b"x" * 64)
+        upload = {"brand_id": brand, "path": str(bad_file)}
+        before = call("/media/limits")
+        for error in (cli(env, "media-upload", "--json", "-", body=upload, success=False), mcp.call("media_upload", upload, error=True)):
+            assert "HTTP 400" in error and "JPEG" in error and "MP4" in error and "outcome may be unknown" not in error
+        after = call("/media/limits")
+        assert after["used_bytes"] == before["used_bytes"] and after["reserved_bytes"] == before["reserved_bytes"]
+
+        post = call("/posts", {"brand_id": brand, "text": "Needs posting rule"})
+        schedule = {"id": post["id"], "intent": "queue", "body": {"version": post["version"], "channel_ids": [channel]}}
+        for error in (cli(env, "schedule", "--json", "-", body=schedule, success=False), mcp.call("schedule", schedule, error=True)):
+            assert "HTTP 400" in error and "posting schedule" in error and "exact" in error and "outcome may be unknown" not in error
+        assert call("/posts/" + post["id"])["status"] == "draft"
+        assert not any(row["post_id"] == post["id"] for row in call("/publications"))
+
+        # The first channel reserves inside the transaction; a later channel
+        # without a rule must roll back that reservation before this rejection.
+        pair = [call("/channels", {"brand_id": brand, "name": f"Rollback fixture {i}", "provider": "manual"})["id"] for i in range(2)]
+        pair.sort()
+        call("/schedules", {"channel_id": pair[0], "days": [1, 2, 3, 4, 5, 6, 7], "time": "00:01", "timezone": "UTC"})
+        rollback_post = call("/posts", {"brand_id": brand, "text": "Rollback schedule fixture"})
+        rollback_args = {"id": rollback_post["id"], "intent": "queue", "body": {"version": rollback_post["version"], "channel_ids": pair}}
+        assert "posting schedule" in mcp.call("schedule", rollback_args, error=True)
+        assert not any(row["post_id"] == rollback_post["id"] for row in call("/publications"))
+        assert call("/posts/" + rollback_post["id"])["status"] == "draft"
+
+        edited = cli(env, "draft-update", "--json", "-", body={"id": post["id"], "body": {"version": post["version"], "text": "Updated"}})["data"]
+        stale = {"id": post["id"], "body": {"version": post["version"], "text": "Stale"}}
+        for error in (cli(env, "draft-update", "--json", "-", body=stale, success=False), mcp.call("draft_update", stale, error=True)):
+            assert "HTTP 409" in error and "version" in error and "read" in error.lower()
+        assert mcp.call("post", {"id": post["id"]})["data"]["version"] == edited["version"]
+        cursor_error = mcp.call("drafts", {"limit": 10, "cursor": "bad"}, error=True)
+        assert "HTTP 400" in cursor_error and "cursor" in cursor_error.lower() and "restart" in cursor_error.lower()
+    finally:
+        mcp.close()
+        restricted.close()
+
+
+def chunked_preflight_test(env, origin, call, brand, media_dir):
+    """Split a slow chunked signature, then verify admission, bytes and cleanup."""
+    image = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII=")
+    prefix = b'--preflight-fixture\r\nContent-Disposition: form-data; name="file"; filename="split.png"\r\nContent-Type: image/png\r\n\r\n'
+    suffix = b"\r\n--preflight-fixture--\r\n"
+    url = origin + "/api/v1/media?brand_id=" + brand
+    headers = {"Authorization": "Bearer " + env["BEWEFT_TOKEN"], "Content-Type": "multipart/form-data; boundary=preflight-fixture"}
+    before = call("/media/limits")
+    empty = urllib.request.Request(url, data=prefix + suffix, headers=headers)
+    try:
+        urllib.request.urlopen(empty, timeout=10)
+        raise AssertionError("Empty upload was accepted")
+    except urllib.error.HTTPError as error:
+        assert error.code == 400
+        assert json.load(error)["error"]["code"] == "invalid_request"
+    assert call("/media/limits")["reserved_bytes"] == before["reserved_bytes"]
+    assert not list(media_dir.iterdir())
+
+    port = int(origin.rsplit(":", 1)[1])
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
+    try:
+        connection.putrequest("POST", "/api/v1/media?brand_id=" + brand)
+        for name, value in headers.items():
+            connection.putheader(name, value)
+        connection.putheader("Transfer-Encoding", "chunked")
+        connection.endheaders()
+        def send(data):
+            connection.send(f"{len(data):x}\r\n".encode() + data + b"\r\n")
+        send(prefix)
+        send(image[:3])
+        time.sleep(0.2)
+        assert call("/media/limits")["reserved_bytes"] == before["reserved_bytes"]
+        assert not list(media_dir.iterdir())
+        send(image[3:32])
+        for _ in range(100):
+            if call("/media/limits")["reserved_bytes"] > before["reserved_bytes"]:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("Chunked upload did not reserve quota after signature")
+        send(image[32:])
+        send(suffix)
+        connection.send(b"0\r\n\r\n")
+        response = connection.getresponse()
+        assert response.status == 200
+        uploaded = json.loads(response.read())["data"]
+    finally:
+        connection.close()
+    request = urllib.request.Request(origin + uploaded["url"], headers={"Authorization": headers["Authorization"]})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        assert response.read() == image
+    request = urllib.request.Request(origin + "/api/v1/media/" + uploaded["id"], headers={"Authorization": headers["Authorization"]}, method="DELETE")
+    with urllib.request.urlopen(request, timeout=10) as response:
+        assert response.status == 200
+    after = call("/media/limits")
+    assert after["reserved_bytes"] == before["reserved_bytes"] and after["used_bytes"] == before["used_bytes"]
+    assert not list(media_dir.iterdir())
+
+
 def lost_response_test(env, origin, brand):
     """Commit a write through the real API, then discard its response."""
     calls = []
@@ -295,7 +463,7 @@ def lost_upload_response_test(env, origin, brand, path):
     try:
         mcp.initialize()
         error = mcp.call("media_upload", {"brand_id": brand, "path": str(path)}, error=True)
-        assert "inspect media before retrying" in error and calls == ["/api/v1/media?brand_id=" + brand]
+        assert "outcome may be unknown" in error and "inspect media before retrying" in error and calls == ["/api/v1/media?brand_id=" + brand]
     finally:
         mcp.close()
         proxy.shutdown()
@@ -541,6 +709,9 @@ def run(temporary):
         token_file.chmod(0o600)
         assert cli(file_env, "brands")["data"][0]["id"] == brand["id"]
         assert "only one" in cli(dict(file_env, BEWEFT_TOKEN=write), "brands", success=False)
+        actionable_errors_test(env, read_env, call, brand["id"], channel["id"], upload_root)
+        reflected_error_test(env)
+        chunked_preflight_test(env, origin, call, brand["id"], media)
         created = cli(env, "draft-create", "--json", "-", body={"body": {"brand_id": brand["id"], "text": "CLI draft", "options": {"source": "fixture"}, "variants": [{"channel_id": channel["id"], "text": "fixture variant"}]}})["data"]
         assert created["status"] == "draft" and not cli(env, "queue")["data"]
         summary = cli(env, "drafts")["data"][0]
@@ -644,7 +815,7 @@ def run(temporary):
         race_test(env, upload_root, temp / "race-secret", brand["id"])
         pagination_test(env, dict(env, BEWEFT_TOKEN=unrestricted), call, brand["id"], other["id"], channel["id"])
         request_bounds_test(env, call, brand["id"], channel["id"])
-        print("PASS: isolated API CLI/MCP, scoped access, lost-response recovery, 170 large-draft pagination, 50-channel compact scheduling, escaped emoji and ASCII wire envelopes, oversized input rejection, upload confinement, token files, redirects, protocol errors and rate limit")
+        print("PASS: isolated API CLI/MCP, actionable redacted errors, schedule rollback, split chunked/empty uploads, lost-response recovery, scoped pagination, 50-channel compact scheduling, bounded escaped envelopes and upload confinement")
     finally:
         stop(server)
 

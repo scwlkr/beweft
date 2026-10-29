@@ -70,6 +70,11 @@ lost, its outcome can be unknown. Inspect the post, queue, history and attempts
 and resolve the outcome before retrying; an immediate absence alone is not proof
 that an in-flight request did not commit.
 
+For known API rejection codes, the CLI and MCP return fixed guidance such as a
+text limit or missing posting schedule. They never display remote error messages
+or unknown codes, which could contain private data. An unrecognized write error
+still requires checking authoritative state before retrying.
+
 ## MCP configuration
 
 Point an MCP client at the built binary with `mcp` as its only argument. For
