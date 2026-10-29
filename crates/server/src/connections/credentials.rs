@@ -247,11 +247,20 @@ pub async fn disconnect(
     sqlx::query("SET LOCAL lock_timeout = '5s'")
         .execute(&mut *tx)
         .await?;
+    // A committed pending marker remains readable while another operation
+    // holds the gate. Return the same recovery steps without waiting for it.
+    let pending: Option<Uuid> =
+        sqlx::query_scalar("SELECT revocation_id FROM provider_oauth_fences WHERE provider=$1")
+            .bind(&provider)
+            .fetch_optional(&mut *tx)
+            .await?
+            .flatten();
+    if pending.is_some() {
+        return Err(super::apps::pending_removal_error());
+    }
     let gate = super::apps::oauth_gate(&mut tx, &provider, false).await?;
     if gate.is_some_and(|(_, pending)| pending.is_some()) {
-        return Err(ApiError::conflict(
-            "Provider revocation is already in progress or needs confirmation",
-        ));
+        return Err(super::apps::pending_removal_error());
     }
     // Provider grant sharing is not reliably known. A stored grant (and every
     // Google disconnect) may affect any channel for that provider. Read the

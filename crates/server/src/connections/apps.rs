@@ -62,12 +62,16 @@ pub(super) async fn oauth_gate(
     Ok(row.map(|row| (row.get("oauth_generation"), row.get("revocation_id"))))
 }
 
+pub(super) fn pending_removal_error() -> ApiError {
+    ApiError::conflict(
+        "Provider removal is pending. Wait for any provider operation still in progress to finish. Removing access at the provider may affect other channels and unrelated accounts. First inspect your channels, then remove the affected access in the provider's connected-app settings. Only after removal is complete, confirm it before connecting again.",
+    )
+}
+
 pub(super) fn require_open_oauth_gate(gate: Option<(i64, Option<Uuid>)>) -> Result<i64> {
     match gate {
         Some((generation, None)) => Ok(generation),
-        Some((_, Some(_))) => Err(ApiError::conflict(
-            "Provider revocation is not confirmed. Removing provider access may affect other channels and unrelated accounts. Inspect connected channels, remove the affected access, and confirm removal before connecting again.",
-        )),
+        Some((_, Some(_))) => Err(pending_removal_error()),
         None => Err(ApiError::bad("Set up this provider app first")),
     }
 }

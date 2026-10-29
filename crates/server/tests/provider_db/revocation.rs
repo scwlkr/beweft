@@ -266,15 +266,10 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
     );
     h.provider.sync_release.notify_one();
     assert_eq!(sync.await.unwrap().unwrap().status(), StatusCode::OK);
-    let outcome: Value = disconnect.await.unwrap().unwrap().json().await.unwrap();
-    assert_eq!(outcome["data"]["provider_revoked"], false);
-    assert_eq!(outcome["data"]["channels_requiring_reconnection"], 1);
-    assert!(
-        outcome["data"]["next_action"]
-            .as_str()
-            .unwrap()
-            .contains("confirm")
-    );
+    // Simulate a committed disconnect whose response body is lost to the owner.
+    let outcome = disconnect.await.unwrap().unwrap();
+    assert_eq!(outcome.status(), StatusCode::OK);
+    drop(outcome);
     assert_eq!(
         h.provider.revoke_requests.load(Ordering::SeqCst),
         revoke_count
@@ -288,6 +283,25 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
     .await
     .unwrap();
     assert!(pending_before.1.is_some());
+    let sibling_before: (String, String, bool) = sqlx::query_as(
+        "SELECT connection_status,encrypted_credentials,paused FROM channels WHERE id=$1",
+    )
+    .bind(other_channel)
+    .fetch_one(&h.state.db)
+    .await
+    .unwrap();
+    let target_before: (String, Option<String>, bool) = sqlx::query_as(
+        "SELECT connection_status,encrypted_credentials,paused FROM channels WHERE id=$1",
+    )
+    .bind(channel)
+    .fetch_one(&h.state.db)
+    .await
+    .unwrap();
+    let queue_before: String = sqlx::query_scalar("SELECT state FROM publications WHERE id=$1")
+        .bind(publication)
+        .fetch_one(&h.state.db)
+        .await
+        .unwrap();
     let repeat = || {
         client
             .post(format!("{base}/disconnect/{channel}"))
@@ -295,9 +309,42 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
             .header("x-beweft-request", "1")
             .send()
     };
+    let response = repeat().await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = response.text().await.unwrap();
+    assert!(!body.contains(&h.session) && !body.contains("rotated-refresh"));
+    let value: Value = serde_json::from_str(&body).unwrap();
+    let message = value["error"]["message"].as_str().unwrap().to_owned();
+    assert!(message.contains("other channels") && message.contains("unrelated accounts"));
+    let wait = message.find("Wait for any provider operation").unwrap();
+    let inspect = message.find("First inspect your channels").unwrap();
+    let remove = message.find("then remove the affected access").unwrap();
+    let confirm = message
+        .find("Only after removal is complete, confirm")
+        .unwrap();
+    assert!(wait < inspect && inspect < remove && remove < confirm);
+
+    // A committed marker remains recoverable even while its row is locked by
+    // a concurrent operation; the response neither waits nor mutates it.
+    let mut locked = h.state.db.begin().await.unwrap();
+    sqlx::query("SELECT provider FROM provider_oauth_fences WHERE provider='youtube' FOR UPDATE")
+        .fetch_one(&mut *locked)
+        .await
+        .unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(2), repeat())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let locked_body: Value = response.json().await.unwrap();
+    assert_eq!(locked_body["error"]["message"], message);
+    locked.rollback().await.unwrap();
     let (first_repeat, second_repeat) = tokio::join!(repeat(), repeat());
-    assert_eq!(first_repeat.unwrap().status(), StatusCode::CONFLICT);
-    assert_eq!(second_repeat.unwrap().status(), StatusCode::CONFLICT);
+    for response in [first_repeat.unwrap(), second_repeat.unwrap()] {
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["error"]["message"], message);
+    }
     let pending_after: (i64, Option<Uuid>) = sqlx::query_as(
         "SELECT oauth_generation,revocation_id FROM provider_oauth_fences WHERE provider='youtube'",
     )
@@ -305,6 +352,32 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
     .await
     .unwrap();
     assert_eq!(pending_after, pending_before);
+    let sibling_after: (String, String, bool) = sqlx::query_as(
+        "SELECT connection_status,encrypted_credentials,paused FROM channels WHERE id=$1",
+    )
+    .bind(other_channel)
+    .fetch_one(&h.state.db)
+    .await
+    .unwrap();
+    let target_after: (String, Option<String>, bool) = sqlx::query_as(
+        "SELECT connection_status,encrypted_credentials,paused FROM channels WHERE id=$1",
+    )
+    .bind(channel)
+    .fetch_one(&h.state.db)
+    .await
+    .unwrap();
+    let queue_after: String = sqlx::query_scalar("SELECT state FROM publications WHERE id=$1")
+        .bind(publication)
+        .fetch_one(&h.state.db)
+        .await
+        .unwrap();
+    assert_eq!(sibling_after, sibling_before);
+    assert_eq!(target_after, target_before);
+    assert_eq!(queue_after, queue_before);
+    assert_eq!(
+        h.provider.revoke_requests.load(Ordering::SeqCst),
+        revoke_count
+    );
     assert_eq!(
         complete(&stale).send().await.unwrap().status(),
         StatusCode::CONFLICT
@@ -313,10 +386,10 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
         complete(&stale_new_channel).send().await.unwrap().status(),
         StatusCode::CONFLICT
     );
-    assert_eq!(
-        start(request.clone()).send().await.unwrap().status(),
-        StatusCode::CONFLICT
-    );
+    let blocked_start = start(request.clone()).send().await.unwrap();
+    assert_eq!(blocked_start.status(), StatusCode::CONFLICT);
+    let body: Value = blocked_start.json().await.unwrap();
+    assert_eq!(body["error"]["message"], message);
     assert_eq!(
         ack(false).send().await.unwrap().status(),
         StatusCode::BAD_REQUEST
