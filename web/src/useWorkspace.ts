@@ -105,15 +105,19 @@ export function useWorkspace() {
     const current = ++generation.current;
     setLoading(true);
     try {
-      const [bs, ps, h] = await Promise.all([
-        api("/brands", z.array(BrandSchema)),
+      const brandRequest = api("/brands", z.array(BrandSchema));
+      // Handle metadata rejection immediately, even if the brand list is slow
+      // or triggers a transition before the metadata has settled.
+      const metadataRequest = Promise.all([
         api("/providers", z.array(ProviderSchema)),
         api("/jobs/health", HealthSchema),
-      ]);
+      ]).then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      const bs = await brandRequest;
       if (current !== generation.current) return;
       setBrands(bs);
-      setProviders(ps);
-      setHealth(h);
       const next = bs.some((b) => b.id === brandId)
         ? brandId
         : (bs[0]?.id ?? "");
@@ -121,6 +125,12 @@ export function useWorkspace() {
         chooseBrand(next);
         return;
       }
+      const metadata = await metadataRequest;
+      if (current !== generation.current) return;
+      if (!metadata.ok) throw metadata.error;
+      const [ps, h] = metadata.value;
+      setProviders(ps);
+      setHealth(h);
       if (next) {
         const q = `?brand_id=${encodeURIComponent(next)}`;
         const [cs, posts, ins, ms, pubs] = await Promise.all([
