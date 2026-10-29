@@ -2,7 +2,7 @@ use crate::client::Api;
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::Method;
 use serde_json::{Value, json};
-use std::path::Path;
+use std::{path::Path, sync::OnceLock};
 
 pub const NAMES: &[&str] = &[
     "brands",
@@ -18,10 +18,29 @@ pub const NAMES: &[&str] = &[
     "draft_create",
     "draft_update",
     "schedule",
+    "schedule_request",
+    "schedule_retire",
+    "schedules",
     "media_upload",
 ];
 fn object(properties: Value, required: &[&str]) -> Value {
     json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
+}
+fn contract() -> &'static Value {
+    static CONTRACT: OnceLock<Value> = OnceLock::new();
+    CONTRACT.get_or_init(|| {
+        serde_json::from_str(include_str!("../../../docs/openapi.json"))
+            .expect("generated API contract")
+    })
+}
+fn parameter_schema(path: &str, method: &str, name: &str) -> Value {
+    contract()["paths"][path][method]["parameters"]
+        .as_array()
+        .expect("generated API parameters")
+        .iter()
+        .find(|parameter| parameter["name"] == name)
+        .expect("generated API parameter")["schema"]
+        .clone()
 }
 fn request_schema(name: &str) -> Value {
     fn expand(value: &Value, schemas: &Value, depth: u8) -> Value {
@@ -50,13 +69,39 @@ fn request_schema(name: &str) -> Value {
             other => other.clone(),
         }
     }
-    let spec: Value = serde_json::from_str(include_str!("../../../docs/openapi.json"))
-        .expect("generated API contract");
+    let spec = contract();
     expand(
         &spec["components"]["schemas"][name],
         &spec["components"]["schemas"],
         0,
     )
+}
+// Named scheduling tools deliberately require recovery fields that are optional
+// for legacy API clients. The remaining fields come from the generated contract.
+fn recovery_schema(name: &str) -> Value {
+    let mut schema = request_schema(name);
+    let fields: &[&str] = if name == "SchedulePostRequest" {
+        &["request_id", "media_versions"]
+    } else {
+        &["media_versions"]
+    };
+    for field in fields {
+        let required = schema["required"].as_array_mut().unwrap();
+        if !required.contains(&json!(field)) {
+            required.push(json!(field));
+        }
+    }
+    schema["properties"]["media_versions"]["type"] = json!("object");
+    schema["properties"]["media_versions"]["description"] = json!(
+        "Explicit saved map of every selected effective media ID to its metadata version; use {} when there is no effective media."
+    );
+    if name == "SchedulePostRequest" {
+        schema["properties"]["request_id"]["type"] = json!("string");
+        schema["properties"]["request_id"]["description"] = json!(
+            "Explicit UUID saved with the exact approved body before sending. Reuse it only with that body."
+        );
+    }
+    schema
 }
 pub fn description(name: &str) -> Value {
     let id = json!({"type":"string","format":"uuid"});
@@ -103,7 +148,7 @@ pub fn description(name: &str) -> Value {
             true,
         ),
         "attempts" => (
-            "Read durable attempt history for a publication; use after any unknown write outcome.",
+            "Read durable delivery attempt history for a publication.",
             object(json!({"id":id}), &["id"]),
             true,
         ),
@@ -129,12 +174,36 @@ pub fn description(name: &str) -> Value {
             false,
         ),
         "schedule" => (
-            "Schedule the approved post version. Explicit intent=queue reserves posting-rule slots; intent=exact requires scheduled_at. Can publish when due. Returns publication summaries; use publication for full details. Never retry an unknown outcome without reading the queue.",
+            "Schedule the approved post version. Save the explicit request_id and exact body first; supply the complete effective media_versions map ({} if empty). intent=queue reserves posting-rule slots; intent=exact requires scheduled_at. Can publish when due. After an unknown outcome, look up schedule_request and preserve the same ID/body; a 404 or in-progress result is unresolved. Accepted receipts identify the original publications.",
             object(
-                json!({"id":id,"intent":{"type":"string","enum":["queue","exact"]},"body":request_schema("SchedulePostRequest")}),
+                json!({"id":parameter_schema("/api/v1/posts/{id}/schedule", "post", "id"),"intent":{"type":"string","enum":["queue","exact"]},"body":recovery_schema("SchedulePostRequest")}),
                 &["id", "intent", "body"],
             ),
             false,
+        ),
+        "schedule_request" => (
+            "Read a saved scheduling receipt by request_id. Accepted identifies the original publications; rejected identifies a terminal rejection. A 404 may mean missing or inaccessible and cannot rule out an in-flight write.",
+            object(
+                json!({"request_id":parameter_schema("/api/v1/schedule-requests/{request_id}", "get", "request_id")}),
+                &["request_id"],
+            ),
+            true,
+        ),
+        "schedule_retire" => (
+            "Explicitly retire an unresolved saved scheduling request using the same request_id, post, brand, version, channels, time and media_versions. A retired receipt has no publications; an already accepted receipt is returned unchanged and its publications are not canceled. In-progress and missing outcomes remain unresolved.",
+            object(
+                json!({"request_id":parameter_schema("/api/v1/schedule-requests/{request_id}/retire", "post", "request_id"),"body":recovery_schema("RetireScheduleRequest")}),
+                &["request_id", "body"],
+            ),
+            false,
+        ),
+        "schedules" => (
+            "Read posting rules for a channel before choosing a queue schedule.",
+            object(
+                json!({"channel_id":parameter_schema("/api/v1/schedules", "get", "channel_id")}),
+                &["channel_id"],
+            ),
+            true,
         ),
         "media_upload" => (
             "Upload a local file for a brand. MCP requires BEWEFT_UPLOAD_ROOT and accepts files only within that directory. Never schedules.",
@@ -248,6 +317,21 @@ pub async fn invoke(
             };
             api.request(Method::GET, &path, None).await
         }
+        "schedules" => {
+            let channel_id = uuid(&args, "channel_id")?;
+            api.request(
+                Method::GET,
+                &format!("/schedules?channel_id={channel_id}"),
+                None,
+            )
+            .await
+        }
+        "schedule_request" => {
+            let request_id = uuid(&args, "request_id")?;
+            api.request(Method::GET, &format!("/schedule-requests/{request_id}"), None)
+                .await
+                .map_err(|error| anyhow::anyhow!("{error}. A missing or inaccessible receipt does not prove an in-flight request failed; keep the saved ID and body."))
+        }
         "publication" => {
             let id = uuid(&args, "id")?;
             let response = api
@@ -259,7 +343,7 @@ pub async fn invoke(
                 .context("Publication not found or inaccessible")?;
             Ok(json!({"data":record}))
         }
-        "draft_create" | "draft_update" | "schedule" => {
+        "draft_create" | "draft_update" | "schedule" | "schedule_retire" => {
             let body = args["body"].as_object().context("body must be an object")?;
             if name != "draft_create" {
                 ensure!(
@@ -269,9 +353,22 @@ pub async fn invoke(
                     "A positive expected version is required"
                 );
             }
+            if matches!(name, "schedule" | "schedule_retire") {
+                ensure!(
+                    body.get("media_versions").is_some_and(Value::is_object),
+                    "Explicit media_versions object is required; use {{}} for no effective media"
+                );
+                if name == "schedule" {
+                    uuid(&args["body"], "request_id")?;
+                }
+            }
             let (method, path) = match name {
                 "draft_create" => (Method::POST, "/posts".into()),
                 "draft_update" => (Method::PATCH, format!("/posts/{}", uuid(&args, "id")?)),
+                "schedule_retire" => (
+                    Method::POST,
+                    format!("/schedule-requests/{}/retire", uuid(&args, "request_id")?),
+                ),
                 _ => {
                     match text(&args, "intent")? {
                         "queue" => ensure!(
@@ -290,8 +387,14 @@ pub async fn invoke(
                     )
                 }
             };
-            api.request(method, &path, Some(Value::Object(body.clone())))
-                .await
+            let response = api
+                .request(method, &path, Some(Value::Object(body.clone())))
+                .await;
+            if matches!(name, "schedule" | "schedule_retire") {
+                response.map_err(|error| anyhow::anyhow!("{error}. For an unresolved outcome, look up schedule_request and keep the same saved ID and body; a 404 or in-progress result is not proof of failure."))
+            } else {
+                response
+            }
         }
         "media_upload" => {
             let brand = uuid(&args, "brand_id")?;
