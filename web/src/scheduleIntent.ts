@@ -10,7 +10,10 @@ import {
   type ApiSession,
   type Post,
 } from "./api";
-import type { SchedulePostRequest } from "./lib/api-contract.generated";
+import type {
+  RetireScheduleRequest,
+  SchedulePostRequest,
+} from "./lib/api-contract.generated";
 
 // Keep the six fractional digits the server uses for request identity. JS Date
 // alone truncates microseconds, so retain the final three digits separately.
@@ -638,7 +641,7 @@ export async function retireScheduleIntent(
       channel_ids: intent.channel_ids,
       scheduled_at: intent.scheduled_at ?? null,
       media_versions: intent.media_versions,
-    },
+    } satisfies RetireScheduleRequest,
   );
   signal?.throwIfAborted();
   requireWorkspaceSession(session);
