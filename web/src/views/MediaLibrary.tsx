@@ -1,9 +1,12 @@
-import type { MediaLimits } from "../lib/api-contract.generated";
+import type {
+  MediaLimits,
+  UpdateMediaRequest,
+} from "../lib/api-contract.generated";
 import { Play, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import { api, MediaSchema, ok, type Brand, type Media } from "../api";
-import { Empty, ErrorNotice, Time } from "../components/shared";
+import { Empty, ErrorNotice, Field, Time } from "../components/shared";
 import { Button } from "../components/ui/button";
 import { Dialog } from "../components/ui/dialog";
 
@@ -30,7 +33,9 @@ export function MediaLibrary({
   pending: boolean;
 }) {
   const input = useRef<HTMLInputElement>(null);
+  const selectedId = useRef<string | null>(null);
   const [selected, setSelected] = useState<Media | null>(null);
+  const [description, setDescription] = useState("");
   const [uploadError, setUploadError] = useState("");
   const [limit, setLimit] = useState<number | null>(null);
   useEffect(() => {
@@ -61,6 +66,20 @@ export function MediaLibrary({
       if (!done) break;
     }
     if (input.current) input.current.value = "";
+  };
+  const saveDescription = async () => {
+    if (!selected || pending || Array.from(description).length > 2000) return;
+    const id = selected.id;
+    const input = { alt_text: description } satisfies UpdateMediaRequest;
+    let updated: Media | undefined;
+    const done = await action(async () => {
+      updated = await api(`/media/${id}`, MediaSchema, "PATCH", input);
+      return updated;
+    }, "Description saved");
+    if (done && updated) {
+      setSelected((current) => (current?.id === id ? updated! : current));
+      if (selectedId.current === id) setDescription(updated.alt_text);
+    }
   };
   return (
     <>
@@ -117,11 +136,19 @@ export function MediaLibrary({
               <button
                 className="media-card"
                 key={m.id}
-                onClick={() => setSelected(m)}
+                onClick={() => {
+                  selectedId.current = m.id;
+                  setSelected(m);
+                  setDescription(m.alt_text);
+                }}
               >
                 <div className="media-image">
                   {m.mime.startsWith("image/") ? (
-                    <img src={m.url} alt={m.name} loading="lazy" />
+                    <img
+                      src={m.url}
+                      alt={m.alt_text || m.name}
+                      loading="lazy"
+                    />
                   ) : (
                     <>
                       <video src={m.url} preload="metadata" />
@@ -147,7 +174,12 @@ export function MediaLibrary({
       {selected && (
         <Dialog
           open
-          onOpenChange={(v) => !v && setSelected(null)}
+          onOpenChange={(v) => {
+            if (!v) {
+              selectedId.current = null;
+              setSelected(null);
+            }
+          }}
           title={selected.name}
         >
           <div className="form-stack">
@@ -155,7 +187,7 @@ export function MediaLibrary({
               <img
                 className="media-detail"
                 src={selected.url}
-                alt={selected.name}
+                alt={selected.alt_text || selected.name}
               />
             ) : (
               <video className="media-detail" controls src={selected.url} />
@@ -164,6 +196,40 @@ export function MediaLibrary({
               {(selected.size / 1024 / 1024).toFixed(2)} MiB · Uploaded{" "}
               <Time value={selected.created_at} />
             </p>
+            <Field label="Description">
+              <textarea
+                rows={3}
+                value={description}
+                disabled={pending}
+                aria-label="Description"
+                aria-describedby="media-description-help"
+                onChange={(event) => setDescription(event.target.value)}
+              />
+            </Field>
+            <small id="media-description-help" className="muted">
+              Describe this media for people who cannot see it. New schedules
+              save the current description; already scheduled posts keep their
+              existing description.
+            </small>
+            <div className="inline-actions">
+              <Button
+                variant="secondary"
+                disabled={
+                  pending ||
+                  description === selected.alt_text ||
+                  Array.from(description).length > 2000
+                }
+                onClick={() => void saveDescription()}
+              >
+                Save description
+              </Button>
+              <small className="muted">
+                {Array.from(description).length} / 2,000 characters
+              </small>
+            </div>
+            {Array.from(description).length > 2000 && (
+              <ErrorNotice message="Descriptions must be 2,000 characters or fewer." />
+            )}
             <a
               className="button button-secondary"
               href={selected.url}
@@ -178,7 +244,12 @@ export function MediaLibrary({
                 void action(
                   () => api(`/media/${selected.id}`, ok, "DELETE"),
                   "Media deleted",
-                ).then((ok) => ok && setSelected(null))
+                ).then((ok) => {
+                  if (ok && selectedId.current === selected.id) {
+                    selectedId.current = null;
+                    setSelected(null);
+                  }
+                })
               }
             >
               <Trash2 size={16} />

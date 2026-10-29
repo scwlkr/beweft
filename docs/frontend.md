@@ -26,10 +26,12 @@ The following are explicit unfinished workflows, not external provider blockers:
 - Draft duplication is implemented. Reusable custom templates and a template library are not implemented.
 - Queued publications retain immutable revisions and can be canceled, reordered in queue mode, and rescheduled. Editing their content with an atomic revision replacement is not implemented; editing a source draft does not silently rewrite queued history.
 - Manual handoff provides caption copying, per-file downloads, an optional published URL, and owner attestation. Network-specific launch links and guidance need a target-platform field on manual channels.
-- Supported channel variants have separate text and media, and provider options. Current Bluesky/Mastodon alt text is one description per channel variant applied to all images. Per-media descriptions need a richer schema.
+- Supported channel variants have separate text and media, and provider options. Media library descriptions are saved per asset and frozen into new scheduled snapshots; older snapshots retain their existing descriptions.
 - YouTube exposes privacy, audience, synthetic-media disclosure, and category. It uses the post title as the public video title. License choice is not implemented.
 
 Direct provider setup, destination selection, reconnection/disconnection, metrics, inbox read/reply, and explicit metered-X sync controls are implemented in the web client against the provider slice contract. This is not a claim that any live provider account or publication has been verified.
+
+Media details allow editing an asset's description, with the server's 2,000-character limit. The composer shows descriptions for each selected asset and uses them in its accessible preview. New scheduling snapshots freeze those descriptions; editing an asset later does not rewrite already queued content. Local browser tests exercise distinct image descriptions, the limit, snapshot immutability, and switching brands while a save is delayed.
 
 ## Reply recovery
 
