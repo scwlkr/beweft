@@ -51,6 +51,15 @@ files, image removal and rebuild options. Use the dedicated scoped CLI command
 below. Docker administrators can bypass these safeguards directly; the wrapper
 does not protect against a person with direct Docker or host access.
 
+Managed `up` requires `-d` or `--wait`. For a live log stream, use for example
+`./project compose <installation> logs -f --tail 100 api`; select exactly one
+of `api`, `db` or `worker`. The wrapper follows the selected container's ID,
+so recreating that service requires starting a new follower. Log follow and an
+admitted CLI or MCP session do not hold the installation lock for their entire
+lifetime. An operator may therefore stop or upgrade the API while a client is
+connected; clients must handle a lost connection and inspect the result before
+retrying any write.
+
 The application image and worker activation are managed state, not editable
 settings. Do not add `BEWEFT_IMAGE` or `BEWEFT_WORKER_ACTIVE` to
 `installation.env` or edit, replace or copy the state file. Missing or malformed
@@ -138,7 +147,7 @@ The default backup downtime budget is 1800 seconds; set a different budget with
 service recovery and leaves the incomplete backup directory for inspection and
 removal. SIGINT and SIGTERM also cancel the command's own dump client and DB
 session before recovery. Cleanup has a separate 150-second Docker-response
-budget, with up to five additional seconds to terminate and reap a timed-out
+budget, with up to eleven additional seconds to terminate and reap a timed-out
 local client group. If it cannot
 confirm that the stop request and owned dump have finished, it withholds
 automatic restart and reports a failed recovery: inspect the named resources
@@ -149,6 +158,16 @@ a stalled host, filesystem, or Docker
 daemon cannot guarantee cleanup or service availability. Plan enough space and
 downtime, and monitor service recovery. A successful backup is not proof of
 recovery until you restore and exercise it.
+
+SIGINT or SIGTERM is forwarded to the wrapper's own Docker client group for
+managed commands, builds, scoped CLI sessions and media restore, then any
+remaining local group processes are forcibly stopped. These commands can have
+already reached the daemon; inspect the installation and any named helper
+reported in an error before retrying. Long-running interactive sessions and
+media transfers have no fixed total time limit. A blocked Docker metadata read
+has a finite deadline, and restore attempts bounded removal of its uniquely
+named media helper after interruption. SIGKILL or a stalled daemon can prevent
+confirmed cleanup.
 
 ## Restore or roll back
 

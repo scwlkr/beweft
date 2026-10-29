@@ -11,6 +11,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import secrets
+import select
 import signal
 import stat
 import subprocess
@@ -97,24 +98,54 @@ def environment():
 def kill_owned(process):
     # All callers start these local Docker clients in their own session; a
     # Compose plugin child must not survive a canceled metadata request.
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    # On macOS a group containing only unreaped exited processes can briefly
+    # return EPERM. Reap our direct child and wait for the group to disappear;
+    # an enduring permission failure remains an uncertain outcome.
+    end = time.monotonic() + 5
+    while True:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            return
+        except ProcessLookupError:
+            return
+        except PermissionError as error:
+            process.poll()
+            if time.monotonic() >= end:
+                raise StopUncertain("Could not confirm termination of the local Docker client group; the daemon may have admitted work. Inspect the installation before retrying.") from error
+            time.sleep(0.05)
+
+
+def interrupt_owned(process, local):
+    # Give an interactive client the actual cancellation signal briefly, then
+    # terminate the entire group even if its direct parent already exited.
+    if local is not None and local.signal:
+        try:
+            os.killpg(process.pid, local.signal)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            # Reaping/retry below distinguishes a transient exited group from
+            # a group whose termination really cannot be confirmed.
+            pass
+        time.sleep(0.1)
+    kill_owned(process)
 
 
 @contextmanager
-def standalone_sigterm(enabled):
-    # Backup installs its own recovery handler; it must remain authoritative.
-    previous = signal.getsignal(signal.SIGTERM)
-    local = Cancellation() if enabled and previous == signal.SIG_DFL else None
-    if local is not None:
-        signal.signal(signal.SIGTERM, local.handle)
+def standalone_signals():
+    # Backup installs its own recovery handlers; they must remain authoritative.
+    previous = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
+    local = Cancellation()
+    installed = []
+    for signum, handler in previous.items():
+        if handler in (signal.SIG_DFL, signal.default_int_handler):
+            signal.signal(signum, local.handle)
+            installed.append(signum)
     try:
-        yield local
+        yield local if installed else None
     finally:
-        if local is not None:
-            signal.signal(signal.SIGTERM, previous)
+        for signum in installed:
+            signal.signal(signum, previous[signum])
 
 
 def check_standalone_signal(local):
@@ -122,23 +153,23 @@ def check_standalone_signal(local):
         raise DockerCallInterrupted()
 
 
-def call(args, *, capture=True, stdin=None, stdout=None, ok=True, timeout=None, deadline=None, cancellation=None, env_overrides=None):
-    with standalone_sigterm(capture or timeout is not None or deadline is not None) as local:
+def call(args, *, capture=True, stdin=None, stdout=None, ok=True, timeout=None, deadline=None, cancellation=None, env_overrides=None, on_started=None):
+    with standalone_signals() as local:
         try:
             return call_supervised(args, capture=capture, stdin=stdin, stdout=stdout, ok=ok,
                                    timeout=timeout, deadline=deadline, cancellation=cancellation,
-                                   env_overrides=env_overrides, local=local)
+                                   env_overrides=env_overrides, local=local, on_started=on_started)
         except DockerCallInterrupted as error:
             raise OperationError("The Docker operation was interrupted; the daemon may have admitted it. Inspect the installation before recovery or retry.") from error
 
 
-def call_supervised(args, *, capture, stdin, stdout, ok, timeout, deadline, cancellation, env_overrides, local):
+def call_supervised(args, *, capture, stdin, stdout, ok, timeout, deadline, cancellation, env_overrides, local, on_started):
     env = dict(environment(), **(env_overrides or {}))
     try:
         if deadline is not None:
             # Only use this path for read-only metadata calls: killing the client
             # must never leave a mutating daemon request whose outcome is unknown.
-            require(capture and stdin is None and stdout is None and cancellation is not None,
+            require(capture and stdin is None and stdout is None and cancellation is not None and on_started is None,
                     "Invalid supervised Docker metadata request.")
             cancellation.check()
             check_standalone_signal(local)
@@ -163,19 +194,21 @@ def call_supervised(args, *, capture, stdin, stdout, ok, timeout, deadline, canc
                 kill_owned(process)
                 process.communicate(timeout=5)
                 raise
-        elif timeout is not None or capture:
+        else:
             check_standalone_signal(local)
             process = subprocess.Popen(args, env=env, stdin=stdin,
                                        stdout=subprocess.PIPE if capture and stdout is None else stdout,
                                        stderr=subprocess.PIPE if capture else None, start_new_session=True)
             try:
                 end = time.monotonic() + timeout if timeout is not None else None
+                if on_started is not None:
+                    on_started(process, local)
                 while True:
                     check_standalone_signal(local)
                     remaining = None if end is None else end - time.monotonic()
                     if remaining is not None and remaining <= 0:
                         raise subprocess.TimeoutExpired(args, timeout)
-                    interval = min(0.1, remaining) if remaining is not None else (0.1 if local is not None else None)
+                    interval = min(0.1, remaining) if remaining is not None else 0.1
                     try:
                         out, err = process.communicate(timeout=interval)
                         break
@@ -183,19 +216,16 @@ def call_supervised(args, *, capture, stdin, stdout, ok, timeout, deadline, canc
                         if end is not None and time.monotonic() >= end:
                             raise
                 check_standalone_signal(local)
-            except (subprocess.TimeoutExpired, KeyboardInterrupt, DockerCallInterrupted) as error:
-                kill_owned(process)
+            except BaseException as error:
+                interrupt_owned(process, local)
                 try:
                     process.communicate(timeout=5)
                 except subprocess.TimeoutExpired:
                     pass
-                raise OperationError("The Docker operation was interrupted or exceeded its deadline; the daemon may have admitted it. Inspect the installation before recovery or retry.") from error
+                if isinstance(error, (subprocess.TimeoutExpired, KeyboardInterrupt, DockerCallInterrupted)):
+                    raise OperationError("The Docker operation was interrupted or exceeded its deadline; the daemon may have admitted it. Inspect the installation before recovery or retry.") from error
+                raise
             result = subprocess.CompletedProcess(args, process.returncode, out, err)
-        else:
-            result = subprocess.run(args, env=env, stdin=stdin,
-                                    stdout=subprocess.PIPE if capture and stdout is None else stdout,
-                                    stderr=subprocess.PIPE if capture else None, check=False,
-                                    start_new_session=capture)
     except FileNotFoundError as error:
         raise OperationError("Docker with Compose is required.") from error
     except subprocess.TimeoutExpired as error:
@@ -434,11 +464,11 @@ class Installation:
                 HEX64.fullmatch(self.values["BEWEFT_ENCRYPTION_KEY"]) is not None,
                 "The three generated installation secrets must each be 64 hexadecimal characters.")
 
-    def compose(self, *args, capture=True, stdin=None, stdout=None, ok=True, timeout=None, deadline=None, cancellation=None):
+    def compose(self, *args, capture=True, stdin=None, stdout=None, ok=True, timeout=None, deadline=None, cancellation=None, on_started=None):
         profile = ["--profile", "worker"] if self.values["BEWEFT_WORKER_ACTIVE"] == "true" else []
         return docker("compose", "--env-file", str(self.envfile), "--project-name", self.project,
                       "-f", str(COMPOSE), *profile, *args, capture=capture, stdin=stdin, stdout=stdout, ok=ok, timeout=timeout,
-                      deadline=deadline, cancellation=cancellation,
+                      deadline=deadline, cancellation=cancellation, on_started=on_started,
                       env_overrides={"BEWEFT_IMAGE": self.values["BEWEFT_IMAGE"],
                                      "BEWEFT_WORKER_ACTIVE": self.values["BEWEFT_WORKER_ACTIVE"]})
 
@@ -455,7 +485,12 @@ class Installation:
             self.read_settings()
             assert_reservation(self.project, self.values["BEWEFT_INSTALLATION_ID"], self.path, self.values["BEWEFT_POSTGRES_IMAGE"])
             assert_project_ownership(self.project, self.values["BEWEFT_INSTALLATION_ID"])
-            yield
+            held = [True]
+            def unlock():
+                if held[0]:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    held[0] = False
+            yield unlock
         finally:
             os.close(fd)
 
@@ -793,7 +828,7 @@ def snapshot_guarded(install, destination, *, resume, max_downtime, cancellation
         helper = install.project + "-media-" + secrets.token_hex(12)
         with (destination / "media.tar").open("xb") as file:
             stream_helper(install, helper, ["--pull=never", "--network", "none", "--read-only", "--mount",
-                                           f"type=volume,src={media},dst=/media,readonly", "--entrypoint", "tar", image,
+                                           f"type=volume,src={media},dst=/media,readonly,volume-nocopy", "--entrypoint", "tar", image,
                                            "-C", "/media", "-cf", "-", "."],
                           file, deadline, cancellation, cleanup)
         (destination / "key.sha256").write_text(install.key_digest() + "\n", encoding="ascii")
@@ -914,42 +949,139 @@ def verified_backup(directory, install):
         yield files, members
 
 
+class CancellablePipe:
+    """Stream tar bytes without blocking signal handling on a full Docker pipe."""
+    def __init__(self, process, local):
+        self.process = process
+        self.local = local
+        self.fd = process.stdin.fileno()
+        os.set_blocking(self.fd, False)
+
+    def write(self, data):
+        remaining = memoryview(data)
+        while remaining:
+            check_standalone_signal(self.local)
+            if self.process.poll() is not None:
+                raise BrokenPipeError("Media extraction helper exited before receiving the archive.")
+            _, ready, _ = select.select([], [self.fd], [], 0.1)
+            if ready:
+                try:
+                    remaining = remaining[os.write(self.fd, remaining):]
+                except BlockingIOError:
+                    pass
+        return len(data)
+
+
+def remove_named_helper(name):
+    # The name is generated by this operation. A successful listing, rather
+    # than a failed inspect, distinguishes an absent helper from a dead daemon.
+    # Compose's --rm may be deleting the same container asynchronously when
+    # its attach client dies. Retry only this unique name until it disappears.
+    end = time.monotonic() + 30
+    while time.monotonic() < end:
+        docker("rm", "-fv", name, ok=False, timeout=min(15, end - time.monotonic()))
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            break
+        names = output("ps", "-a", "--filter", "name=" + name, "--format", "{{.Names}}", timeout=min(15, remaining)).splitlines()
+        if name not in names:
+            return
+        time.sleep(0.1)
+    raise OperationError(f"Could not confirm removal of owned helper {name}; the daemon may have admitted work. Inspect Docker state before retrying.")
+
+
 def extract_media(install, media, members):
     volume = f"{install.project}_media"
-    exists = docker("volume", "inspect", volume, ok=False)
+    exists = docker("volume", "inspect", volume, ok=False, timeout=15)
     if exists.returncode:
         docker("volume", "create", "--label", f"com.docker.compose.project={install.project}",
                "--label", "com.docker.compose.volume=media",
-               "--label", f"org.beweft.installation={install.values['BEWEFT_INSTALLATION_ID']}", volume)
+               "--label", f"org.beweft.installation={install.values['BEWEFT_INSTALLATION_ID']}", volume, timeout=15)
     # Alpine's own /media contains placeholder directories; do not copy them
     # into a new application volume on its first mount.
     mount = f"type=volume,src={volume},dst=/media,volume-nocopy"
     image = install.values["BEWEFT_IMAGE"]
     docker("run", "--rm", "--pull=never", "--network", "none", "--read-only", "--user", "0:0", "--mount", mount,
-           "--entrypoint", "sh", image, "-c", 'test -z "$(ls -A /media)" && chown 10001:10001 /media')
+           "--entrypoint", "sh", image, "-c", 'test -z "$(ls -A /media)" && chown 10001:10001 /media', timeout=30)
     helper = f"{install.project}-restore-{secrets.token_hex(6)}"
-    process = subprocess.Popen(["docker", "run", "--rm", "-i", "--name", helper, "--pull=never", "--network", "none", "--read-only",
-                                "--user", "0:0", "--mount", mount, "--entrypoint", "tar", image, "-C", "/media", "-xf", "-"],
-                               env=environment(), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        # Emit a new archive with only validated names, regular content and fixed
-        # ownership/modes. Never feed the original archive to the extractor.
-        with tarfile.open(fileobj=process.stdin, mode="w|", format=tarfile.PAX_FORMAT) as clean:
-            for name, member, offset in members:
-                entry = tarfile.TarInfo(name)
-                entry.type = tarfile.DIRTYPE if member.isdir() else tarfile.REGTYPE
-                entry.mode = 0o755 if member.isdir() else 0o644
-                entry.uid = entry.gid = 10001
-                entry.size = 0 if member.isdir() else member.size
-                media.seek(offset)
-                clean.addfile(entry, None if member.isdir() else media)
-        process.stdin.close()
-        require(process.wait() == 0, "Media extraction failed; destination remains stopped.")
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-        docker("rm", "-f", helper, ok=False, timeout=10)
+    with standalone_signals() as local:
+        creation = subprocess.Popen(["docker", "create", "-i", "--name", helper, "--pull=never", "--network", "none", "--read-only",
+                                     "--user", "0:0", "--mount", mount, "--entrypoint", "tar", image, "-C", "/media", "-xf", "-"],
+                                    env=environment(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        process = None
+        extracted = False
+        uncertain_creation = False
+        try:
+            end = time.monotonic() + 30
+            try:
+                while creation.poll() is None:
+                    check_standalone_signal(local)
+                    if time.monotonic() >= end:
+                        raise OperationError("Media helper creation exceeded its deadline.")
+                    time.sleep(0.05)
+                check_standalone_signal(local)
+            except BaseException:
+                # Do not remove a name while its create request can still race
+                # ahead of that removal. Wait for a terminal result first.
+                try:
+                    creation.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    uncertain_creation = True
+                    kill_owned(creation)
+                    try:
+                        creation.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                raise
+            require(creation.returncode == 0, "Could not create the media extraction helper; destination remains stopped.")
+            check_standalone_signal(local)
+            process = subprocess.Popen(["docker", "start", "--attach", "--interactive", helper], env=environment(),
+                                       stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                       bufsize=0, start_new_session=True)
+            # Emit only validated names, regular content and fixed ownership.
+            # Nonblocking pipe writes keep cancellation responsive if Docker's
+            # attach client or the remote extractor stops reading.
+            with tarfile.open(fileobj=CancellablePipe(process, local), mode="w|", format=tarfile.PAX_FORMAT) as clean:
+                for name, member, offset in members:
+                    check_standalone_signal(local)
+                    entry = tarfile.TarInfo(name)
+                    entry.type = tarfile.DIRTYPE if member.isdir() else tarfile.REGTYPE
+                    entry.mode = 0o755 if member.isdir() else 0o644
+                    entry.uid = entry.gid = 10001
+                    entry.size = 0 if member.isdir() else member.size
+                    media.seek(offset)
+                    clean.addfile(entry, None if member.isdir() else media)
+            process.stdin.close()
+            while process.poll() is None:
+                check_standalone_signal(local)
+                time.sleep(0.05)
+            check_standalone_signal(local)
+            require(process.returncode == 0, "Media extraction failed; destination remains stopped.")
+            extracted = True
+        except DockerCallInterrupted as error:
+            raise OperationError("Media restore was interrupted; the daemon may have admitted work. Inspect the stopped destination before retrying.") from error
+        finally:
+            group_failure = None
+            if process is not None:
+                if not extracted:
+                    try:
+                        interrupt_owned(process, local)
+                    except OperationError as error:
+                        group_failure = error
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired as error:
+                    group_failure = group_failure or error
+                if process.stdin and not process.stdin.closed:
+                    process.stdin.close()
+            try:
+                remove_named_helper(helper)
+            except OperationError as error:
+                raise OperationError(f"Could not confirm cleanup of restore helper {helper}; the daemon may have admitted work. Inspect Docker state before retrying.") from error
+            if group_failure:
+                raise StopUncertain(f"Could not confirm termination of the local restore client group for {helper}; the daemon may have admitted work. Inspect Docker state before retrying.") from group_failure
+            if uncertain_creation:
+                raise OperationError(f"Restore helper {helper} creation may still reach the daemon; inspect Docker state before retrying.")
 
 
 def restore(install, backup):
@@ -963,11 +1095,11 @@ def restore(install, backup):
         empty_project(install.project)
         install.replace_state({"BEWEFT_WORKER_ACTIVE": "false"})
         print("Backup, image, key, paths and empty destination verified; restoring into the new project.", flush=True)
-        install.compose("up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never", "db")
+        install.compose("up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never", "db", timeout=150)
         install.compose("exec", "-T", "db", "pg_restore", "--exit-on-error", "--single-transaction", "--no-owner",
                         "--no-privileges", "-U", "beweft", "-d", "beweft", stdin=files["database.dump"])
         extract_media(install, files["media.tar"], members)
-        install.compose("up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never", "db", "api")
+        install.compose("up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never", "db", "api", timeout=150)
     print("Restore started the database and API; the worker remains stopped.")
     print("Stop the old worker and reconcile all queued, overdue, sending and uncertain publications before activation.")
 
@@ -976,8 +1108,8 @@ def upgrade(install, image, backup, max_downtime):
     new_image = install.image_id(image)
     current = install.image_id(install.values["BEWEFT_IMAGE"])
     require(new_image != current, "The requested image is already configured; choose a different image.")
-    api = install.compose("ps", "-q", "api").stdout.decode().strip()
-    require(api and output("inspect", api, "--format", "{{.Image}}") == current,
+    api = install.compose("ps", "-q", "api", timeout=15).stdout.decode().strip()
+    require(api and output("inspect", api, "--format", "{{.Image}}", timeout=15) == current,
             "Running and configured image differ; reconcile them before upgrade.")
     old_image = snapshot(install, backup, resume=False, max_downtime=max_downtime)
     require(old_image == current, "Running and configured image differ; services remain stopped. Resolve this before upgrade.")
@@ -1016,7 +1148,7 @@ def activate(install, reviewed):
     # This is an explicit operator attestation, not proof of remote outcomes.
     install.replace_state({"BEWEFT_WORKER_ACTIVE": "true"})
     print("Worker activation requested; it may publish queued items. If startup fails, inspect its state before retrying.", flush=True)
-    install.compose("up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never", "--force-recreate", "worker")
+    install.compose("up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never", "--force-recreate", "worker", timeout=150)
 
 
 def release(install):
@@ -1099,6 +1231,55 @@ def validate_compose_options(args):
     return index
 
 
+def follow_logs(install, following, unlock):
+    # Resolve exactly one existing container before unlocking. A later project
+    # with the same name cannot redirect the follower to another installation.
+    services = [value for value in following if value in {"api", "db", "worker", "cli"}]
+    require(len(services) == 1 and services[0] != "cli",
+            "Following logs requires exactly one service: api, db or worker.")
+    args = ["logs", "--follow"]
+    index = 0
+    while index < len(following):
+        token = following[index]
+        if token in {"-t", "--timestamps"}:
+            args.append("--timestamps")
+        elif token == "--tail":
+            index += 1
+            args += ["--tail", following[index]]
+        elif token.startswith("--tail="):
+            args.append(token)
+        index += 1
+    ids = install.compose("--profile", "worker", "ps", "--all", "-q", services[0], timeout=15).stdout.decode().splitlines()
+    require(len(ids) == 1 and re.fullmatch(r"[a-f0-9]{64}", ids[0]) is not None,
+            "The selected service must have exactly one existing container to follow.")
+    unlock()
+    result = docker(*args, ids[0], capture=False, ok=False)
+    if result.returncode:
+        raise OperationError(f"Log follow exited with status {result.returncode}.")
+
+
+def cli_admission(install, name, unlock):
+    def admitted(process, local):
+        end = time.monotonic() + 30
+        while time.monotonic() < end:
+            check_standalone_signal(local)
+            if process.poll() is not None:
+                unlock()
+                return
+            result = docker("container", "inspect", "--format", "{{json .Config.Labels}}", name,
+                            ok=False, timeout=3)
+            if result.returncode == 0:
+                labels = json.loads(result.stdout.decode())
+                require(isinstance(labels, dict) and labels.get("com.docker.compose.project") == install.project and
+                        labels.get("org.beweft.installation") == install.values["BEWEFT_INSTALLATION_ID"],
+                        "Scoped CLI container has unexpected ownership; inspect Docker state before retrying.")
+                unlock()
+                return
+            time.sleep(0.1)
+        raise OperationError("Scoped CLI admission timed out; the daemon may have admitted it. Inspect the installation before retrying.")
+    return admitted
+
+
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1143,7 +1324,7 @@ def main():
         setup(args.directory, args.project, args.port, args.postgres_image, args.worker_held)
         return
     install = Installation(args.directory)
-    with install.locked():
+    with install.locked() as unlock:
         if args.command == "compose":
             require(args.args, "Supply Compose arguments.")
             index = validate_compose_options(args.args)
@@ -1151,6 +1332,12 @@ def main():
             if command in {"up", "start", "restart"}:
                 require(IMAGE_ID.fullmatch(install.values["BEWEFT_IMAGE"]) is not None,
                         "Select an immutable image with ./project image or build before starting services.")
+            if command == "up":
+                require(any(value in args.args[index + 1:] for value in ("-d", "--detach", "--wait")),
+                        "Managed startup requires -d or --wait; follow a service's logs separately.")
+            if command == "logs" and any(value in args.args[index + 1:] for value in ("-f", "--follow")):
+                follow_logs(install, args.args[index + 1:], unlock)
+                return
             compose_args = list(args.args)
             if command == "up":
                 compose_args[index + 1:index + 1] = ["--no-build", "--pull", "never"]
@@ -1158,7 +1345,8 @@ def main():
                 # A restored worker can exist under the opt-in profile even
                 # while held; include every defined service when retiring it.
                 compose_args[0:0] = ["--profile", "worker", "--profile", "tools"]
-            result = install.compose(*compose_args, capture=False, ok=False)
+            result = install.compose(*compose_args, capture=False, ok=False,
+                                     timeout=30 if command in {"ps", "config", "logs"} else None)
             if result.returncode:
                 raise OperationError(f"Compose exited with status {result.returncode}.")
         elif args.command == "cli":
@@ -1166,8 +1354,16 @@ def main():
                     "Select an immutable image before running the scoped CLI.")
             # End Compose's flag parsing before the service and all user CLI
             # arguments, so they cannot become run environment/entrypoint flags.
-            result = install.compose("--profile", "tools", "run", "--rm", "-T", "--no-deps", "--pull", "never", "--", "cli", *args.args,
-                                     capture=False, ok=False)
+            name = f"{install.project}-cli-{secrets.token_hex(6)}"
+            try:
+                result = install.compose("--profile", "tools", "run", "--rm", "-T", "--no-deps", "--pull", "never", "--name", name,
+                                         "--", "cli", *args.args, capture=False, ok=False,
+                                         on_started=cli_admission(install, name, unlock))
+            finally:
+                # Ignore further termination signals only while this bounded
+                # cleanup removes this invocation's uniquely named container.
+                with termination_guard():
+                    remove_named_helper(name)
             if result.returncode:
                 raise OperationError(f"Scoped CLI exited with status {result.returncode}.")
         elif args.command == "backup":

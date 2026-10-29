@@ -15,12 +15,14 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import signal
 import shutil
 import socket
 import subprocess
 import tarfile
 import tempfile
+import termios
 import time
 import urllib.error
 import urllib.request
@@ -255,6 +257,35 @@ if stall_list and len(args) == 4 and args[:3] == ["ps", "-aq", "--filter"] and a
     if count == 2:
         pathlib.Path(stall_list).write_text("waiting")
         time.sleep(90)
+stall_suffix = os.environ.get("OPS_TEST_STALL_SUFFIX")
+if stall_suffix and args[-len(json.loads(stall_suffix)):] == json.loads(stall_suffix):
+    pathlib.Path(os.environ["OPS_TEST_STALL_MARKER"]).write_text("waiting")
+    time.sleep(90)
+kind = os.environ.get("OPS_TEST_PASSTHROUGH")
+selected = ((kind == "compose" and "compose" in args and "restart" in args) or
+            (kind == "cli" and "compose" in args and "run" in args and "--name" in args) or
+            (kind == "build" and args and args[0] == "build") or
+            (kind == "restore" and len(args) == 4 and args[:3] == ["start", "--attach", "--interactive"] and "-restore-" in args[3]))
+if selected:
+    marker = os.environ["OPS_TEST_PASSTHROUGH_MARKER"]
+    if kind == "restore":
+        # Start the real, uniquely named extractor without attaching its stdin.
+        # It remains running while this simulated plugin stops reading the pipe.
+        subprocess.run([real, "start", args[3]], check=True, stdout=subprocess.DEVNULL)
+    program = ("import os,signal,sys,time; m=sys.argv[1]; "
+               "signal.signal(signal.SIGINT,lambda s,f:open(m+'.signal','w').write(str(s))); "
+               "signal.signal(signal.SIGTERM,lambda s,f:open(m+'.signal','w').write(str(s))); "
+               "open(m+'.ready','w').write('ready'); time.sleep(6); "
+               "open(m,'w').write('delayed'); os.execv(sys.argv[2], sys.argv[2:])")
+    child = subprocess.Popen([sys.executable, "-c", program, marker, real, *args])
+    for _ in range(500):
+        if pathlib.Path(marker + ".ready").exists(): break
+        if child.poll() is not None: sys.exit(1)
+        time.sleep(0.01)
+    else: sys.exit(1)
+    pathlib.Path(marker + ".args").write_text(json.dumps(args))
+    pathlib.Path(marker + ".pid").write_text(str(child.pid))
+    time.sleep(90)
 if len(args) >= 3 and args[:2] == ["create", "--name"] and "-dump-" in args[2]:
     result = subprocess.run([real, *args])
     if result.returncode == 0:
@@ -295,12 +326,12 @@ def cleanup_process_group(source, temp, env, *, admitted, interrupted=None):
     assert docker("inspect", "--format", "{{.State.Running}}", api).stdout.strip() == "false"
     code = '''import runpy,signal,sys,time
 m=runpy.run_path(sys.argv[1]); install=m["Installation"](sys.argv[2])
-previous=signal.getsignal(signal.SIGTERM)
+previous={s:signal.getsignal(s) for s in (signal.SIGINT,signal.SIGTERM)}
 try:
     with install.locked():
         m["restart_original"](install, {}, [time.monotonic()+float(sys.argv[3])])
 except m["OperationError"] as error:
-    assert signal.getsignal(signal.SIGTERM) == previous, "SIGTERM handler was not restored"
+    assert all(signal.getsignal(s) == h for s,h in previous.items()), "Signal handlers were not restored"
     print(error, file=sys.stderr)
     sys.exit(1)
 raise SystemExit("cleanup unexpectedly succeeded")
@@ -343,6 +374,248 @@ raise SystemExit("cleanup unexpectedly succeeded")
         assert running == admitted, "The actual Docker state did not match the fixture's admitted request"
     finally:
         project("compose", source, "start", "--wait", "--wait-timeout", "120", "api", timeout=150)
+
+
+def passthrough_interruptions(source, build_fixture, temp, env):
+    """Each inherited-stream path must reap a delayed plugin group on both signals."""
+    markers = []
+    for kind in ("compose", "cli", "build"):
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            marker = temp / f"passthrough-{kind}-{signum}"
+            wrapped = dict(env, OPS_TEST_PASSTHROUGH=kind, OPS_TEST_PASSTHROUGH_MARKER=str(marker))
+            arguments = {"compose": ("compose", source, "restart", "api"),
+                         "cli": ("cli", source, "mcp"),
+                         "build": ("build", build_fixture)}[kind]
+            process = subprocess.Popen([ROOT / "project", *map(str, arguments)], cwd=ROOT, env=wrapped,
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       start_new_session=True)
+            try:
+                for _ in range(300):
+                    if Path(str(marker) + ".pid").exists():
+                        break
+                    assert process.poll() is None, f"{kind} exited before its plugin child started"
+                    time.sleep(0.05)
+                else:
+                    raise AssertionError(f"{kind} plugin child did not start")
+                if signum == signal.SIGINT:
+                    os.killpg(process.pid, signum)
+                else:
+                    process.send_signal(signum)
+                _stdout, stderr = process.communicate(timeout=20)
+                assert process.returncode != 0 and b"daemon" in stderr.lower()
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+            markers.append((marker, signum))
+    time.sleep(6.5)
+    for marker, signum in markers:
+        assert not marker.exists(), "An interrupted plugin made a delayed mutation"
+        assert Path(str(marker) + ".signal").read_text() == str(signum), "The plugin did not receive cancellation"
+        child = int(Path(str(marker) + ".pid").read_text())
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            raise AssertionError("An interrupted plugin descendant remained alive")
+    assert not docker("ps", "-aq", "--filter", f"name={PROJECTS[0]}-cli-").stdout.strip()
+
+
+def wait_for_operation(source):
+    end = time.monotonic() + 20
+    while time.monotonic() < end:
+        result = subprocess.run([ROOT / "project", "compose", source, "ps"], cwd=ROOT, env=CLEAN_ENV,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        if result.returncode == 0:
+            return
+        time.sleep(0.1)
+    raise AssertionError("An admitted live session kept the installation lock")
+
+
+def live_sessions_release_lock(source, token, backup):
+    """A real follower and MCP stdio session must not monopolize the installation."""
+    follower = subprocess.Popen([ROOT / "project", "compose", source, "logs", "-f", "--tail", "0", "api"],
+                                cwd=ROOT, env=CLEAN_ENV, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                start_new_session=True)
+    try:
+        time.sleep(1)
+        assert follower.poll() is None, "Log follower exited before the concurrent operation"
+        wait_for_operation(source)
+        assert follower.poll() is None, "Log follower exited during the concurrent operation"
+    finally:
+        if follower.poll() is None:
+            follower.send_signal(signal.SIGTERM)
+        follower.communicate(timeout=20)
+    assert follower.returncode != 0
+    session = subprocess.Popen([ROOT / "project", "cli", source, "mcp"], cwd=ROOT,
+                               env=dict(CLEAN_ENV, BEWEFT_TOKEN=token), stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        message = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                   "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                              "clientInfo": {"name": "rehearsal", "version": "1"}}}
+        session.stdin.write((json.dumps(message) + "\n").encode())
+        session.stdin.flush()
+        ready, _, _ = select.select([session.stdout], [], [], 30)
+        assert ready, "Scoped MCP session did not produce its protocol response"
+        response = json.loads(session.stdout.readline())
+        assert response.get("id") == 1 and response.get("result", {}).get("serverInfo", {}).get("name") == "beweft"
+        wait_for_operation(source)
+        api = container_for(source, "api")
+        media_status = ("sh", "-c", 'stat -c "%u:%g" /app/media; ls -A /app/media')
+        before = docker("exec", api, *media_status).stdout
+        assert before.strip() == "10001:10001", "Fixture media must be empty and app-owned before backup"
+        project("backup", source, backup, "--max-downtime", "60", timeout=150)
+        assert docker("exec", api, *media_status).stdout == before, "Backup modified the empty media volume"
+        assert session.poll() is None, "MCP session exited during the concurrent operation"
+        session.stdin.write(b'{"jsonrpc":"2.0","id":2,"method":"ping"}\n')
+        session.stdin.flush()
+        ready, _, _ = select.select([session.stdout], [], [], 15)
+        assert ready and json.loads(session.stdout.readline()).get("id") == 2
+        session.send_signal(signal.SIGTERM)
+        session.wait(timeout=45)
+        session.stdin.close()
+        session.stdin = None
+        _out, stderr = session.communicate(timeout=25)
+        diagnostic = stderr.replace(token.encode(), b"[redacted]")[-1000:]
+        assert session.returncode != 0 and b"daemon" in stderr.lower(), f"MCP cancellation returned {session.returncode}: {diagnostic!r}"
+        assert not docker("ps", "-aq", "--filter", f"name={PROJECTS[0]}-cli-").stdout.strip(), "Scoped MCP container remained after cancellation"
+    finally:
+        if session.poll() is None:
+            session.kill()
+            session.wait(timeout=5)
+
+
+def interactive_cli_terminal(source, token):
+    """A scoped MCP session also receives input and emits JSON on a real PTY."""
+    master, slave = os.openpty()
+    attributes = termios.tcgetattr(slave)
+    attributes[3] &= ~termios.ECHO
+    termios.tcsetattr(slave, termios.TCSANOW, attributes)
+    process = subprocess.Popen([ROOT / "project", "cli", source, "mcp"], cwd=ROOT,
+                               env=dict(CLEAN_ENV, BEWEFT_TOKEN=token), stdin=slave, stdout=slave,
+                               stderr=subprocess.PIPE, start_new_session=True)
+    os.close(slave)
+    try:
+        request = {"jsonrpc": "2.0", "id": 7, "method": "initialize",
+                   "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                              "clientInfo": {"name": "terminal-fixture", "version": "1"}}}
+        os.write(master, (json.dumps(request) + "\n").encode())
+        response = b""
+        end = time.monotonic() + 30
+        while b"\n" not in response and time.monotonic() < end:
+            ready, _, _ = select.select([master], [], [], 0.1)
+            if ready:
+                response += os.read(master, 65536)
+            assert process.poll() is None, "Scoped terminal session exited before its response"
+        assert b"\n" in response and json.loads(response.splitlines()[0]).get("id") == 7
+        process.send_signal(signal.SIGTERM)
+        process.wait(timeout=45)
+        assert process.returncode != 0
+        assert not docker("ps", "-aq", "--filter", f"name={PROJECTS[0]}-cli-").stdout.strip()
+    finally:
+        if process.poll() is None:
+            process.send_signal(signal.SIGTERM)
+            try:
+                process.wait(timeout=45)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        os.close(master)
+
+
+def upgrade_metadata_deadlines(source, image, temp, env):
+    api = container_for(source, "api")
+    for index, suffix in enumerate((("ps", "-q", "api"), ("inspect", api, "--format", "{{.Image}}"))):
+        marker = temp / f"upgrade-metadata-{index}"
+        wrapped = dict(env, OPS_TEST_STALL_SUFFIX=json.dumps(suffix), OPS_TEST_STALL_MARKER=str(marker))
+        backup = temp / f"never-created-upgrade-{index}"
+        start = time.monotonic()
+        result = project("upgrade", source, image, backup, success=False, env=wrapped, timeout=24)
+        assert marker.exists() and 12 < time.monotonic() - start < 23
+        assert "deadline" in result.stderr.lower() and not backup.exists()
+        project("compose", source, "ps", timeout=12)
+
+
+def restore_interruption(source, backup, image, temp, env, signum=None):
+    suffix = "metadata" if signum is None else str(signum)
+    name = f"beweft-ops-{RUN_ID}-restore-{suffix}"
+    directory = temp / ("restore-interrupted-" + suffix)
+    project("setup", directory, name, str(free_port()))
+    project("image", directory, image)
+    set_values(directory, {"BEWEFT_ENCRYPTION_KEY": settings(source)["BEWEFT_ENCRYPTION_KEY"]})
+    try:
+        marker = temp / ("restore-marker-" + suffix)
+        if signum is None:
+            wrapped = dict(env, OPS_TEST_STALL_SUFFIX=json.dumps(["volume", "inspect", name + "_media"]),
+                           OPS_TEST_STALL_MARKER=str(marker))
+            process = subprocess.Popen([ROOT / "project", "restore", directory, backup], cwd=ROOT, env=wrapped,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+            try:
+                for _ in range(1200):
+                    if marker.exists():
+                        break
+                    assert process.poll() is None, "Restore exited before its volume lookup stalled"
+                    time.sleep(0.1)
+                else:
+                    raise AssertionError("Restore volume lookup did not stall")
+                started = time.monotonic()
+                _out, stderr = process.communicate(timeout=24)
+                assert process.returncode != 0 and b"deadline" in stderr.lower() and time.monotonic() - started < 23
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+            project("compose", directory, "ps", timeout=12)
+            return
+        large = temp / ("restore-large-" + suffix)
+        shutil.copytree(backup, large)
+        with tarfile.open(large / "media.tar", "w", format=tarfile.USTAR_FORMAT) as archive:
+            entry = tarfile.TarInfo("bounded-test-file")
+            entry.size = 8 * 1024 * 1024
+            archive.addfile(entry, io.BytesIO(b"x" * entry.size))
+        checksum(large)
+        wrapped = dict(env, OPS_TEST_PASSTHROUGH="restore", OPS_TEST_PASSTHROUGH_MARKER=str(marker))
+        process = subprocess.Popen([ROOT / "project", "restore", directory, large], cwd=ROOT, env=wrapped,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            for _ in range(600):
+                if Path(str(marker) + ".pid").exists():
+                    break
+                assert process.poll() is None, "Restore exited before its stream helper started"
+                time.sleep(0.1)
+            else:
+                raise AssertionError("Restore stream helper did not start")
+            helper = json.loads(Path(str(marker) + ".args").read_text())[-1]
+            docker("container", "inspect", helper)
+            assert docker("inspect", "--format", "{{.State.Running}}", helper).stdout.strip() == "true"
+            time.sleep(0.5)  # Fill the attach pipe while the plugin is not reading.
+            if signum == signal.SIGINT:
+                os.killpg(process.pid, signum)
+            else:
+                process.send_signal(signum)
+            _stdout, stderr = process.communicate(timeout=25)
+            assert process.returncode != 0 and b"daemon" in stderr.lower()
+            docker("container", "inspect", helper, success=False)
+            time.sleep(6.5)
+            assert not marker.exists(), "A canceled restore plugin performed a delayed start"
+            assert Path(str(marker) + ".signal").read_text() == str(signum), "The restore plugin did not receive cancellation"
+            child = int(Path(str(marker) + ".pid").read_text())
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                pass
+            else:
+                raise AssertionError("Canceled restore plugin remained alive")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+    finally:
+        project("compose", directory, "down", "--volumes", "--remove-orphans", timeout=120)
+        no_resources(name)
+        project("release", directory, timeout=30)
 
 
 def release_metadata_deadline(temp, env):
@@ -683,6 +956,9 @@ def main(temp):
     original_container = container_for(source, "api")
     # A second installation's build uses a private tag and cannot retag the first.
     project("setup", build_fixture, f"beweft-ops-{RUN_ID}-build", str(free_port()))
+    instrumented, helper_log = instrumented_docker(temp)
+    passthrough_interruptions(source, build_fixture, temp, instrumented)
+    upgrade_metadata_deadlines(source, UPGRADE_IMAGE, temp, instrumented)
     node_id = docker("image", "inspect", "--format", "{{.Id}}", "node:24-alpine").stdout.strip()
     built = project("build", build_fixture, "--node-image", "node@" + node_id, timeout=600)
     match = re.search(r"Built (beweft:[a-z0-9_-]+) and pinned", built.stdout)
@@ -711,6 +987,8 @@ def main(temp):
     cli = project("cli", source, "brands",
                   env=dict(CLEAN_ENV, BEWEFT_TOKEN=token))
     assert token not in cli.stdout + cli.stderr and brand["id"] in cli.stdout
+    live_sessions_release_lock(source, token, temp / "live-session-backup")
+    interactive_cli_terminal(source, token)
     boundary = "beweft-rehearsal-boundary"
     multipart = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="pixel.png"\r\nContent-Type: image/png\r\n\r\n'.encode() + PNG + f"\r\n--{boundary}--\r\n".encode())
     media = client.call("/media?brand_id=" + brand["id"], raw=multipart, content_type="multipart/form-data; boundary=" + boundary)
@@ -721,7 +999,6 @@ def main(temp):
     project("compose", source, "restart", "db", "api", "worker")
     project("compose", source, "up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never")
     verify_content(Client(ports[0]), brand, post, publication, media)
-    instrumented, helper_log = instrumented_docker(temp)
     release_metadata_deadline(temp, instrumented)
     cleanup_process_group(source, temp, instrumented, admitted=False)
     cleanup_process_group(source, temp, instrumented, admitted=True)
@@ -746,6 +1023,9 @@ def main(temp):
     assert (source_backup / "postgres-image-id").read_text().strip() == postgres_image
     assert image_for(source) == original_image
     verify_content(Client(ports[0]), brand, post, publication, media)
+    restore_interruption(source, source_backup, IMAGE, temp, instrumented)
+    restore_interruption(source, source_backup, IMAGE, temp, instrumented, signal.SIGINT)
+    restore_interruption(source, source_backup, IMAGE, temp, instrumented, signal.SIGTERM)
     project("backup", source, source_backup, success=False)
     backup_deadline(source, temp / "timed-out-backup", env=instrumented)
     helper_offset = assert_helpers_removed(helper_log, helper_offset, postgres_image)
