@@ -51,21 +51,22 @@ export type ProviderRemovalStatus = { "provider": string; "revocation_id": strin
 export type ProviderReply = { "created_at": string; "error": string | null; "id": string; "inbox_id": string; "receipt": unknown; "revision": number; "state": string; "text": string; "updated_at": string; };
 export type ProviderReplyRequest = { "expected_last_request_id"?: string | null; "request_id": string; "text": string; };
 export type ProviderReplyResolution = "published" | "not_published";
-export type ProviderStatus = { "reason": string | null; "reset_allowed": boolean; "session_expired": boolean; };
+export type ProviderStatus = { "reason": string | null; "reset_allowed": boolean; "session_expired": boolean; "x_upload": null | XUploadStatus; };
 export type ProviderSyncRequest = { "allow_metered"?: boolean | null; };
 export type ProviderSyncResult = { "coverage": string; "errors": Array<string>; "inbox_items": number; "metrics_observed": number; "note": string; };
 export type Publication = { "brand_id": string; "channel_id": string; "channel_name": string; "created_at": string; "external_id": string | null; "external_url": string | null; "id": string; "last_error": string | null; "payload": PublicationPayload; "post_id": string; "post_version": number; "provider": string; "scheduled_at": string; "scheduling_mode": SchedulingMode; "state": PublicationState; "updated_at": string; };
 export type PublicationAttempt = { "error": string | null; "finished_at": string | null; "id": string; "provider": string; "publication_id": string; "receipt": unknown; "started_at": string; "state": PublicationAttemptState; };
-export type PublicationAttemptState = "sending" | "manual_required" | "published" | "fixture_complete" | "failed" | "uncertain" | "reconciled";
+export type PublicationAttemptState = "sending" | "manual_required" | "published" | "fixture_complete" | "failed" | "uncertain" | "reconciled" | "continued";
 export type PublicationPayload = { "media_ids": Array<string>; "media_metadata"?: Array<MediaMetadata>; "options": Record<string, unknown>; "text": string; "title": string; };
 export type PublicationState = "queued" | "sending" | "manual_required" | "published" | "fixture_complete" | "failed" | "uncertain" | "canceled";
 export type PublicationSummary = { "brand_id": string; "channel_id": string; "channel_name": string; "created_at": string; "id": string; "post_id": string; "post_version": number; "provider": string; "scheduled_at": string; "scheduling_mode": SchedulingMode; "state": PublicationState; "updated_at": string; };
-export type ReconcileRequest = { "external_id"?: string | null; "external_url"?: string | null; "note": string; "resolution": Resolution; };
+export type ReconcileRequest = { "external_id"?: string | null; "external_url"?: string | null; "note": string; "observed_attempt_id"?: string | null; "observed_checkpoint_id"?: string | null; "provider_inspected"?: boolean | null; "resolution": Resolution; "sender_stopped"?: boolean | null; };
 export type ReorderQueueRequest = { "channel_id": string; "publication_ids": Array<string>; };
 export type ReplacePublicationRequest = { "post_version": number; "publication_post_version": number; "scheduled_at": string; };
 export type ReplacedPublication = { "previous_publication_id": string; "publication": Publication; };
 export type RescheduleRequest = { "scheduled_at": string; };
 export type ResetExpiredSessionResult = { "next_action": string; "session_reset": boolean; "state": string; };
+export type ResetXUploadRequest = { "confirm_restart": boolean; "observed_attempt_id": string; "observed_checkpoint_id": string; "provider_inspected"?: boolean | null; "sender_stopped": boolean; };
 export type Resolution = "published" | "not_published";
 export type ResolveProviderReplyRequest = { "external_url"?: string | null; "note": string; "observed_revision": number; "resolution": ProviderReplyResolution; "sender_stopped"?: boolean | null; };
 export type RetireScheduleRequest = { "brand_id": string; "channel_ids": Array<string>; "media_versions"?: Record<string, number> | null; "post_id": string; "scheduled_at"?: string | null; "version": number; };
@@ -92,6 +93,8 @@ export type UpdateMediaRequest = { "alt_text": string; "metadata_version": numbe
 export type UpdatePostRequest = { "media_ids"?: Array<string> | null; "options"?: Record<string, unknown> | null; "text"?: string | null; "title"?: string | null; "variants"?: Array<PostVariant> | null; "version": number; };
 export type UpdateTemplateRequest = { "media_ids"?: Array<string> | null; "name"?: string | null; "options"?: Record<string, unknown> | null; "text"?: string | null; "title"?: string | null; "variants"?: Array<PostVariant> | null; "version": number; };
 export type WorkflowSummary = { "attention": number; "published": number; "scheduled": number; };
+export type XUploadPhase = "upload" | "post_started";
+export type XUploadStatus = { "attempt_id": string; "checkpoint_id": string; "phase": XUploadPhase; "reason": string; "reset_allowed": boolean; };
 
 export interface ApiOperations {
   "GET /api/v1/analytics": { request: undefined; response: { "data": Analytics; }; query: { "brand_id"?: string; } };
@@ -162,6 +165,7 @@ export interface ApiOperations {
   "POST /api/v1/publications/{id}/replace": { request: ReplacePublicationRequest; response: { "data": ReplacedPublication; }; query: {  } };
   "POST /api/v1/publications/{id}/reschedule": { request: RescheduleRequest; response: { "data": Publication; }; query: {  } };
   "POST /api/v1/publications/{id}/reset-expired-session": { request: undefined; response: { "data": ResetExpiredSessionResult; }; query: {  } };
+  "POST /api/v1/publications/{id}/reset-x-upload": { request: ResetXUploadRequest; response: { "data": ResetExpiredSessionResult; }; query: {  } };
   "POST /api/v1/publications/{id}/retry": { request: undefined; response: { "data": Publication; }; query: {  } };
   "POST /api/v1/queue/reorder": { request: ReorderQueueRequest; response: { "data": Array<Publication>; }; query: {  } };
   "GET /api/v1/schedule-requests/{request_id}": { request: undefined; response: { "data": ScheduleRequestResult; }; query: {  } };

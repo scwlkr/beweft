@@ -173,6 +173,22 @@ async fn change(
     }
     let current: String = row.get("state");
     let provider: String = row.get("provider");
+    let mut x_checkpoint = if provider == "x" && ["retry", "reconcile"].contains(&action) {
+        crate::provider_bridge::x_checkpoint_on(state, &mut tx, id).await?
+    } else {
+        None
+    };
+    if action == "retry"
+        && x_checkpoint.as_ref().is_some_and(|cp| {
+            cp["stage"]
+                .as_str()
+                .is_some_and(|stage| stage.starts_with("x_"))
+        })
+    {
+        return Err(ApiError::conflict(
+            "Inspect provider status and reset the X checkpoint before retrying",
+        ));
+    }
     let mut scheduled_at = row.get::<chrono::DateTime<Utc>, _>("scheduled_at");
     let target = match action {
         "cancel" if ["queued", "manual_required", "failed"].contains(&current.as_str()) => {
@@ -183,11 +199,40 @@ async fn change(
             "queued"
         }
         "manual_complete" if current == "manual_required" && provider == "manual" => "published",
-        "reconcile" if current == "uncertain" => {
+        "reconcile"
+            if current == "uncertain"
+                || (current == "failed"
+                    && body["resolution"] == "not_published"
+                    && x_checkpoint
+                        .as_ref()
+                        .is_some_and(crate::provider_bridge::x_public_boundary)) =>
+        {
             required(&body, "note")?;
             match body["resolution"].as_str() {
                 Some("published") => "published",
-                Some("not_published") => "failed",
+                Some("not_published") => {
+                    if let Some(cp) = x_checkpoint
+                        .as_mut()
+                        .filter(|cp| crate::provider_bridge::x_public_boundary(cp))
+                    {
+                        auth.owner_session()?;
+                        let (attempt, checkpoint) = crate::provider_bridge::x_identity(cp)?;
+                        if body["observed_attempt_id"] != json!(attempt)
+                            || body["observed_checkpoint_id"] != json!(checkpoint)
+                            || body["sender_stopped"] != true
+                            || body["provider_inspected"] != true
+                        {
+                            return Err(ApiError::conflict(
+                                "Stop the original sender, inspect X, and attest not-published using the current attempt and checkpoint IDs",
+                            ));
+                        }
+                        cp["not_published_attestation"] =
+                            json!({"attempt_id":attempt,"checkpoint_id":checkpoint});
+                        crate::provider_bridge::save_recovery_checkpoint_tx(&mut tx, state, id, cp)
+                            .await?;
+                    }
+                    "failed"
+                }
                 _ => {
                     return Err(ApiError::bad(
                         "resolution must be published or not_published",

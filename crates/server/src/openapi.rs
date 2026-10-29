@@ -39,6 +39,7 @@ use serde_json::{Value, json};
         ManualCompleteRequest,
         Resolution,
         ReconcileRequest,
+        ResetXUploadRequest,
         RescheduleRequest,
         AuthStatus,
         Owner,
@@ -82,6 +83,8 @@ use serde_json::{Value, json};
         ProviderSyncResult,
         ProviderReply,
         ProviderStatus,
+        XUploadStatus,
+        XUploadPhase,
         ProviderReconcilePending,
         ResetExpiredSessionResult,
         IdeaStatus,
@@ -284,6 +287,7 @@ pub fn build_document() -> Value {
             "/connection-flows/{id}/complete",
             "/channels/{id}/disconnect",
             "/publications/{id}/reset-expired-session",
+            "/publications/{id}/reset-x-upload",
             "/inbox/{id}/replies/{request_id}/resolve",
         ]
         .contains(&path)

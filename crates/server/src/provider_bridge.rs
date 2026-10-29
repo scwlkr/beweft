@@ -18,6 +18,8 @@ use serde_json::{Value, json};
 use sqlx::Row;
 use uuid::Uuid;
 pub enum BridgeOutcome {
+    /// A completed, non-public checkpoint is ready for a later bounded claim.
+    Continue,
     Published {
         external_id: String,
         external_url: Option<String>,
@@ -41,6 +43,7 @@ fn encryption_key(state: &AppState) -> Result<&[u8; 32]> {
 mod delivery;
 mod execution;
 mod preparation;
+pub(crate) use delivery::save_checkpoint_tx as save_recovery_checkpoint_tx;
 pub use execution::publish;
 mod validation;
 pub use validation::ScheduleFormatValidator;

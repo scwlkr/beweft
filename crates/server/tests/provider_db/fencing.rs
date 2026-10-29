@@ -109,7 +109,14 @@ async fn fenced_writes_and_small_pool(h: &Harness) {
     h.provider.media_block.store(0, Ordering::SeqCst);
     let checkpoints: i64 = sqlx::query_scalar("SELECT count(*) FROM provider_delivery_checkpoints WHERE publication_id=$1")
         .bind(expiring).fetch_one(&h.state.db).await.unwrap();
-    assert_eq!(checkpoints, 0);
+    // The empty media checkpoint predates the held request. The late response
+    // cannot advance it or store a provider media ID.
+    assert_eq!(checkpoints, 1);
+    let encrypted: String = sqlx::query_scalar("SELECT encrypted_checkpoint FROM provider_delivery_checkpoints WHERE publication_id=$1")
+        .bind(expiring).fetch_one(&h.state.db).await.unwrap();
+    let saved: Value = serde_json::from_str(&crypto::decrypt(&[13;32], expiring, &encrypted).unwrap()).unwrap();
+    assert_eq!(saved["stage"], "x_image_media");
+    assert_eq!(saved["media_ids"], json!([]));
     assert!(!beweft::worker::finish_attempt(
         &h.state, expiring, expiring_attempt, "published", None,
         json!({"late":"receipt"}), Some(("late-id", None))

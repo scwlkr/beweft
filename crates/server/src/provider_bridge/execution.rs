@@ -66,10 +66,16 @@ async fn admit_stage(
         .bind(format!("{}ms", remaining.as_millis().max(1)))
         .execute(&mut **tx)
         .await?;
-    sqlx::query("SELECT id FROM channels WHERE id=$1 FOR UPDATE")
+    let channel = sqlx::query("SELECT c.paused,b.archived_at IS NOT NULL AS archived FROM channels c JOIN brands b ON b.id=c.brand_id WHERE c.id=$1 FOR UPDATE OF c")
         .bind(channel_id)
         .fetch_one(&mut **tx)
         .await?;
+    if channel.get::<bool, _>("paused") || channel.get::<bool, _>("archived") {
+        return Err(ApiError::conflict_code(
+            "delivery_paused",
+            "The channel or brand is paused; no new provider request was started",
+        ));
+    }
     sqlx::query("SELECT set_config('lock_timeout','0',true)")
         .execute(&mut **tx)
         .await?;
@@ -83,6 +89,7 @@ async fn fenced_step(
     id: Uuid,
     attempt: Uuid,
     channel_id: Uuid,
+    overall: Option<providers::Deadline>,
 ) -> Result<std::result::Result<Step, providers::ProviderError>> {
     // Successful refresh is committed independently before media/checkpoint/probe failures.
     let mut refresh_tx = state.db.begin().await?;
@@ -106,7 +113,102 @@ async fn fenced_step(
         let adapter = connections::adapter_for(&channel.app)
             .await?
             .with_deadline(deadline);
-        let cp = checkpoint_on(state, &mut tx, id).await?;
+        let mut cp = checkpoint_on(state, &mut tx, id).await?;
+        let stage_started: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(&mut *tx)
+                .await?;
+        let timing = sqlx::query("SELECT COALESCE(not_before>clock_timestamp(),false) AS waiting,COALESCE(expires_at<=clock_timestamp(),false) AS expired,expires_at IS NOT NULL AS has_expiry FROM provider_delivery_checkpoints WHERE publication_id=$1 FOR UPDATE")
+            .bind(id).fetch_optional(&mut *tx).await?;
+        if let Some(saved) = cp.as_mut() {
+            let stage = saved["stage"].as_str().unwrap_or("");
+            if channel.app.provider == "x" && stage == "media" {
+                // Old image checkpoints cannot prove whether a post was sent.
+                saved["stage"] = json!("x_legacy_ambiguous");
+            }
+            let stage = saved["stage"].as_str().unwrap_or("");
+            if channel.app.provider == "x" && stage.starts_with("x_") {
+                let needs_expiry = matches!(
+                    stage,
+                    "x_video_append" | "x_video_finalize" | "x_video_processing" | "x_video_ready"
+                ) || (matches!(stage, "x_image_media" | "x_post_started")
+                    && saved["media_ids"]
+                        .as_array()
+                        .is_some_and(|ids| !ids.is_empty()));
+                if needs_expiry
+                    && timing
+                        .as_ref()
+                        .is_none_or(|row| !row.get::<bool, _>("has_expiry"))
+                {
+                    return Ok(Err(providers::error(
+                        FailureKind::Uncertain,
+                        "X media expiry is missing. Inspect the delivery and reset before retrying.",
+                    )));
+                }
+                if timing
+                    .as_ref()
+                    .is_some_and(|row| row.get::<bool, _>("expired"))
+                {
+                    saved["expired"] = json!(true);
+                    let _ = save_attempt_checkpoint_tx(
+                        &mut tx,
+                        state,
+                        id,
+                        attempt,
+                        saved,
+                        stage_started,
+                        None,
+                    )
+                    .await?;
+                    return Ok(Err(providers::error(
+                        FailureKind::ExpiredSession,
+                        "X media expired. Inspect the delivery and use the explicit reset before retrying.",
+                    )));
+                }
+                if timing
+                    .as_ref()
+                    .is_some_and(|row| row.get::<bool, _>("waiting"))
+                {
+                    return Ok::<_, ApiError>(Ok(Step::Wait(saved.clone())));
+                }
+                let previous = saved["attempt_id"]
+                    .as_str()
+                    .and_then(|value| value.parse::<Uuid>().ok());
+                if previous != Some(attempt) {
+                    let is_public = matches!(stage, "x_post_started" | "x_legacy_ambiguous");
+                    let rebound = save_attempt_checkpoint_tx(
+                        &mut tx,
+                        state,
+                        id,
+                        attempt,
+                        saved,
+                        stage_started,
+                        None,
+                    )
+                    .await?;
+                    if is_public {
+                        return Ok(Err(providers::error(
+                            FailureKind::Uncertain,
+                            "An earlier X post may have started. Inspect the provider and record its outcome before retrying.",
+                        )));
+                    }
+                    return Ok(Ok(Step::Checkpoint(rebound)));
+                }
+                // Refresh and lock waits consume real elapsed time too. Do
+                // not begin the public call unless its bounded stage still
+                // fits inside the original job's remaining time.
+                if stage == "x_post_started"
+                    && overall
+                        .and_then(|deadline| deadline.remaining())
+                        .is_none_or(|remaining| remaining < std::time::Duration::from_secs(80))
+                {
+                    return Ok(Err(providers::error(
+                        FailureKind::Uncertain,
+                        "The X post boundary needs owner inspection before recovery.",
+                    )));
+                }
+            }
+        }
         let mut result = adapter.publish_step(&channel, &p, cp.as_ref()).await;
         // Recheck under the same locks after network I/O, before mutating any
         // health/checkpoint state or beginning a second provider request.
@@ -129,8 +231,15 @@ async fn fenced_step(
                 lock_attempt(state, &mut tx, id, attempt, channel_id).await?;
             }
         }
-        if let Ok(Step::Checkpoint(next) | Step::Wait(next)) = &result {
-            save_attempt_checkpoint_tx(&mut tx, state, id, attempt, next).await?;
+        if let Ok(Step::Checkpoint(next) | Step::Wait(next)) = &mut result {
+            let wait = if next["stage"] == "x_video_processing" {
+                next["check_after_secs"].as_u64()
+            } else {
+                None
+            };
+            *next =
+                save_attempt_checkpoint_tx(&mut tx, state, id, attempt, next, stage_started, wait)
+                    .await?;
         }
         Ok::<_, ApiError>(result)
     };
@@ -163,12 +272,36 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
     };
     let overall = providers::SuspendInstant::now()
         .and_then(|start| start.deadline(std::time::Duration::from_secs(180)));
-    for _ in 0..48 {
+    let mut completed_x_checkpoint = false;
+    let mut post_started = false;
+    for step in 0..48 {
         if overall.and_then(|deadline| deadline.remaining()).is_none() {
+            if completed_x_checkpoint && !post_started {
+                return BridgeOutcome::Continue;
+            }
             break;
         }
-        match fenced_step(state, id, attempt, channel).await {
-            Ok(Ok(Step::Checkpoint(_))) => {}
+        match fenced_step(state, id, attempt, channel, overall).await {
+            Ok(Ok(Step::Checkpoint(next))) => {
+                let stage = next["stage"].as_str().unwrap_or("");
+                if stage.starts_with("x_") {
+                    completed_x_checkpoint = true;
+                    post_started = stage == "x_post_started" || stage == "x_legacy_ambiguous";
+                    let remaining = overall
+                        .and_then(|deadline| deadline.remaining())
+                        .unwrap_or_default();
+                    if post_started {
+                        if remaining < std::time::Duration::from_secs(80) {
+                            return BridgeOutcome::Uncertain { reason: "The X post may have started. Inspect its outcome before retrying.".into() };
+                        }
+                    } else if step >= 11 || remaining < std::time::Duration::from_secs(80) {
+                        return BridgeOutcome::Continue;
+                    }
+                }
+            }
+            Ok(Ok(Step::Wait(next))) if next["stage"] == "x_video_processing" => {
+                return BridgeOutcome::Continue;
+            }
             Ok(Ok(Step::Wait(_))) => tokio::time::sleep(std::time::Duration::from_secs(3)).await,
             Ok(Ok(Step::Published {
                 external_id,
@@ -190,6 +323,12 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                 return BridgeOutcome::Uncertain { reason: e.message };
             }
             Ok(Err(e)) => return BridgeOutcome::Rejected { reason: e.message },
+            Err(e)
+                if e.1 == "delivery_paused"
+                    && (step == 0 || (completed_x_checkpoint && !post_started)) =>
+            {
+                return BridgeOutcome::Continue;
+            }
             Err(e) => return BridgeOutcome::Uncertain { reason: e.2 },
         }
     }

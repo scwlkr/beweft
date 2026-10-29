@@ -35,8 +35,9 @@ async fn provider(State(state): State<Arc<Mutex<Fixture>>>, request: Request) ->
         return (StatusCode::BAD_GATEWAY, "fixture lost response").into_response();
     }
     let v = match path.as_str() {
-        "/2/media/upload" => json!({"data":{"id":"media-1"}}),
-        "/2/tweets" => json!({"data":{"id":"x-post-1"}}),
+        "/2/media/upload" => json!({"data":{"id":"123456789","expires_after_secs":86400}}),
+        "/2/media/metadata" => json!({"data":{"id":body["id"]}}),
+        "/2/tweets" => json!({"data":{"id":"987654321"}}),
         "/2/users/me" => json!({"data":{"id":"account-1","name":"Fixture","username":"fixture"}}),
         "/2/oauth2/token" => {
             json!({"access_token":"fixture-access","refresh_token":"fixture-refresh","expires_in":7200,"scope":"tweet.read tweet.write users.read offline.access media.write"})
@@ -279,8 +280,15 @@ async fn direct_adapters_preserve_http_shapes_stages_and_ambiguous_outcomes() {
     );
     state.lock().unwrap().lost_write = true;
     let before = state.lock().unwrap().requests.len();
-    let error = adapter
+    let Step::Checkpoint(started) = adapter
         .publish_step(&c, &publication(), None)
+        .await
+        .unwrap()
+    else {
+        panic!("the X public boundary must be checkpointed before a write")
+    };
+    let error = adapter
+        .publish_step(&c, &publication(), Some(&started))
         .await
         .err()
         .unwrap();

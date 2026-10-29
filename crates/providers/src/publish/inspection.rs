@@ -50,7 +50,7 @@ async fn probe_with_program(m: &Media, program: &str) -> Result<Value> {
     }
     cmd.args([
         "-show_entries",
-        "format=duration:stream=codec_type,codec_name,width,height,duration",
+        "format=duration:stream=codec_type,codec_name,profile,width,height,duration,avg_frame_rate,sample_aspect_ratio,pix_fmt,field_order,channels",
         "-show_error",
         "-of",
         "json",
@@ -152,7 +152,8 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
         let bytes = m.source.len();
         let max = match (provider, m.mime.as_str()) {
             ("x", "image/gif") => 15 * 1024 * 1024,
-            ("x", _) => 5 * 1024 * 1024,
+            ("x", t) if t.starts_with("image/") => 5 * 1024 * 1024,
+            ("x", _) => 256 * 1024 * 1024,
             ("bluesky", _) => 2_000_000,
             ("instagram" | "threads", t) if t.starts_with("image/") => 8 * 1024 * 1024,
             ("mastodon", t) if t.starts_with("image/") => 16 * 1024 * 1024,
@@ -238,9 +239,14 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
                 "threads" => 300.0,
                 "mastodon" => 3600.0,
                 "youtube" => 43200.0,
+                "x" => 1200.0,
                 _ => 900.0,
             };
-            let minimum = if provider == "instagram" { 3.0 } else { 0.0 };
+            let minimum = match provider {
+                "instagram" => 3.0,
+                "x" => 0.5,
+                _ => 0.0,
+            };
             if !duration.is_finite()
                 || duration < minimum
                 || duration <= 0.0
@@ -261,6 +267,41 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
                 return Err(invalid(
                     "Meta video requires MP4, H.264/HEVC, optional AAC audio, and maximum width 1920",
                 ));
+            }
+            if provider == "x" {
+                let rate = visual["avg_frame_rate"].as_str().and_then(|s| {
+                    let (n, d) = s.split_once('/')?;
+                    let n: f64 = n.parse().ok()?;
+                    let d: f64 = d.parse().ok()?;
+                    (d > 0.0).then_some(n / d)
+                });
+                let ratio = width as f64 / height as f64;
+                let audio: Vec<_> = streams
+                    .iter()
+                    .filter(|s| s["codec_type"] == "audio")
+                    .collect();
+                if m.mime != "video/mp4"
+                    || codec != "h264"
+                    || width < 32
+                    || height < 32
+                    || width.max(height) > 1280
+                    || width.min(height) > 1024
+                    || !(1.0 / 3.0..=3.0).contains(&ratio)
+                    || !rate.is_some_and(|fps| fps.is_finite() && fps > 0.0 && fps <= 60.0)
+                    || visual["sample_aspect_ratio"] != "1:1"
+                    || visual["pix_fmt"] != "yuv420p"
+                    || visual["field_order"] != "progressive"
+                    || audio.len() > 1
+                    || audio.iter().any(|s| {
+                        s["codec_name"] != "aac"
+                            || s["profile"] != "LC"
+                            || !matches!(s["channels"].as_u64(), Some(1 | 2))
+                    })
+                {
+                    return Err(invalid(
+                        "X video requires MP4/H.264, progressive YUV 4:2:0, square pixels, at most 60 fps and optional mono/stereo AAC-LC audio",
+                    ));
+                }
             }
         }
     }
