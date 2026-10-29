@@ -54,7 +54,7 @@ export function Drafts({
           aria-pressed={view === "drafts"}
           onClick={() => setView("drafts")}
         >
-          Drafts
+          Saved drafts
         </button>
         <button
           aria-pressed={view === "templates"}
