@@ -182,6 +182,9 @@ impl Api {
         let response = self
             .client
             .post(self.endpoint(&format!("/media?brand_id={brand}"))?)
+            // The API permits 15 minutes to receive an upload. Include a
+            // bounded margin for connection setup and its response.
+            .timeout(Duration::from_secs(16 * 60))
             .bearer_auth(&self.token)
             .header("X-Beweft-Request", "1")
             .multipart(form)

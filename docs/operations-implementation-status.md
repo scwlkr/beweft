@@ -25,6 +25,8 @@ upload. It uses scoped bearer HTTP requests, disallows redirects and off-origin
 escape-hatch paths, supports protected token files, bounds input/output sizes,
 and never retries a failed write. Paged draft, media, queue and history reads
 filter in the scoped API; full post and publication details are separate reads.
+Scheduling returns compact publication summaries to agent clients, while the
+default API response retains full snapshots.
 MCP includes initialize/initialized, ping,
 tools/list and tools/call; its upload root is opened at startup and file paths
 cannot follow symlinks. `crates/cli/tests/integration.py` exercises the real

@@ -379,6 +379,67 @@ def pagination_test(env, unrestricted_env, call, brand, other, channel):
         mcp.close()
 
 
+def request_bounds_test(env, call, brand, initial_channel):
+    channels = [initial_channel]
+    for index in range(49):
+        channels.append(call("/channels", {"brand_id": brand, "name": f"Bounded fixture {index}", "provider": "manual"})["id"])
+
+    # JSON escapes make each valid 100,000-byte text about 600 KB on the wire.
+    # Returning 50 full snapshots would exceed the CLI's 16 MiB response cap.
+    content = "\x01" * 100000
+    post = call("/posts", {"brand_id": brand, "text": content})
+    schedule_body = {"version": post["version"], "channel_ids": channels, "scheduled_at": "2099-02-01T00:00:00Z"}
+    error = cli(env, "api", "POST", f"/posts/{post['id']}/schedule?view=invalid", "--json", "-", body=schedule_body, success=False)
+    assert "HTTP 400" in error
+    assert call("/posts/" + post["id"])["status"] == "draft"
+    assert not any(row["post_id"] == post["id"] for row in call("/publications"))
+    mcp = Mcp(env)
+    try:
+        mcp.initialize()
+        result = mcp.call("schedule", {"id": post["id"], "intent": "exact", "body": schedule_body})["data"]
+        ids = {row["id"] for row in result}
+        assert len(result) == len(ids) == 50
+        assert all(row["state"] == "queued" and "payload" not in row for row in result)
+        found, cursor = set(), None
+        while True:
+            args = {"brand_id": brand, "limit": 10}
+            if cursor:
+                args["cursor"] = cursor
+            page = mcp.call("queue", args)
+            found.update(row["id"] for row in page["data"] if row["post_id"] == post["id"])
+            cursor = page["next_cursor"]
+            if not cursor:
+                break
+        assert found == ids
+        detail = mcp.call("publication", {"id": result[0]["id"]})["data"]
+        assert detail["payload"]["text"] == content
+
+        # A valid near-1-MiB API JSON body must fit inside the larger CLI/MCP
+        # envelope. Each variant remains below the API's per-text limit.
+        body = {"brand_id": brand, "text": "envelope boundary", "variants": [{"channel_id": channel, "text": ""} for channel in channels[:11]]}
+        target = 1_048_520
+        size = lambda: len(json.dumps(body, separators=(",", ":")).encode())
+        remaining = target - size()
+        for variant in body["variants"]:
+            count = min(100000, remaining)
+            variant["text"] = "x" * count
+            remaining -= count
+        assert remaining == 0 and size() == target
+        args = {"body": body}
+        assert len(json.dumps(args).encode()) > 1024 * 1024
+        frame = {"jsonrpc": "2.0", "id": "boundary", "method": "tools/call", "params": {"name": "draft_create", "arguments": args}}
+        assert len(json.dumps(frame).encode()) > 1024 * 1024
+        assert cli(env, "draft-create", "--json", "-", body=args)["data"]["status"] == "draft"
+        assert mcp.call("draft_create", args)["data"]["status"] == "draft"
+    finally:
+        mcp.close()
+    error = cli(env, "draft-create", "--json", "-", body={"body": {"text": "x" * (2 * 1024 * 1024)}}, success=False)
+    assert "JSON input exceeds 2 MiB" in error
+    oversized = subprocess.run([str(BIN / "beweft"), "mcp"], env=env, input=b" " * (2 * 1024 * 1024 + 1) + b"\n", capture_output=True, timeout=30)
+    response = json.loads(oversized.stdout)
+    assert oversized.returncode == 0 and response["error"]["code"] == -32600 and "2 MiB" in response["error"]["message"]
+
+
 def run(temporary):
     port = unused_port()
     origin = f"http://127.0.0.1:{port}"
@@ -458,6 +519,7 @@ def run(temporary):
         assert "scheduled_at" in cli(env, "schedule", "--json", "-", body={**schedule, "intent": "queue"}, success=False)
         assert "403" in cli(read_env, "schedule", "--json", "-", body=schedule, success=False)
         publication = cli(env, "schedule", "--json", "-", body=schedule)["data"][0]
+        assert "payload" not in publication
         assert cli(env, "queue")["data"][0]["id"] == publication["id"]
         with client.open(origin + "/api/v1/publications?brand_id=" + brand["id"], timeout=10) as response:
             legacy = json.load(response)
@@ -544,7 +606,8 @@ def run(temporary):
         redirect_test(env)
         race_test(env, upload_root, temp / "race-secret", brand["id"])
         pagination_test(env, dict(env, BEWEFT_TOKEN=unrestricted), call, brand["id"], other["id"], channel["id"])
-        print("PASS: isolated API CLI/MCP, scoped reads and write rejection, lost draft/upload response recovery, 170 large-draft pagination, scoped cursors, queue/history detail, upload confinement race, token files, redirect refusal, protocol errors and rate limit")
+        request_bounds_test(env, call, brand["id"], channel["id"])
+        print("PASS: isolated API CLI/MCP, scoped access, lost-response recovery, 170 large-draft pagination, 50-channel compact scheduling, near-1-MiB payload envelopes, oversized input rejection, upload confinement, token files, redirects, protocol errors and rate limit")
     finally:
         stop(server)
 

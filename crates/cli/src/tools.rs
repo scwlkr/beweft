@@ -129,7 +129,7 @@ pub fn description(name: &str) -> Value {
             false,
         ),
         "schedule" => (
-            "Schedule the approved post version. Explicit intent=queue reserves posting-rule slots; intent=exact requires scheduled_at. Can publish when due. Never retry an unknown outcome without reading the queue.",
+            "Schedule the approved post version. Explicit intent=queue reserves posting-rule slots; intent=exact requires scheduled_at. Can publish when due. Returns publication summaries; use publication for full details. Never retry an unknown outcome without reading the queue.",
             object(
                 json!({"id":id,"intent":{"type":"string","enum":["queue","exact"]},"body":request_schema("SchedulePostRequest")}),
                 &["id", "intent", "body"],
@@ -286,7 +286,7 @@ pub async fn invoke(
                     }
                     (
                         Method::POST,
-                        format!("/posts/{}/schedule", uuid(&args, "id")?),
+                        format!("/posts/{}/schedule?view=summary", uuid(&args, "id")?),
                     )
                 }
             };

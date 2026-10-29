@@ -45,6 +45,11 @@ with an offset. Scheduling can publish when the job is due. The `drafts`,
 commands inspect authoritative server state. The `api METHOD /path` escape
 hatch is limited to the same API origin and bearer scopes.
 
+The `schedule` result is a compact summary for each committed publication,
+including its ID, state and timing. Use `publication` to read its complete
+immutable payload. The server's ordinary schedule response remains full for
+clients that do not request the summary view.
+
 `drafts`, `media`, `queue` and `history` return one page at a time, with up to
 10 records by default. Their JSON arguments accept `brand_id`, `limit` (1–10)
 and `cursor`. Results have a `data` array and `next_cursor`, which is null on
@@ -93,7 +98,13 @@ at startup and permits only regular files underneath it, without following
 symlinks in the upload path. Use paths rooted at the configured directory or
 its resolved absolute path. Changing the root requires restarting the MCP
 process. CLI uploads are explicitly local file operations and are not limited
-by this MCP root. Both use the API's upload limit and brand scope.
+by this MCP root. Both use the API's upload limit and brand scope. Uploads have
+a 16-minute client deadline to allow the API's 15-minute receive window and
+response; other HTTP requests retain a two-minute deadline.
+
+CLI JSON input and an MCP frame may each be up to 2 MiB, including their
+respective wrapper. API JSON mutation bodies remain subject to the server's
+1 MiB request limit; the extra envelope space does not raise that limit.
 
 ## Isolated integration check
 
@@ -119,3 +130,7 @@ refusal, MCP protocol errors and rate limiting, and a symlink replacement during
 an upload. It also checks recovery of a committed upload with a lost response
 and complete pagination of 170 large drafts and scoped queue, history and media
 records. It does not prove provider access or a self-host installation.
+
+The optional `python3 crates/cli/tests/slow_upload.py` uses a loopback fixture
+to hold an upload response for 125 seconds, checking that it outlasts the normal
+two-minute request deadline without a retry.

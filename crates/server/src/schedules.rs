@@ -9,6 +9,7 @@ use axum::{
     extract::{Path, Query, State},
 };
 use chrono::{DateTime, Datelike, Duration, NaiveTime, TimeZone, Utc};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
@@ -131,14 +132,24 @@ pub fn parse_future(value: &Value) -> Result<DateTime<Utc>> {
     }
     Ok(time)
 }
+#[derive(Deserialize, Default)]
+pub struct ScheduleResponseView {
+    view: Option<String>,
+}
 pub async fn schedule_post(
     State(state): State<AppState>,
     auth: Auth,
     Path(id): Path<Uuid>,
+    Query(view): Query<ScheduleResponseView>,
     Json(input): Json<crate::contracts::SchedulePostRequest>,
 ) -> Result<Json<Value>> {
     let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     auth.scope("publishing:write")?;
+    let summary = match view.view.as_deref() {
+        None => false,
+        Some("summary") => true,
+        _ => return Err(ApiError::bad("Unsupported schedule response view")),
+    };
     let mut channels: Vec<Uuid> = serde_json::from_value(body["channel_ids"].clone())
         .map_err(|_| ApiError::bad("channel_ids must be UUIDs"))?;
     if channels.is_empty() || channels.len() > 50 {
@@ -198,7 +209,11 @@ pub async fn schedule_post(
     tx.commit().await?;
     let mut rows = Vec::new();
     for id in ids {
-        rows.push(crate::publications::get_publication(&state.db, id).await?);
+        rows.push(if summary {
+            crate::publications::get_publication_summary(&state.db, id).await?
+        } else {
+            crate::publications::get_publication(&state.db, id).await?
+        });
     }
     Ok(data(rows))
 }
