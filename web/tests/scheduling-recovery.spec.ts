@@ -661,6 +661,12 @@ for (const changed of ["revision", "snapshot"] as const) {
           },
           { key, changed },
         );
+        await expect(
+          page.getByText(/saved schedule changed in another tab/),
+        ).toBeVisible();
+        await expect(
+          page.getByRole("button", { name: "Check scheduling outcome" }),
+        ).toBeDisabled();
         release.resolve();
         await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
           "saved schedule changed",
@@ -1048,6 +1054,12 @@ test("a held retirement receipt cannot clear a changed same-ID snapshot", async 
         localStorage.setItem(key, JSON.stringify(saved));
         return saved;
       }, key);
+      await expect(
+        page.getByText(/saved schedule changed in another tab/),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Check scheduling outcome" }),
+      ).toBeDisabled();
       release.resolve();
       await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
         "saved schedule changed",

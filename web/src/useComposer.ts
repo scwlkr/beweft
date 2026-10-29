@@ -146,6 +146,21 @@ export function useComposer({
   >("unchecked");
   const [recoveryMessage, setRecoveryMessage] = useState("");
   const intent = pendingSchedule.intent;
+  const openedIntent = useRef<ScheduleIntent | null>(null);
+  if (!intent) openedIntent.current = null;
+  else if (!openedIntent.current || openedIntent.current.id !== intent.id)
+    openedIntent.current = intent;
+  const intentChanged =
+    !!intent &&
+    !!openedIntent.current &&
+    !sameScheduleIntent(openedIntent.current, intent);
+  useEffect(() => {
+    if (!intentChanged) return;
+    setRecovery("mismatch");
+    setRecoveryMessage(
+      "The saved schedule changed in another tab. Close and reopen it to review the current record.",
+    );
+  }, [intentChanged]);
   useEffect(() => {
     if (!intent) return;
     const saved = intent.post;
@@ -195,6 +210,7 @@ export function useComposer({
     // Each stored intent represents an immutable post revision.
   }, [intent?.id]);
   useEffect(() => {
+    if (intentChanged) return;
     if (intent?.rejection_code === "schedule_request_conflict") {
       setRecovery("mismatch");
       setRecoveryMessage(
@@ -209,7 +225,7 @@ export function useComposer({
         "Media descriptions changed. Refresh them and review before scheduling again.",
       );
     }
-  }, [intent?.id, intent?.rejection_code, intent?.uncertain]);
+  }, [intent?.id, intent?.rejection_code, intent?.uncertain, intentChanged]);
   const activeChannel = channels.find((c) => c.id === tab);
   const currentText = tab === "all" ? text : (variants[tab] ?? text);
   const previewChannel = activeChannel;
@@ -346,7 +362,8 @@ export function useComposer({
       );
   };
   const recover = async (retry: boolean) => {
-    if (running.current || !pendingSchedule.ready || !intent) return;
+    if (running.current || !pendingSchedule.ready || !intent || intentChanged)
+      return;
     let session: ApiSession;
     try {
       session = captureWorkspaceSession();
@@ -499,7 +516,8 @@ export function useComposer({
     }
   };
   const release = async () => {
-    if (running.current || !pendingSchedule.ready || !intent) return;
+    if (running.current || !pendingSchedule.ready || !intent || intentChanged)
+      return;
     let session: ApiSession;
     try {
       session = captureWorkspaceSession();
@@ -850,6 +868,7 @@ export function useComposer({
     busy,
     error,
     intent,
+    intentChanged,
     recovery,
     recoveryMessage,
     recover,

@@ -64,6 +64,7 @@ export function Composer({
     busy,
     error,
     intent,
+    intentChanged,
     recovery,
     recoveryMessage,
     recover,
@@ -441,7 +442,7 @@ export function Composer({
             <Button
               variant="secondary"
               onClick={() => void recover(false)}
-              disabled={busy || !pendingSchedule.ready}
+              disabled={busy || !pendingSchedule.ready || intentChanged}
             >
               Check scheduling outcome
             </Button>

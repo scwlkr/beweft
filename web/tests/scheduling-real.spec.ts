@@ -923,6 +923,9 @@ test("stopping a committed request returns its original accepted publication", a
       await route.abort("failed");
     });
     await start(page);
+    await expect(
+      page.getByRole("button", { name: "Stop original schedule" }),
+    ).toBeEnabled();
     const saved = await pending(page, f.key);
     await page.getByRole("button", { name: "Stop original schedule" }).click();
     await expect(page.getByText(/original request is confirmed/)).toBeVisible();
@@ -955,6 +958,9 @@ test("a lost retirement response recovers its durable rejection after reload", a
       await route.abort("failed");
     });
     await start(page);
+    await expect(
+      page.getByRole("button", { name: "Stop original schedule" }),
+    ).toBeEnabled();
     const saved = await pending(page, f.key);
     await page.getByRole("button", { name: "Stop original schedule" }).click();
     await expect(page.getByRole("dialog").getByRole("alert")).toBeVisible();
@@ -997,6 +1003,9 @@ test("a rejected receipt survives a deleted draft and can be recovered as new co
       await route.abort("failed");
     });
     await start(page);
+    await expect(
+      page.getByRole("button", { name: "Stop original schedule" }),
+    ).toBeEnabled();
     const saved = await pending(page, f.key);
     await page.getByRole("button", { name: "Stop original schedule" }).click();
     await expect(page.getByRole("dialog").getByRole("alert")).toBeVisible();
@@ -1038,6 +1047,9 @@ test("retirement of an unverifiable deleted draft leaves the outcome unresolved"
     const f = await setup(page, context, write);
     await page.route(routeFor(f.post.id), (route) => route.abort("failed"));
     await start(page);
+    await expect(
+      page.getByRole("button", { name: "Stop original schedule" }),
+    ).toBeEnabled();
     const saved = await pending(page, f.key);
     const deleted = await context.request.delete(`/api/v1/posts/${f.post.id}`, {
       headers: {

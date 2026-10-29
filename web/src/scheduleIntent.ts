@@ -512,21 +512,36 @@ export async function sendScheduleIntent(
             const mismatch =
               failure instanceof ApiError &&
               failure.code === "schedule_request_conflict";
-            // A proven mismatch dominates every later observation. A stale
-            // abandoned attempt may not overwrite a newer attempt's state.
-            if (
-              scheduleHasConflict(saved) ||
-              (!mismatch && saved.active_attempt_id !== attemptId)
-            )
-              return;
-            const confirmedRejection =
+            const mediaConflict =
               failure instanceof ApiError &&
               !requestSucceeded &&
               failure.status === 409 &&
               failure.code === "media_version_conflict";
+            // A proven mismatch dominates every later observation. A stale
+            // abandoned transient may not overwrite a newer attempt's state.
+            // A gated media conflict is stronger than an in-progress result;
+            // retirement still verifies the durable outcome before clearing.
+            if (
+              scheduleHasConflict(saved) ||
+              (!mismatch &&
+                !mediaConflict &&
+                saved.active_attempt_id !== attemptId)
+            )
+              return;
+            if (mediaConflict && saved.observed_publication_ids) {
+              persistScheduleIntent(key, {
+                ...saved,
+                uncertain: true,
+                rejection:
+                  "The server record does not match the observed publications.",
+                rejection_code: "schedule_request_conflict",
+              });
+              window.dispatchEvent(new Event(scheduleEvent));
+              return;
+            }
             persistScheduleIntent(key, {
               ...saved,
-              uncertain: !confirmedRejection,
+              uncertain: !mediaConflict,
               rejection:
                 failure instanceof Error
                   ? failure.message
