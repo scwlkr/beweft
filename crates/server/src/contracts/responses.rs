@@ -219,6 +219,9 @@ pub struct ScheduleRequestIntent {
     /// UTC RFC3339, rendered to microsecond precision; null means a posting-rule slot.
     #[schema(required = true)]
     pub scheduled_at: Option<DateTime<Utc>>,
+    /// Original normalized media-version map, or null for legacy requests.
+    #[schema(required = true)]
+    pub media_versions: Option<BTreeMap<Uuid, i64>>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct ScheduleRequestResult {

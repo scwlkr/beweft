@@ -29,6 +29,33 @@ pub async fn get_post(db: &PgPool, id: Uuid) -> Result<Value> {
     .fetch_one(db)
     .await?)
 }
+
+// Older API versions stored UUID spellings verbatim. Normalize only known ID
+// fields at the response boundary; preserve other fields and the stored JSON.
+fn normalize_post(mut post: Value) -> Value {
+    fn normalize_uuid(value: &mut Value) {
+        if let Some(id) = value.as_str().and_then(|raw| Uuid::parse_str(raw).ok()) {
+            *value = json!(id);
+        }
+    }
+    fn normalize_media(value: Option<&mut Value>) {
+        if let Some(ids) = value.and_then(Value::as_array_mut) {
+            for id in ids {
+                normalize_uuid(id);
+            }
+        }
+    }
+    normalize_media(post.get_mut("media_ids"));
+    if let Some(variants) = post.get_mut("variants").and_then(Value::as_array_mut) {
+        for variant in variants {
+            if let Some(channel) = variant.get_mut("channel_id") {
+                normalize_uuid(channel);
+            }
+            normalize_media(variant.get_mut("media_ids"));
+        }
+    }
+    post
+}
 pub async fn list(
     State(state): State<AppState>,
     auth: Auth,
@@ -66,7 +93,7 @@ pub async fn list(
         let query = format!(
             "SELECT {value},p.created_at,p.id FROM posts p WHERE {condition} AND ($4::timestamptz IS NULL OR (p.created_at,p.id)<($4,$5)) ORDER BY p.created_at DESC,p.id DESC LIMIT $6"
         );
-        let rows = sqlx::query_as(&query)
+        let mut rows: Vec<(Value, chrono::DateTime<chrono::Utc>, Uuid)> = sqlx::query_as(&query)
             .bind(filter.brand_id)
             .bind(&auth.brand_ids)
             .bind(only_drafts)
@@ -75,6 +102,9 @@ pub async fn list(
             .bind(page.limit + 1)
             .fetch_all(&state.db)
             .await?;
+        for (post, _, _) in &mut rows {
+            *post = normalize_post(std::mem::take(post));
+        }
         page.finish(rows)
     } else {
         let query =
@@ -85,7 +115,9 @@ pub async fn list(
             .bind(only_drafts)
             .fetch_all(&state.db)
             .await?;
-        Ok(data(rows))
+        Ok(data(
+            rows.into_iter().map(normalize_post).collect::<Vec<_>>(),
+        ))
     }
 }
 pub async fn get(
@@ -95,7 +127,7 @@ pub async fn get(
 ) -> Result<Json<Value>> {
     let post = get_post(&state.db, id).await?;
     auth.brand(uuid(&post, "brand_id")?)?;
-    Ok(data(post))
+    Ok(data(normalize_post(post)))
 }
 pub async fn validate_content(db: &PgPool, brand: Uuid, body: &Value) -> Result<()> {
     validate_options(body)?;
@@ -200,7 +232,7 @@ pub async fn create(
     .bind(body.get("options").cloned().unwrap_or(json!({})))
     .execute(&state.db)
     .await?;
-    Ok(data(get_post(&state.db, id).await?))
+    Ok(data(normalize_post(get_post(&state.db, id).await?)))
 }
 pub async fn update(
     State(state): State<AppState>,
@@ -230,7 +262,7 @@ pub async fn update(
             "Draft changed; reload before saving",
         ));
     }
-    Ok(data(get_post(&state.db, id).await?))
+    Ok(data(normalize_post(get_post(&state.db, id).await?)))
 }
 pub async fn delete(
     State(state): State<AppState>,

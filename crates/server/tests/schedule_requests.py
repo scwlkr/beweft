@@ -113,7 +113,7 @@ def run():
             assert [x["channel_id"] for x in first] == sorted(channels)
             result = call(f"/schedule-requests/{key}")
             assert result["request_id"] == key and result["post_id"] == post["id"] and result["brand_id"] == brand
-            assert result["request"] == {"version": 1, "channel_ids": sorted(channels), "scheduled_at": when.replace("+00:00", "Z")}
+            assert result["request"] == {"version": 1, "channel_ids": sorted(channels), "scheduled_at": when.replace("+00:00", "Z"), "media_versions": None}
             assert [x["id"] for x in result["publications"]] == [x["id"] for x in first]
             assert all("payload" not in x for x in result["publications"])
             assert call(path, {**body, "version": 2}, expected=409)["error"]["code"] == "schedule_request_conflict"
@@ -328,7 +328,7 @@ def run():
             assert "PublicationSummary" in json.dumps(paths["/api/v1/publications"]["get"])
             assert "PublicationSummary" in json.dumps(paths["/api/v1/posts/{id}/schedule"]["post"])
             assert any(p["name"] == "request_id" for p in paths["/api/v1/schedule-requests/{request_id}"]["get"]["parameters"])
-            assert schema["components"]["schemas"]["ScheduleRequestIntent"]["required"] == ["version", "channel_ids", "scheduled_at"]
+            assert schema["components"]["schemas"]["ScheduleRequestIntent"]["required"] == ["version", "channel_ids", "scheduled_at", "media_versions"]
             summary_schema = schema["components"]["schemas"]["PublicationSummary"]["properties"]
             assert summary_schema["channel_name"]["maxLength"] == 100
             assert summary_schema["provider"]["maxLength"] == 64

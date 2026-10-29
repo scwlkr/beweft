@@ -744,6 +744,10 @@
             "format": "uuid",
             "type": "string"
           },
+          "metadata_version": {
+            "format": "int32",
+            "type": "integer"
+          },
           "mime": {
             "type": "string"
           },
@@ -760,6 +764,7 @@
         },
         "required": [
           "alt_text",
+          "metadata_version",
           "id",
           "brand_id",
           "name",
@@ -1459,6 +1464,23 @@
             },
             "type": "array"
           },
+          "media_versions": {
+            "additionalProperties": {
+              "format": "int64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "description": "Expected metadata versions for the exact effective media set. Omit only for legacy behavior.",
+            "maxProperties": 1000,
+            "propertyNames": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "request_id": {
             "description": "Client-generated UUID retained for retries and recovery. Optional for legacy clients.",
             "format": "uuid",
@@ -1496,6 +1518,23 @@
             },
             "type": "array"
           },
+          "media_versions": {
+            "additionalProperties": {
+              "format": "int64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "description": "Original normalized media-version map, or null for legacy requests.",
+            "maxProperties": 1000,
+            "propertyNames": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "scheduled_at": {
             "description": "UTC RFC3339, rendered to microsecond precision; null means a posting-rule slot.",
             "format": "date-time",
@@ -1512,7 +1551,8 @@
         "required": [
           "version",
           "channel_ids",
-          "scheduled_at"
+          "scheduled_at",
+          "media_versions"
         ],
         "type": "object"
       },
@@ -1890,10 +1930,15 @@
         "properties": {
           "alt_text": {
             "type": "string"
+          },
+          "metadata_version": {
+            "format": "int32",
+            "type": "integer"
           }
         },
         "required": [
-          "alt_text"
+          "alt_text",
+          "metadata_version"
         ],
         "type": "object"
       },
@@ -6340,6 +6385,138 @@
                   "properties": {
                     "data": {
                       "$ref": "#/components/schemas/OkResponse"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Scope, brand or origin denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Record not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Version, state or slot conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeds configured limit"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Typed request validation failed"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too many authentication attempts"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal failure"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "get": {
+        "operationId": "get__media_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Media"
                     }
                   },
                   "required": [
