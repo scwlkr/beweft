@@ -1,7 +1,8 @@
 # beweft: autonomous orchestrator handoff
 
 Prepared 2026-10-29 at the owner's explicit request to pause implementation and
-transfer the remaining build to an orchestrator with five parallel agents.
+transfer the remaining build to an orchestrator. The owner subsequently revised
+the team to three concurrent subagents plus the orchestrator to fit this runtime.
 This is a continuation, not a fresh scaffold. No implementation agents remain
 running from the previous session. Read the launch prompt below in a new chat.
 
@@ -165,7 +166,12 @@ implementation conversation**. Prior reviewers cannot review their own fixes.
    merged reviewed PRs, current capability matrix and only specific external
    blockers. Keep server/domain placeholders until the owner chooses them.
 
-## Five-agent ownership plan
+## Three-agent ownership plan
+
+Run at most three subagents concurrently: agent 1 owns workstreams A+B below,
+agent 2 owns C, and agent 3 owns D+E. These are five workstreams, not five agents.
+Rotate assignments as dependencies finish. A fresh reviewer occupies a released
+worker slot; never exceed three active children or reuse an implementer as reviewer.
 
 Use separate worktrees/branches so agents do not overwrite one shared checkout.
 Agree the narrow interfaces before changing them; workers remain productive on
@@ -230,15 +236,13 @@ For `collaboration.spawn_agent`, model overrides require `fork_turns: "none"`.
 Give each agent a self-contained brief and file ownership; tell it it is not
 alone and must preserve others' changes.
 
-Five simultaneously active children plus the orchestrator require **six active
-agent slots**. The handoff session advertised only four total (three children).
-No five-agent team was launched or claimed. The destination must expose at least
-six slots; verify its actual tool limit. Do not circumvent limits with hidden
-processes or claim queued agents are running in parallel. If capacity is lower,
-report that exact runtime limitation rather than silently substituting a smaller
-team. Fresh reviewers occupy released worker slots; never reuse an implementer
-as the supposedly independent reviewer. Keep five lanes progressing as capacity
-allows, with no human approval bottleneck.
+The owner explicitly authorizes **three concurrent subagents plus the
+orchestrator**, matching the four-slot runtime. This supersedes the earlier
+five-child requirement. Do not stop because six slots are unavailable. Keep at
+most three children active and rotate completed worker slots into fresh reviews.
+Never reuse an implementer as the independent reviewer or bypass the host limit.
+Keep the five workstreams progressing across this three-agent team without
+routine human approval gates.
 
 ## Copy-and-paste launch prompt
 
@@ -256,17 +260,19 @@ handoffs when present. Apply $wstack from
 technical-stack and code-review references. The handoff is a starting record;
 verify Git/PR/runtime state before consequential actions.
 
-Run five parallel implementation lanes using the ownership table in the handoff.
+Run three concurrent subagents plus yourself, within the four-agent runtime.
+This is my explicit revision of the previous five-child requirement: do not
+block waiting for six slots. Assign agent 1 to core/provider workstreams A+B,
+agent 2 to web workstream C, and agent 3 to CLI/operations workstreams D+E.
 Every subagent, including newly spawned independent reviewers, must use
 gpt-6.1-terra at max reasoning effort. Spawn with fork_turns="none" and complete
-self-contained briefs. Use separate managed worktrees/branches. Check that the
-runtime actually permits five children plus you before launching. If it cannot,
-state that exact capacity blocker; do not pretend serial/queued work satisfies
-the requested parallel team or bypass the host limit.
+self-contained briefs. Use separate managed worktrees/branches. Keep at most
+three children active; when a worker finishes, use its released slot for a
+brand-new reviewer or the next assignment. Do not bypass the host limit.
 
 You own integration, decomposition, shared contracts, test coordination, PR
 quality, release readiness and cleanup. Workers own their files and submit
-focused PRs with clear results, validation and limitations. Keep all five lanes
+focused PRs with clear results, validation and limitations. Keep the three agents
 productive, resolve interface decisions promptly and prevent overlapping edits.
 Use the handoff's compact orchestration contract: explicit landing branches,
 fresh bounded briefs, reports of at most 250 words, frozen review SHAs and
