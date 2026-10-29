@@ -1,4 +1,43 @@
 use super::*;
+/// Serialize OAuth completion and revocation for the provider, including remote I/O.
+/// A busy gate fails promptly so other requests do not wait on the provider timeout.
+pub(super) async fn oauth_gate(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    provider: &str,
+    wait: bool,
+) -> Result<Option<(i64, Option<Uuid>)>> {
+    let query = if wait {
+        "SELECT oauth_generation,revocation_id FROM provider_apps WHERE provider=$1 FOR UPDATE"
+    } else {
+        "SELECT oauth_generation,revocation_id FROM provider_apps WHERE provider=$1 FOR UPDATE NOWAIT"
+    };
+    let row = sqlx::query(query)
+        .bind(provider)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| {
+            if matches!(&error, sqlx::Error::Database(db) if db.code().as_deref() == Some("55P03"))
+            {
+                ApiError::conflict(
+                    "Provider revocation or another connection operation is in progress; try again",
+                )
+            } else {
+                error.into()
+            }
+        })?;
+    Ok(row.map(|row| (row.get("oauth_generation"), row.get("revocation_id"))))
+}
+
+pub(super) fn require_open_oauth_gate(gate: Option<(i64, Option<Uuid>)>) -> Result<i64> {
+    match gate {
+        Some((generation, None)) => Ok(generation),
+        Some((_, Some(_))) => Err(ApiError::conflict(
+            "Provider revocation is not confirmed. Remove access at the provider and confirm it before connecting again.",
+        )),
+        None => Err(ApiError::bad("Set up this provider app first")),
+    }
+}
+
 pub async fn app_config(state: &AppState, provider: &str) -> Result<AppConfig> {
     let row = sqlx::query("SELECT id,encrypted_config FROM provider_apps WHERE provider=$1")
         .bind(provider)

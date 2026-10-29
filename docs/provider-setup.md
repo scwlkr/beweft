@@ -4,6 +4,8 @@ beweft talks to each network directly. You supply your own developer app and aut
 
 The direct adapters are fixture-tested, not live-qualified for your accounts. Read [capability research](research/provider-capabilities.md) for dated API rules and [connection design](research/connections.md) for the source review.
 
+The provider connection handlers are not yet wired into the production router or UI. The workflows below describe the adapter design and are not a claim that live connections can already be made through this build.
+
 ## Prepare the server
 
 1. Set `BEWEFT_PUBLIC_URL` to your actual HTTPS origin. Do not add a path or invent a domain; it must route to this server.
@@ -41,6 +43,8 @@ Exact scopes requested by the installed version are listed in `crates/providers/
 Choose a brand, connect its channel, complete provider consent, and choose the returned destination. The flow expires after ten minutes and must finish in the browser session that started it. Starting another flow replaces that browser's temporary correlation cookie; finish one at a time. The UI reports authorization/identity confirmation without claiming publishing has been tested.
 
 On reconnect, authorize the same external destination. A different Page/channel must be connected separately. Reconnect retains schedules and history; an intentionally paused channel stays paused. Disconnect cancels queued deliveries, removes local credentials and pauses the channel. It refuses while a delivery is sending. If provider revocation cannot be completed, remove access in that network's connected-app settings; the response explains this remaining action.
+
+OAuth authorizations started before a disconnect must be started again after revocation. While a provider revoke is pending, new authorization and completion are blocked across that provider. A failed, unsupported or interrupted revoke remains blocked until the owner removes access at the provider and explicitly confirms removal. The confirmation handler exists, but still needs production route and UI wiring. Google says [revocation removes the project's granted scopes and invalidates issued tokens for all clients in the project](https://developers.google.com/identity/protocols/oauth2/web-server#tokenrevoke). Because beweft cannot yet identify which YouTube destinations share that grant, it conservatively marks other connected YouTube channels as needing reconnection and holds their queued work. Their credentials, pause settings and queues are retained. An active YouTube delivery or reply blocks the disconnect; an active sync must finish first. A successful provider response may take time to have full effect, so fixture coverage is not proof of live propagation timing.
 
 ## Current formats and observations
 
@@ -80,7 +84,7 @@ A YouTube upload status probe returning 404 marks the saved session expired; it 
 
 ### Isolated regression checks
 
-`cargo test -p beweft-providers --tests` runs loopback HTTP fixtures and generated media checks (requires FFmpeg). `python3 crates/server/tests/provider_integration.py` creates and removes a unique database in the existing development PostgreSQL container, then exercises OAuth replay/session/config binding, concurrent token refresh, origin-aware reconnect, reply/disconnect races, stale-checkpoint fencing, concurrent reconciliation, and expired-session reset. It removes its generated media and test database in cleanup. These checks establish fixture behavior, not live provider qualification.
+`cargo test -p beweft-providers --tests` runs loopback HTTP fixtures and generated media checks (requires FFmpeg). `python3 crates/server/tests/provider_integration.py` creates and removes a unique database in the existing development PostgreSQL container, then exercises OAuth replay/session/config binding, blocked remote revocation and stale reconnects, concurrent token refresh, origin-aware reconnect, reply/disconnect races, stale-checkpoint fencing, concurrent reconciliation, and expired-session reset. It removes its generated media and test database in cleanup. These checks establish fixture behavior, not live provider qualification.
 
 The server's `provider-fixtures` Cargo feature exists only for these tests; it enables an explicitly supplied loopback-only `BEWEFT_PROVIDER_FIXTURE_ORIGIN`. Never enable this feature in a deployment build. The standard build ignores that variable entirely.
 

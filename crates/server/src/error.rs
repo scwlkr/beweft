@@ -63,6 +63,9 @@ impl From<sqlx::Error> for ApiError {
             sqlx::Error::Database(d) if d.is_foreign_key_violation() => {
                 Self::bad("A referenced record is missing or still in use")
             }
+            sqlx::Error::Database(d) if d.code().as_deref() == Some("55P03") => {
+                Self::conflict("Another operation is using this resource; try again")
+            }
             _ => Self::internal(e),
         }
     }

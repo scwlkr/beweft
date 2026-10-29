@@ -7,12 +7,9 @@ pub async fn sync(
 ) -> Result<Json<Value>> {
     auth.scope("publishing:write")?;
     auth.brand(catalog::channel_brand(&state, id).await?)?;
-    let c = connections::load_channel(&state, id).await?;
-    if c.app.provider == "x" && body["allow_metered"].as_bool() != Some(true) {
-        return Err(ApiError::bad(
-            "X reads can incur charges. Set allow_metered=true only after approving provider costs.",
-        ));
-    }
+    // Commit a rotated grant before subsequent fallible work, then reacquire the
+    // channel row for the full sync so disconnect cannot revoke a grant in use.
+    connections::load_channel(&state, id).await?;
     // Bound network work and avoid overlapping polling requests for one account.
     let mut guard = state.db.begin().await?;
     let lock: i64 = id.as_u128() as i64;
@@ -23,7 +20,18 @@ pub async fn sync(
     if !acquired {
         return Err(ApiError::conflict("This channel is already syncing"));
     }
-    let result = sync_inner(&state, &mut guard, id, &c).await;
+    let c = connections::load_stored_channel_tx(&state, &mut guard, id).await?;
+    if c.app.provider == "x" && body["allow_metered"].as_bool() != Some(true) {
+        return Err(ApiError::bad(
+            "X reads can incur charges. Set allow_metered=true only after approving provider costs.",
+        ));
+    }
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        sync_inner(&state, &mut guard, id, &c),
+    )
+    .await
+    .map_err(|_| ApiError::conflict("Provider sync timed out; try again"))?;
     // Transaction advisory locks are released on commit or cancellation/rollback.
     guard.commit().await?;
     result

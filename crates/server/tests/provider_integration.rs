@@ -30,12 +30,15 @@ include!("provider_db/replies.rs");
 include!("provider_db/reply_watermark.rs");
 include!("provider_db/durable_preparation.rs");
 include!("provider_db/reply_deadline.rs");
+include!("provider_db/revocation.rs");
 #[path = "../../providers/tests/support/mod.rs"]
 mod media_fixture;
 #[tokio::test]
 #[ignore = "requires isolated BEWEFT_TEST_DATABASE_URL; run provider_integration.py"]
 async fn provider_database_security_and_recovery() {
     let h = Harness::new().await;
+    oauth_revocation_fences_reconnects(&h).await;
+    populated_oauth_fence_upgrade(&h).await;
     oauth_replay_session_binding_and_config_change(&h).await;
     refresh_serialization_and_grant_binding(&h).await;
     replies_and_disconnect_share_claim_lock(&h).await;

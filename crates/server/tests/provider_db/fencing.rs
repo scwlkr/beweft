@@ -120,7 +120,7 @@ async fn fenced_writes_and_small_pool(h: &Harness) {
     };
     let encrypted =
         crypto::encrypt(&[13; 32], flow, &serde_json::to_string(&vec![new]).unwrap()).unwrap();
-    sqlx::query("INSERT INTO connection_flows(id,provider,owner_id,brand_id,session_hash,state_hash,correlation_hash,encrypted_verifier,reconnect_channel_id,expires_at,encrypted_candidates) VALUES($1,'x',$2,$3,$4,$5,'unused','unused',$6,now()+interval '10 minutes',$7)").bind(flow).bind(h.auth.owner_id).bind(h.brand).bind(crypto::digest(&h.session)).bind(flow.to_string()).bind(channel).bind(encrypted).execute(&h.state.db).await.unwrap();
+    sqlx::query("INSERT INTO connection_flows(id,provider,owner_id,brand_id,session_hash,state_hash,correlation_hash,encrypted_verifier,reconnect_channel_id,expires_at,encrypted_candidates,oauth_generation) VALUES($1,'x',$2,$3,$4,$5,'unused','unused',$6,now()+interval '10 minutes',$7,(SELECT oauth_generation FROM provider_apps WHERE provider='x'))").bind(flow).bind(h.auth.owner_id).bind(h.brand).bind(crypto::digest(&h.session)).bind(flow.to_string()).bind(channel).bind(encrypted).execute(&h.state.db).await.unwrap();
     let state = h.state.clone();
     let publisher = tokio::spawn(async move {
         provider_bridge::publish(

@@ -161,19 +161,43 @@ pub async fn disconnect(
 ) -> Result<Json<Value>> {
     auth.owner_session()?;
     auth.brand(catalog::channel_brand(&state, id).await?)?;
+    let provider: String = sqlx::query_scalar("SELECT provider FROM channels WHERE id=$1")
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
     let mut tx = state.db.begin().await?;
-    crate::schedules::lock_channel(&mut tx, id).await?;
+    sqlx::query("SET LOCAL lock_timeout = '5s'")
+        .execute(&mut *tx)
+        .await?;
+    let gate = super::apps::oauth_gate(&mut tx, &provider, false).await?;
+    if gate.is_some_and(|(_, pending)| pending.is_some()) {
+        return Err(ApiError::conflict(
+            "Provider revocation is already in progress or needs confirmation",
+        ));
+    }
+    // Google revocation affects the account/project grant, not just one YouTube
+    // destination. Lock in the same order used by multi-channel scheduling.
+    let affected: Vec<Uuid> = if provider == "youtube" {
+        sqlx::query_scalar("SELECT id FROM channels WHERE provider='youtube' ORDER BY id")
+            .fetch_all(&mut *tx)
+            .await?
+    } else {
+        vec![id]
+    };
+    for channel_id in &affected {
+        crate::schedules::lock_channel(&mut tx, *channel_id).await?;
+    }
     sqlx::query("SELECT id FROM channels WHERE id=$1 FOR UPDATE")
         .bind(id)
         .fetch_one(&mut *tx)
         .await?;
     // Provider HTTP calls have a 60-second timeout. A crashed reply remains uncertain,
     // never retried automatically; it must not block disconnect forever.
-    sqlx::query("UPDATE provider_replies r SET state='uncertain',error='Reply process stopped; inspect the network before a new reply',updated_at=now() FROM provider_inbox i WHERE i.id=r.inbox_id AND i.channel_id=$1 AND r.state='sending' AND r.delivery_deadline<clock_timestamp()").bind(id).execute(&mut *tx).await?;
+    sqlx::query("UPDATE provider_replies r SET state='uncertain',error='Reply process stopped; inspect the network before a new reply',updated_at=now() FROM provider_inbox i WHERE i.id=r.inbox_id AND i.channel_id=ANY($1) AND r.state='sending' AND r.delivery_deadline<clock_timestamp()").bind(&affected).execute(&mut *tx).await?;
     let sending: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM publications WHERE channel_id=$1 AND state='sending') OR EXISTS(SELECT 1 FROM provider_replies r JOIN provider_inbox i ON i.id=r.inbox_id WHERE i.channel_id=$1 AND r.state='sending')",
+        "SELECT EXISTS(SELECT 1 FROM publications WHERE channel_id=ANY($1) AND state='sending') OR EXISTS(SELECT 1 FROM provider_replies r JOIN provider_inbox i ON i.id=r.inbox_id WHERE i.channel_id=ANY($1) AND r.state='sending')",
     )
-    .bind(id)
+    .bind(&affected)
     .fetch_one(&mut *tx)
     .await?;
     if sending {
@@ -182,18 +206,90 @@ pub async fn disconnect(
         ));
     }
     let channel = load_stored_channel_tx(&state, &mut tx, id).await.ok();
+    let revocation_id = channel.as_ref().and(gate.map(|_| Uuid::new_v4()));
+    let affected_channels = if provider == "youtube" && revocation_id.is_some() {
+        sqlx::query("UPDATE channels SET connection_status='reconnect_required',connection_error='Google grant may have been revoked; reconnect this channel' WHERE provider='youtube' AND id<>$1 AND connection_status='connected'")
+            .bind(id).execute(&mut *tx).await?.rows_affected()
+    } else {
+        0
+    };
+    if gate.is_some() {
+        sqlx::query("UPDATE provider_apps SET oauth_generation=oauth_generation+1,revocation_id=$2 WHERE provider=$1")
+            .bind(&provider)
+            .bind(revocation_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     sqlx::query("UPDATE channels SET encrypted_credentials=NULL,connection_status='disconnected',paused=true,connection_error=NULL WHERE id=$1").bind(id).execute(&mut *tx).await?;
     sqlx::query("UPDATE publications SET state='canceled',last_error='Channel disconnected by owner',updated_at=now() WHERE channel_id=$1 AND state='queued'").bind(id).execute(&mut *tx).await?;
     tx.commit().await?;
-    let revoked = if let Some(c) = channel {
-        match adapter_for(&c.app).await {
-            Ok(adapter) => adapter.revoke(&c).await.unwrap_or(false),
-            Err(_) => false,
+    let revoked = if let (Some(c), Some(revocation_id)) = (channel, revocation_id) {
+        // Keep the provider gate locked until remote I/O returns. The committed marker
+        // survives crashes and uncertain outcomes; an owner must resolve those manually.
+        let mut revoke_tx = state.db.begin().await?;
+        sqlx::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *revoke_tx)
+            .await?;
+        let gate = super::apps::oauth_gate(&mut revoke_tx, &provider, true).await?;
+        let revoked = if gate.is_some_and(|(_, pending)| pending == Some(revocation_id)) {
+            match adapter_for(&c.app).await {
+                Ok(adapter) => adapter.revoke(&c).await.unwrap_or(false),
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+        if revoked {
+            sqlx::query("UPDATE provider_apps SET revocation_id=NULL WHERE provider=$1 AND revocation_id=$2")
+                .bind(&provider)
+                .bind(revocation_id)
+                .execute(&mut *revoke_tx)
+                .await?;
         }
+        revoke_tx.commit().await?;
+        revoked
     } else {
         false
     };
+    let next_action = match (revoked, affected_channels > 0, revocation_id.is_some()) {
+        (true, true, _) => "Reconnect the other YouTube channels marked as needing reconnection.",
+        (true, false, _) => "No action needed",
+        (false, _, true) => {
+            "Remove beweft access in the provider account's connected-app settings, then confirm removal before connecting again."
+        }
+        (false, _, false) => {
+            "No remote revocation was attempted. Remove beweft access in the provider account's connected-app settings."
+        }
+    };
     Ok(data(
-        json!({"disconnected":true,"provider_revoked":revoked,"next_action":if revoked{"No action needed"}else{"Remove beweft access in the provider account's connected-app settings to complete remote revocation."}}),
+        json!({"disconnected":true,"provider_revoked":revoked,"channels_requiring_reconnection":affected_channels,"next_action":next_action}),
     ))
+}
+
+/// Explicit recovery after an unsupported, failed, or interrupted remote revoke.
+pub async fn acknowledge_revocation(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(provider): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>> {
+    auth.owner_session()?;
+    if body["access_removed"] != true {
+        return Err(ApiError::bad(
+            "Confirm that provider access was removed before connecting again",
+        ));
+    }
+    let mut tx = state.db.begin().await?;
+    let gate = super::apps::oauth_gate(&mut tx, &provider, false).await?;
+    if !gate.is_some_and(|(_, pending)| pending.is_some()) {
+        return Err(ApiError::conflict(
+            "There is no unresolved provider revocation",
+        ));
+    }
+    sqlx::query("UPDATE provider_apps SET oauth_generation=oauth_generation+1,revocation_id=NULL WHERE provider=$1")
+        .bind(&provider)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(data(json!({"revocation_acknowledged":true})))
 }

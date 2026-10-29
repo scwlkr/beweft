@@ -9,7 +9,6 @@ pub async fn start(
     auth.owner_session()?;
     let brand = uuid(&body, "brand_id")?;
     auth.brand(brand)?;
-    let app = app_config(&state, &provider).await?;
     let reconnect = body["reconnect_channel_id"]
         .as_str()
         .map(|v| {
@@ -32,6 +31,11 @@ pub async fn start(
     let state_token = crypto::random_secret();
     let correlation = crypto::random_secret();
     let verifier = crypto::random_secret();
+    let mut tx = state.db.begin().await?;
+    let generation = super::apps::require_open_oauth_gate(
+        super::apps::oauth_gate(&mut tx, &provider, false).await?,
+    )?;
+    let app = super::apps::app_config_tx(&state, &mut tx, &provider).await?;
     let redirect = format!(
         "{}/api/v1/connections/{provider}/callback",
         state.config.public_url
@@ -46,9 +50,10 @@ pub async fn start(
     )
     .map_err(ApiError::internal)?;
     sqlx::query("DELETE FROM connection_flows WHERE expires_at<now()")
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
-    sqlx::query("INSERT INTO connection_flows(id,provider,owner_id,brand_id,session_hash,state_hash,correlation_hash,encrypted_verifier,encrypted_app,reconnect_channel_id,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now()+interval '10 minutes')").bind(id).bind(&provider).bind(auth.owner_id).bind(brand).bind(session_hash(&headers)?).bind(crypto::digest(&state_token)).bind(crypto::digest(&correlation)).bind(encrypted).bind(encrypted_app).bind(reconnect).execute(&state.db).await?;
+    sqlx::query("INSERT INTO connection_flows(id,provider,owner_id,brand_id,session_hash,state_hash,correlation_hash,encrypted_verifier,encrypted_app,reconnect_channel_id,oauth_generation,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now()+interval '10 minutes')").bind(id).bind(&provider).bind(auth.owner_id).bind(brand).bind(session_hash(&headers)?).bind(crypto::digest(&state_token)).bind(crypto::digest(&correlation)).bind(encrypted).bind(encrypted_app).bind(reconnect).bind(generation).execute(&mut *tx).await?;
+    tx.commit().await?;
     let mut response =
         data(json!({"authorization_url":authorization_url,"flow_id":id})).into_response();
     response.headers_mut().insert(header::SET_COOKIE,format!("beweft_oauth={correlation}; HttpOnly; SameSite=Lax; Path=/api/v1/connections; Max-Age=600{}",if state.config.secure_cookie{"; Secure"}else{""}).parse().map_err(ApiError::internal)?);
@@ -193,12 +198,10 @@ pub async fn complete(
         .into_iter()
         .find(|c| c.identity.id == identity)
         .ok_or_else(|| ApiError::bad("Choose one of the authorized destinations"))?;
-    if !candidate
-        .app
-        .same_grant_authority(&app_config(&state, &candidate.app.provider).await?)
-    {
+    let provider: String = row.get("provider");
+    if candidate.app.provider != provider {
         return Err(ApiError::bad(
-            "Provider configuration changed; authorize again",
+            "Connection provider does not match; authorize again",
         ));
     }
     let brand: Uuid = row.get("brand_id");
@@ -206,6 +209,22 @@ pub async fn complete(
     let timezone = body["timezone"].as_str().unwrap_or("UTC");
     catalog::validate_timezone(timezone)?;
     let mut tx = state.db.begin().await?;
+    let generation = super::apps::require_open_oauth_gate(
+        super::apps::oauth_gate(&mut tx, &provider, false).await?,
+    )?;
+    if row.get::<Option<i64>, _>("oauth_generation") != Some(generation) {
+        return Err(ApiError::conflict(
+            "Provider access changed during authorization; start again",
+        ));
+    }
+    if !candidate
+        .app
+        .same_grant_authority(&super::apps::app_config_tx(&state, &mut tx, &provider).await?)
+    {
+        return Err(ApiError::bad(
+            "Provider configuration changed; authorize again",
+        ));
+    }
     let changed=sqlx::query("UPDATE connection_flows SET completed_at=now(),encrypted_candidates=NULL WHERE id=$1 AND completed_at IS NULL AND expires_at>now()").bind(id).execute(&mut *tx).await?.rows_affected();
     if changed != 1 {
         return Err(ApiError::conflict(
