@@ -25,7 +25,7 @@ export type JobHealth = { "manual_required": number; "oldest_due": string | null
 export type LoginRequest = { "email": string; "password": string; };
 export type ManualCompleteRequest = { "external_url"?: string | null; "note"?: string | null; };
 export type ManualGuidance = { "compose_url": string | null; "guidance": string; "id": string; "name": string; };
-export type Media = { "alt_text": string; "brand_id": string; "created_at": string; "id": string; "mime": string; "name": string; "size": number; "url": string; };
+export type Media = { "alt_text": string; "brand_id": string; "created_at": string; "id": string; "metadata_version": number; "mime": string; "name": string; "size": number; "url": string; };
 export type MediaLimits = { "available_bytes": number; "max_upload_bytes": number; "quota_bytes": number; "reserved_bytes": number; "used_bytes": number; };
 export type MediaMetadata = { "alt_text": string; "id": string; };
 export type OkResponse = { "ok": boolean; };
@@ -48,8 +48,8 @@ export type ReplacePublicationRequest = { "post_version": number; "publication_p
 export type ReplacedPublication = { "previous_publication_id": string; "publication": Publication; };
 export type RescheduleRequest = { "scheduled_at": string; };
 export type Resolution = "published" | "not_published";
-export type SchedulePostRequest = { "channel_ids": Array<string>; "request_id"?: string | null; "scheduled_at"?: string | null; "version": number; };
-export type ScheduleRequestIntent = { "channel_ids": Array<string>; "scheduled_at": string | null; "version": number; };
+export type SchedulePostRequest = { "channel_ids": Array<string>; "media_versions"?: Record<string, number> | null; "request_id"?: string | null; "scheduled_at"?: string | null; "version": number; };
+export type ScheduleRequestIntent = { "channel_ids": Array<string>; "media_versions": Record<string, number> | null; "scheduled_at": string | null; "version": number; };
 export type ScheduleRequestResult = { "brand_id": string; "post_id": string; "publications": Array<PublicationSummary>; "request": ScheduleRequestIntent; "request_id": string; };
 export type ScheduleRule = { "channel_id": string; "created_at": string; "days": Array<number>; "id": string; "time": string; "timezone": string; };
 export type SchedulingMode = "queue" | "exact";
@@ -62,7 +62,7 @@ export type UpdateBrandRequest = { "archived"?: boolean | null; "color"?: string
 export type UpdateChannelRequest = { "name"?: string | null; "paused"?: boolean | null; "target_platform"?: string | null; "timezone"?: string | null; };
 export type UpdateIdeaGroupRequest = { "color"?: string | null; "name"?: string | null; "position"?: number | null; };
 export type UpdateIdeaRequest = { "color"?: string | null; "group_id"?: string | null; "status"?: null | IdeaStatus; "tags"?: Array<string> | null; "text"?: string | null; "title"?: string | null; };
-export type UpdateMediaRequest = { "alt_text": string; };
+export type UpdateMediaRequest = { "alt_text": string; "metadata_version": number; };
 export type UpdatePostRequest = { "media_ids"?: Array<string> | null; "options"?: Record<string, unknown> | null; "text"?: string | null; "title"?: string | null; "variants"?: Array<PostVariant> | null; "version": number; };
 export type UpdateTemplateRequest = { "media_ids"?: Array<string> | null; "name"?: string | null; "options"?: Record<string, unknown> | null; "text"?: string | null; "title"?: string | null; "variants"?: Array<PostVariant> | null; "version": number; };
 export type WorkflowSummary = { "attention": number; "published": number; "scheduled": number; };
@@ -99,6 +99,7 @@ export interface ApiOperations {
   "POST /api/v1/media": { request: FormData; response: { "data": Media; }; query: { "brand_id": string; } };
   "GET /api/v1/media/limits": { request: undefined; response: { "data": MediaLimits; }; query: {  } };
   "DELETE /api/v1/media/{id}": { request: undefined; response: { "data": OkResponse; }; query: {  } };
+  "GET /api/v1/media/{id}": { request: undefined; response: { "data": Media; }; query: {  } };
   "PATCH /api/v1/media/{id}": { request: UpdateMediaRequest; response: { "data": Media; }; query: {  } };
   "GET /api/v1/media/{id}/file": { request: undefined; response: Blob; query: {  } };
   "GET /api/v1/posts": { request: undefined; response: { "data": Array<Post>; } | { "data": Array<Post>; "next_cursor": string | null; } | { "data": Array<PostSummary>; } | { "data": Array<PostSummary>; "next_cursor": string | null; }; query: { "brand_id"?: string; "limit"?: number; "cursor"?: string; "status"?: "draft"; "view"?: "summary"; } };

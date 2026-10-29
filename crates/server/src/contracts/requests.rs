@@ -163,6 +163,56 @@ pub struct SchedulePostRequest {
     /// Client-generated UUID retained for retries and recovery. Optional for legacy clients.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<Uuid>,
+    /// Expected metadata versions for the exact effective media set. Omit only for legacy behavior.
+    #[serde(
+        default,
+        deserialize_with = "schedule_media_versions",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub media_versions: Option<BTreeMap<Uuid, i64>>,
+}
+
+fn schedule_media_versions<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<BTreeMap<Uuid, i64>>, D::Error> {
+    use serde::de::{MapAccess, Visitor};
+    struct Versions;
+    impl<'de> Visitor<'de> for Versions {
+        type Value = BTreeMap<Uuid, i64>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a map from media UUIDs to integer versions")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut versions = BTreeMap::new();
+            while let Some((key, value)) = map.next_entry::<String, i64>()? {
+                let id = Uuid::parse_str(&key).map_err(A::Error::custom)?;
+                if versions.insert(id, value).is_some() {
+                    return Err(A::Error::custom("Duplicate media UUID"));
+                }
+            }
+            Ok(versions)
+        }
+    }
+    struct OptionalVersions;
+    impl<'de> Visitor<'de> for OptionalVersions {
+        type Value = Option<BTreeMap<Uuid, i64>>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("null or a map from media UUIDs to integer versions")
+        }
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_some<T: Deserializer<'de>>(
+            self,
+            deserializer: T,
+        ) -> Result<Self::Value, T::Error> {
+            deserializer.deserialize_map(Versions).map(Some)
+        }
+    }
+    deserializer.deserialize_option(OptionalVersions)
 }
 
 fn schedule_timestamp<'de, D: Deserializer<'de>>(

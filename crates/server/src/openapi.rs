@@ -231,6 +231,13 @@ pub fn build_document() -> Value {
         entry[method] = operation;
     }
     document["paths"] = Value::Object(paths);
+    // The media precondition is a UUID-keyed map of positive i64 versions,
+    // capped so a recovered request remains bounded.
+    for name in ["SchedulePostRequest", "ScheduleRequestIntent"] {
+        let versions = &mut document["components"]["schemas"][name]["properties"]["media_versions"];
+        versions["maxProperties"] = json!(1000);
+        versions["additionalProperties"]["minimum"] = json!(1);
+    }
     document["components"]["securitySchemes"] = json!({"session":{"type":"apiKey","in":"cookie","name":"beweft_session"},"bearer":{"type":"http","scheme":"bearer"}});
     document
 }
