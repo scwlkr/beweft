@@ -22,7 +22,7 @@ The brand and authentication follow-up passed `pnpm build` and all 55 isolated b
 
 The following are explicit unfinished workflows, not external provider blockers:
 
-- Ideas have title, notes, color, search, editing, and conversion to a draft. Board columns/status groups and tags are not implemented.
+- Ideas can be organized by stage, group, and tags, filtered on the board, edited, and converted to a draft. Deleting a group retains its ideas as ungrouped.
 - Draft duplication is implemented. Reusable custom templates and a template library are not implemented.
 - Queued publications retain immutable revisions and can be canceled, reordered in queue mode, and rescheduled. Editing their content with an atomic revision replacement is not implemented; editing a source draft does not silently rewrite queued history.
 - Manual handoff provides caption copying, per-file downloads, an optional published URL, and owner attestation. Network-specific launch links and guidance need a target-platform field on manual channels.
@@ -36,6 +36,7 @@ Media details allow editing an asset's description, with the server's 2,000-char
 Pending media edits are visible across the workspace and block scheduling when the asset is used by any selected channel variant. The composer checks storage and reads each affected asset under same-origin locks before scheduling; if the loaded description changed, it refreshes the display and requires another submission. Unavailable owner or intent storage blocks scheduling; a failed asset refresh blocks posts using that asset while unrelated media can still be scheduled. The displayed text is the last loaded description; independent browsers and API clients are outside this local lock boundary. NUL characters are rejected before creating a media intent. To recover an older NUL-containing intent, the owner explicitly checks it: only the server's specific NUL validation rejection for the identical stored payload permits release for correction. Generic errors and unchanged reads do not clear unknown outcomes.
 
 The separate request-ID scheduling integration must protect the reverse ordering too: an unknown schedule can remain in flight after a tab closes or reloads, so an ephemeral browser lock does not freeze its media descriptions. Require a server-side metadata-version precondition for the complete effective media union, bind it to the immutable request identity and receipt, and validate it atomically with snapshot creation. Test an unknown schedule followed by a media edit and same-ID recovery after reload; a later edit must never silently change the snapshot approved by that intent.
+Idea-group reads are independent of the workspace's required collections. If group metadata is unavailable, existing ideas remain editable and their group assignment is preserved; the group read can be retried. The board supports keyboard-accessible stage changes and filters and stacks its columns on narrow screens. Browser tests cover group and tag editing, retained ideas after group deletion, outage recovery, and a delayed old-brand response.
 
 ## Reply recovery
 

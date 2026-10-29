@@ -265,7 +265,9 @@ export default function App() {
                     <Ideas
                       brand={brand}
                       ideas={ideas.filter((i) =>
-                        matching(i.title + " " + i.text),
+                        matching(
+                          i.title + " " + i.text + " " + i.tags.join(" "),
+                        ),
                       )}
                       action={action}
                       pending={pending}

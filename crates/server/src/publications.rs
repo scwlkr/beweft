@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 const SELECT: &str = "SELECT (to_jsonb(p)-'lease_until')||jsonb_build_object('channel_name',c.name,'provider',c.provider) FROM publications p JOIN channels c ON c.id=p.channel_id";
-const SUMMARY: &str = "jsonb_build_object('id',p.id,'post_id',p.post_id,'brand_id',p.brand_id,'channel_id',p.channel_id,'channel_name',c.name,'provider',c.provider,'post_version',p.post_version,'scheduled_at',p.scheduled_at,'scheduling_mode',p.scheduling_mode,'state',p.state,'created_at',p.created_at,'updated_at',p.updated_at)";
+const SUMMARY: &str = "jsonb_build_object('id',p.id,'post_id',p.post_id,'brand_id',p.brand_id,'channel_id',p.channel_id,'channel_name',left(c.name,100),'provider',left(c.provider,64),'post_version',p.post_version,'scheduled_at',p.scheduled_at,'scheduling_mode',p.scheduling_mode,'state',p.state,'created_at',p.created_at,'updated_at',p.updated_at)";
 #[derive(Deserialize, Default)]
 pub struct PublicationListFilter {
     brand_id: Option<Uuid>,
@@ -31,13 +31,11 @@ pub async fn get_publication(db: &PgPool, id: Uuid) -> Result<Value> {
         .fetch_one(db)
         .await?)
 }
-pub(crate) async fn get_publication_summary(db: &PgPool, id: Uuid) -> Result<Value> {
-    Ok(sqlx::query_scalar(&format!(
-        "SELECT {SUMMARY} FROM publications p JOIN channels c ON c.id=p.channel_id WHERE p.id=$1"
-    ))
-    .bind(id)
-    .fetch_one(db)
-    .await?)
+pub(crate) async fn get_publication_summaries(db: &PgPool, ids: &[Uuid]) -> Result<Vec<Value>> {
+    let query = format!(
+        "SELECT {SUMMARY} FROM unnest($1::uuid[]) WITH ORDINALITY AS wanted(id,position) JOIN publications p ON p.id=wanted.id JOIN channels c ON c.id=p.channel_id ORDER BY wanted.position"
+    );
+    Ok(sqlx::query_scalar(&query).bind(ids).fetch_all(db).await?)
 }
 pub async fn list(
     State(state): State<AppState>,

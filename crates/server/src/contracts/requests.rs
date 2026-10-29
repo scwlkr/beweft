@@ -1,5 +1,5 @@
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Timelike, Utc};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use utoipa::ToSchema;
@@ -153,9 +153,38 @@ pub struct SchedulePostRequest {
     /// The revision displayed and approved by the caller. Conflicts if the locked draft has changed.
     pub version: i32,
     pub channel_ids: Vec<Uuid>,
-    /// Omit to reserve the next posting-rule slot. Supplying a time creates a fixed-date publication.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Omit for a posting-rule slot; an exact RFC3339 time accepts at most six fractional digits.
+    #[serde(
+        default,
+        deserialize_with = "schedule_timestamp",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub scheduled_at: Option<DateTime<Utc>>,
+    /// Client-generated UUID retained for retries and recovery. Optional for legacy clients.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<Uuid>,
+}
+
+fn schedule_timestamp<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<DateTime<Utc>>, D::Error> {
+    let Some(raw) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let time = DateTime::parse_from_rfc3339(&raw).map_err(D::Error::custom)?;
+    let fractional_digits = raw.split_once('.').map_or(0, |(_, fraction)| {
+        fraction
+            .split(['Z', 'z', '+', '-'])
+            .next()
+            .unwrap_or("")
+            .len()
+    });
+    if fractional_digits > 6 || time.nanosecond() >= 1_000_000_000 {
+        return Err(D::Error::custom(
+            "scheduled_at supports at most six fractional digits and no leap second",
+        ));
+    }
+    Ok(Some(time.with_timezone(&Utc)))
 }
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
