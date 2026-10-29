@@ -104,12 +104,11 @@ pub async fn finish_attempt(
     tx.commit().await?;
     Ok(true)
 }
-pub async fn run(state: AppState) -> anyhow::Result<()> {
+pub async fn run(state: AppState, id: String) -> anyhow::Result<()> {
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     };
-    let id = format!("worker-{}", Uuid::new_v4());
     let stopped = Arc::new(AtomicBool::new(false));
     let signal_stop = stopped.clone();
     let signal_task = tokio::spawn(async move {
