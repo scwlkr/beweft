@@ -6,7 +6,7 @@ qualification or completed release is claimed.
 
 ## Integration
 
-Integration branch: `codex/orchestrator-handoff`, provider-fence merge `e90403e`.
+Integration branch: `codex/orchestrator-handoff`, scheduling-receipt merge `6a351f0`.
 Main remains at durable-core PR #3. Open PRs #4–#8 preserve the original stack.
 Reviewed additions land through merge commits; the completed stack will land
 without squashing an ancestor beneath open descendants.
@@ -43,7 +43,7 @@ three active children plus the orchestrator. Each milestone freezes its SHA.
 
 | Lane | Checkpoint | Next acceptance boundary |
 | --- | --- | --- |
-| Core/providers A+B | Durable scheduling request receipts, migration 0009 | Concurrent/replayed requests, lost responses, rollback, exact timestamp normalization and bounded summary recovery; then production provider wiring and formats. |
+| Core/providers A+B | Scheduling receipts merged; metadata precondition contract next | Atomic metadata-version checks for exact selected-media snapshots; then production provider wiring and formats. |
 | Web C | PR #14 scheduling; #15 media descriptions; #16 idea organization | Media CAS fix `518d5e3` is back in implementation after review found a cross-view pending-save bypass and invalid-text recovery trap. Scheduling must use the real 0009 receipt API. Ideas and preserved manual guidance await review/integration. |
 | CLI/operations D+E | Self-host operations, based on named-worker health | Full image, fresh install, restart, safe backup/restore and upgrade rehearsal; then schedule receipt tools. |
 
@@ -58,14 +58,21 @@ New web scheduling writes persist a UUID and immutable normalized mutation.
 Backend request replay precedes current-version/time checks and returns original
 publication IDs even after cancellation/replacement. GET receipts return bounded
 publication summaries. A missing receipt cannot prove an in-flight write ended.
-PR #17 at `56fb0ba` passed its focused fixtures but fresh review found a pool
-exhaustion defect: dropping a timed-out SQLx lock query did not end its database
-wait. Nonblocking request admission passed fresh review at `ec5305f`; repeated
-retries leave receipt/auth reads usable. That review found one further receipt
-bound: provider-derived or existing channel names can exceed the client response
-limit. Explicit summary display-field bounds are being added.
+PR #17 passed fresh independent review at `55eab7c` and merged at `6a351f0`.
+Nonblocking admission leaves recovery/authentication reads usable under repeated
+same-key retries. Compact summary display fields cap channel names at 100 and
+provider labels at 64 Unicode characters, including for existing rows. Large
+escaped/multibyte label fixtures keep receipts below 100 KB with original IDs.
+Web and CLI consumers still require adoption; backend availability alone does
+not close the browser scheduling uncertainty finding.
 Timestamps accept at most six fractional digits and normalize exactly to UTC;
 client comparison must preserve microseconds, not truncate through Date.parse.
+
+The next schedule contract adds an optional normalized media-version map to the
+immutable request and receipt. New clients will supply the complete effective
+media union; the server will lock and check versions in the snapshot transaction.
+This is planned contract work, not yet implemented. It prevents an unknown
+schedule after reload from silently snapshotting later description edits.
 
 Media saves persist owner/brand/asset/base-version/text before PATCH. Unknown
 outcomes stay unresolved; same-CAS retry is explicit. A read at the base version
