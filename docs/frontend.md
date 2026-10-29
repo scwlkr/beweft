@@ -22,7 +22,7 @@ The brand and authentication follow-up passed `pnpm build` and all 55 isolated b
 
 The following are explicit unfinished workflows, not external provider blockers:
 
-- Ideas have title, notes, color, search, editing, and conversion to a draft. Board columns/status groups and tags are not implemented.
+- Ideas can be organized by stage, group, and tags, filtered on the board, edited, and converted to a draft. Deleting a group retains its ideas as ungrouped.
 - Draft duplication is implemented. Reusable custom templates and a template library are not implemented.
 - Queued publications retain immutable revisions and can be canceled, reordered in queue mode, and rescheduled. Editing their content with an atomic revision replacement is not implemented; editing a source draft does not silently rewrite queued history.
 - Manual handoff provides caption copying, per-file downloads, an optional published URL, and owner attestation. Network-specific launch links and guidance need a target-platform field on manual channels.
@@ -30,6 +30,8 @@ The following are explicit unfinished workflows, not external provider blockers:
 - YouTube exposes privacy, audience, synthetic-media disclosure, and category. It uses the post title as the public video title. License choice is not implemented.
 
 Direct provider setup, destination selection, reconnection/disconnection, metrics, inbox read/reply, and explicit metered-X sync controls are implemented in the web client against the provider slice contract. This is not a claim that any live provider account or publication has been verified.
+
+Idea-group reads are independent of the workspace's required collections. If group metadata is unavailable, existing ideas remain editable and their group assignment is preserved; the group read can be retried. The board supports keyboard-accessible stage changes and filters and stacks its columns on narrow screens. Browser tests cover group and tag editing, retained ideas after group deletion, outage recovery, and a delayed old-brand response.
 
 ## Reply recovery
 
