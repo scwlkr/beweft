@@ -191,9 +191,9 @@ impl Harness {
         let dir = std::env::temp_dir().join(format!("beweft-provider-db-{owner}"));
         std::fs::create_dir(&dir).unwrap();
         Self {
-            state: AppState {
-                db: pool,
-                config: Arc::new(Config {
+            state: AppState::new(
+                pool,
+                Arc::new(Config {
                     public_url: "http://localhost:3000".into(),
                     secure_cookie: false,
                     setup_secret: String::new(),
@@ -204,7 +204,7 @@ impl Harness {
                     fixture_delay_ms: 0,
                     encryption_key: Some([13; 32]),
                 }),
-            },
+            ),
             auth: Auth {
                 owner_id: owner,
                 email: "fixture".into(),

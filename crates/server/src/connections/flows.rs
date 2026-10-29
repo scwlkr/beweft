@@ -110,9 +110,16 @@ pub async fn callback(
     // Serialize the entire external exchange with disconnect and manual removal.
     // Old or pre-upgrade flows must fail before contacting the provider.
     let mut tx = state.db.begin().await?;
-    let generation = super::apps::require_open_oauth_gate(
-        super::apps::oauth_gate(&mut tx, &provider, false).await?,
-    )?;
+    let generation = super::apps::oauth_gate(&mut tx, &provider, false)
+        .await
+        .and_then(super::apps::require_open_oauth_gate)
+        .map_err(|error| {
+            if error.0 == axum::http::StatusCode::CONFLICT {
+                ApiError::conflict("This authorization was consumed. If provider access removal is pending, complete and confirm it; otherwise wait for the current operation to finish, then start a new authorization.")
+            } else {
+                error
+            }
+        })?;
     if row.get::<Option<i64>, _>("oauth_generation") != Some(generation) {
         return Err(ApiError::conflict(
             "Provider access changed during authorization; start again",

@@ -135,9 +135,8 @@ async fn provider_fetches_committed_media_during_post(h: &Harness) {
     sqlx::query("UPDATE publications SET state='sending',lease_until=clock_timestamp()+interval '5 minutes' WHERE id=$1").bind(id).execute(&h.state.db).await.unwrap();
     sqlx::query("INSERT INTO publication_attempts(id,publication_id,state,provider) VALUES($1,$2,'sending','facebook')").bind(attempt).bind(id).execute(&h.state.db).await.unwrap();
     let old = &h.state.config;
-    let state = AppState {
-        db: h.state.db.clone(),
-        config: Arc::new(Config {
+    let mut state = h.state.clone();
+    state.config = Arc::new(Config {
             public_url: "https://media.fixture".into(),
             secure_cookie: true,
             setup_secret: String::new(),
@@ -147,8 +146,7 @@ async fn provider_fetches_committed_media_during_post(h: &Harness) {
             media_quota_bytes: old.media_quota_bytes,
             fixture_delay_ms: 0,
             encryption_key: old.encryption_key,
-        }),
-    };
+        });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     *h.provider.callback_origin.lock().unwrap() =
         format!("http://{}", listener.local_addr().unwrap());

@@ -115,6 +115,7 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
 
     let (_, pending_state, pending_cookie) = start(&client, &base, &session, brand, channel).await;
     let (_, after_state, after_cookie) = start(&client, &base, &session, brand, channel).await;
+    let (_, busy_state, busy_cookie) = start(&client, &base, &session, brand, channel).await;
     let (active_flow, active_state, active_cookie) =
         start(&client, &base, &session, brand, channel).await;
     h.provider.exchange_block.store(1, Ordering::SeqCst);
@@ -127,6 +128,23 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
     )
     .await
     .unwrap();
+    let busy = callback(&busy_state, &busy_cookie).send().await.unwrap();
+    assert_eq!(busy.status(), StatusCode::CONFLICT);
+    let body: Value = busy.json().await.unwrap();
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("consumed") && message.contains("start a new authorization"));
+    assert_eq!(
+        callback(&busy_state, &busy_cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        h.provider.exchange_requests.load(Ordering::SeqCst),
+        before + 1
+    );
     assert_eq!(
         disconnect().send().await.unwrap().status(),
         StatusCode::CONFLICT

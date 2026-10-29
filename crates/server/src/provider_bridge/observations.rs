@@ -7,6 +7,12 @@ pub async fn sync(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>> {
     auth.scope("publishing:write")?;
+    // A sync keeps one connection through refresh and network reads. Reserve at
+    // least one pool slot for other work and reject excess before acquiring one.
+    let _permit = state
+        .sync_slots
+        .try_acquire()
+        .map_err(|_| ApiError::conflict("Sync capacity is busy; try again shortly"))?;
     auth.brand(catalog::channel_brand(&state, id).await?)?;
     // Keep the nonblocking sync lock across the separately committed refresh and
     // the downstream sync, using one pool connection throughout. A cancelled

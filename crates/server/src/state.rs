@@ -4,6 +4,7 @@ use std::{path::PathBuf, sync::Arc};
 pub struct AppState {
     pub db: PgPool,
     pub config: Arc<Config>,
+    pub(crate) sync_slots: Arc<tokio::sync::Semaphore>,
 }
 pub struct Config {
     pub public_url: String,
@@ -17,6 +18,16 @@ pub struct Config {
     pub encryption_key: Option<[u8; 32]>,
 }
 impl AppState {
+    /// Every clone shares a sync budget derived from this pool's capacity.
+    pub fn new(db: PgPool, config: Arc<Config>) -> Self {
+        let slots = db.options().get_max_connections().saturating_sub(1) as usize;
+        Self {
+            db,
+            config,
+            sync_slots: Arc::new(tokio::sync::Semaphore::new(slots)),
+        }
+    }
+
     pub async fn from_env() -> anyhow::Result<Self> {
         let public_url =
             std::env::var("BEWEFT_PUBLIC_URL").unwrap_or_else(|_| "http://localhost:3000".into());
@@ -63,10 +74,7 @@ impl AppState {
             .connect(&std::env::var("DATABASE_URL")?)
             .await?;
         sqlx::migrate!("../../migrations").run(&db).await?;
-        Ok(Self {
-            db,
-            config: Arc::new(config),
-        })
+        Ok(Self::new(db, Arc::new(config)))
     }
 }
 
