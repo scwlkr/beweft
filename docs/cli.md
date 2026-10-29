@@ -36,14 +36,62 @@ beweft post --json - <<'JSON'
 JSON
 ```
 
-Replace example IDs with actual IDs. `draft-create` creates a draft only.
-`draft-update` requires the current version. `schedule` requires the post ID,
-version, channel IDs and an explicit `intent`: `queue` omits `scheduled_at`
-and reserves the next posting-rule slot; `exact` supplies a future timestamp
-with an offset. Scheduling can publish when the job is due. The `drafts`,
-`media`, `queue`, `history`, `post`, `publication`, `attempts` and `health`
-commands inspect authoritative server state. The `api METHOD /path` escape
+Replace example IDs with actual IDs. `draft-create` creates a draft only;
+`draft-update` requires the current version. The `api METHOD /path` escape
 hatch is limited to the same API origin and bearer scopes.
+
+Before using `schedule`, read the post and selected channels, review the
+content and determine the effective media for each selected channel. A
+variant's media list overrides the post's base list, including an empty list.
+Use `media` to find each effective media item's `metadata_version`. The named
+command requires an explicit `media_versions` object with the complete union
+of those IDs and versions; use `{}` when there is no effective media. The
+server checks the set and versions atomically when it creates snapshots.
+
+Generate a UUID yourself and **persist it together with the exact approved
+post ID, brand ID and body before sending**. Do not reconstruct the body from
+current media or change the timestamp on retry. `schedule` also requires an
+explicit `intent`: `queue` omits `scheduled_at` and reserves the next
+posting-rule slot; `exact` supplies a future RFC3339 timestamp with an offset
+and at most six fractional digits. Use `schedules` with `channel_id` to inspect
+the posting rules. Scheduling can publish when the job is due.
+
+For example, save the following as `schedule.json` after replacing all example
+IDs, version, time and media map with the reviewed values:
+
+```json
+{"id":"00000000-0000-0000-0000-000000000001","intent":"exact","body":{"version":1,"channel_ids":["00000000-0000-0000-0000-000000000002"],"scheduled_at":"2099-01-02T12:34:56.123456-05:30","request_id":"00000000-0000-0000-0000-000000000003","media_versions":{}}}
+```
+
+```sh
+beweft schedules --json - <<'JSON'
+{"channel_id":"00000000-0000-0000-0000-000000000002"}
+JSON
+beweft schedule --json schedule.json
+beweft schedule-request --json - <<'JSON'
+{"request_id":"00000000-0000-0000-0000-000000000003"}
+JSON
+```
+
+For an unresolved request that should no longer schedule, `schedule-retire`
+takes the same saved `request_id` as a top-level argument and a body with
+`post_id`, `brand_id`, `version`, `channel_ids`, `media_versions` and, for an
+exact schedule, the same `scheduled_at`. It returns the existing receipt if
+one already exists. A successful retirement of an unused request creates a
+terminal `schedule_request_retired` rejection with no publications, so a
+delayed original cannot schedule. **Retiring an accepted request does not
+cancel its publications.** A lost retirement response is also checked using
+`schedule-request`.
+
+For the saved example above, the retirement input would be:
+
+```json
+{"request_id":"00000000-0000-0000-0000-000000000003","body":{"post_id":"00000000-0000-0000-0000-000000000001","brand_id":"00000000-0000-0000-0000-000000000004","version":1,"channel_ids":["00000000-0000-0000-0000-000000000002"],"scheduled_at":"2099-01-02T12:34:56.123456-05:30","media_versions":{}}}
+```
+
+Save that object as `retire.json` using the original saved values, then run
+`beweft schedule-retire --json retire.json` only when explicitly retiring the
+request.
 
 The `schedule` result is a compact summary for each committed publication,
 including its ID, state and timing. Use `publication` to read its complete
@@ -65,10 +113,17 @@ record and `attempts` for its attempt history. Use `media` to inspect the
 scoped library after an upload response is lost, and follow every relevant
 page before deciding what to do next.
 
-Writes are not automatically retried. If a request times out or its response is
-lost, its outcome can be unknown. Inspect the post, queue, history and attempts
-and resolve the outcome before retrying; an immediate absence alone is not proof
-that an in-flight request did not commit.
+Writes are not automatically retried. For an unknown schedule result, retain
+the saved ID and body and read `schedule-request`. An `accepted` receipt
+identifies the original publications, including their current states. A
+`rejected` receipt is terminal and has no publications; inspect its error code
+before reviewing a corrected intent. An in-progress response means another
+operation still owns the request. A 404 can mean missing or inaccessible and
+does not prove an in-flight write failed. Wait, look up the same ID, deliberately
+replay the same saved schedule, or explicitly retire that same intent; do not
+create a replacement ID on the basis of absence. The server normalizes receipt
+timestamps and channel ordering; it compares equivalent normalized values.
+Other writes can also have unknown outcomes; inspect their authoritative state.
 
 For known API rejection codes, the CLI and MCP return fixed guidance such as a
 text limit or missing posting schedule. They never display remote error messages
@@ -129,13 +184,18 @@ needs permission to create and drop test databases. `BEWEFT_TEST_BIN_DIR` select
 another directory containing the binaries.
 
 ```sh
-cargo build -p beweft-server --bin beweft-server -p beweft-cli
+cargo build -p beweft-server --bin beweft-server
+cargo build -p beweft-cli --bin beweft
 python3 crates/cli/tests/integration.py
 ```
 
+For only the scheduling recovery scenario, set `BEWEFT_CLI_SCHEDULE_ONLY=1`
+when running the harness.
+
 The harness removes its own database, temporary files, processes and local HTTP
 fixtures when it finishes. It covers scoped rejection, drafts and scheduling,
-readback after a committed response is lost, token-file permissions, redirect
+receipt lookup and same-ID replay after a committed response is lost, retirement,
+token-file permissions, redirect
 refusal, MCP protocol errors and rate limiting, and a symlink replacement during
 an upload. It also checks recovery of a committed upload with a lost response
 and complete pagination of 170 large drafts and scoped queue, history and media

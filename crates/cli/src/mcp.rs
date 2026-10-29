@@ -90,7 +90,7 @@ pub async fn serve(api: Api) -> Result<()> {
                 {
                     state = 1;
                     Ok(
-                        json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"beweft","version":env!("CARGO_PKG_VERSION")},"instructions":"Draft actions never schedule. Scheduling requires explicit intent and version. Writes are never retried; inspect authoritative state after unknown outcomes."}),
+                        json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"beweft","version":env!("CARGO_PKG_VERSION")},"instructions":"Draft actions never schedule. Before scheduling, save the explicit request UUID and exact approved body, including effective media versions. Writes are never retried automatically. After an unknown schedule outcome, read schedule_request and keep the same saved ID and body. A 404 or in-progress result is unresolved; accepted receipts identify the original publications. Explicit schedule_retire never cancels accepted publications."}),
                     )
                 } else {
                     Err((-32602, "Invalid initialize parameters"))
