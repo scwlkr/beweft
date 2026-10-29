@@ -65,7 +65,7 @@ def run():
                 data=None if body is None else json.dumps(body).encode(), headers=headers,
                 method=method or ("POST" if body is not None else "GET"))
             try:
-                with client.open(request, timeout=12) as result:
+                with client.open(request, timeout=20) as result:
                     return result.status, result.read()
             except urllib.error.HTTPError as error:
                 return error.code, error.read()
@@ -100,7 +100,13 @@ def run():
             equivalent = {**body, "channel_ids": channels[::-1], "scheduled_at": alternate}
             path = f"/posts/{post['id']}/schedule?view=summary"
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                first, second = list(pool.map(lambda data: call(path, data), [body, equivalent]))
+                concurrent_results = list(pool.map(lambda data: response(path, data), [body, equivalent]))
+            assert any(status == 200 for status, _ in concurrent_results)
+            for status, raw in concurrent_results:
+                assert status in (200, 409), (status, raw[:400])
+                if status == 409:
+                    assert json.loads(raw)["error"]["code"] == "schedule_request_in_progress"
+            first, second = call(path, body), call(path, equivalent)
             assert [x["id"] for x in first] == [x["id"] for x in second]
             assert sql(f"SELECT count(*) FROM publications WHERE post_id='{post['id']}'") == "2"
             assert [x["channel_id"] for x in first] == sorted(channels)
@@ -141,8 +147,9 @@ def run():
             replay = call(f"/posts/{lost['id']}/schedule?view=summary", lost_body)
             assert [p["id"] for p in recovered["publications"]] == [p["id"] for p in replay]
 
-            # Hold the channel lock so the first POST is in-flight but cannot
-            # commit. A missing GET is inconclusive; the same-key retry waits.
+            # Hold the original on its channel lock. More than ten same-key
+            # retries must fail promptly without leaving database lock waiters
+            # behind or exhausting the ten-connection application pool.
             pending_post = call("/posts", {"brand_id": brand, "text": "In flight"})
             pending_key = str(uuid.uuid4())
             pending_body = {"version": 1, "channel_ids": [channels[0]], "scheduled_at": timestamp(dt.timedelta(hours=5)), "request_id": pending_key}
@@ -153,8 +160,8 @@ def run():
             while locker.stdout.readline().strip() != "held":
                 assert locker.poll() is None, "fixture lock failed"
             pending_path = f"/posts/{pending_post['id']}/schedule?view=summary"
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                one = pool.submit(call, pending_path, pending_body)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=14) as pool:
+                original = pool.submit(call, pending_path, pending_body)
                 for _ in range(100):
                     waiting = sql("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%pg_advisory_xact_lock%')")
                     if waiting == "t":
@@ -163,47 +170,38 @@ def run():
                 else:
                     raise AssertionError("schedule did not wait on the fixture channel lock")
                 call(f"/schedule-requests/{pending_key}", expected=404)
-                two = pool.submit(call, pending_path, pending_body)
-                time.sleep(0.2)
-                assert not one.done() and not two.done()
+                started = time.monotonic()
+                retries = [pool.submit(call, pending_path, pending_body, expected=409) for _ in range(12)]
+                for retry in retries:
+                    assert retry.result(timeout=3)["error"]["code"] == "schedule_request_in_progress"
+                assert time.monotonic() - started < 3, "same-key retries did not fail promptly"
+                for _ in range(3):
+                    assert call(pending_path, pending_body, expected=409)["error"]["code"] == "schedule_request_in_progress"
+                # Auth and the receipt endpoint still have DB capacity while the
+                # original owns the request key and remains blocked on channel.
+                started = time.monotonic()
+                assert call("/auth/me")["email"] == "schedule@example.invalid"
+                call(f"/schedule-requests/{pending_key}", expected=404)
+                assert time.monotonic() - started < 2, "receipt or auth starved"
+                waiters = sql("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%pg_advisory_xact_lock%'")
+                assert waiters == "1", ("retry queries remained blocked", waiters)
+                # The previous timed-out queries remained on PostgreSQL for
+                # more than seven seconds. Confirm that none persist later.
+                time.sleep(7.2)
+                assert call("/auth/me")["email"] == "schedule@example.invalid"
+                call(f"/schedule-requests/{pending_key}", expected=404)
+                waiters = sql("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%pg_advisory_xact_lock%'")
+                assert waiters == "1", ("retry queries remained blocked", waiters)
+                assert not original.done()
                 locker.stdin.write("COMMIT;\n\\q\n")
                 locker.stdin.flush()
                 locker.wait(timeout=5)
                 locker = None
-                first, second = one.result(timeout=10), two.result(timeout=10)
+                first = original.result(timeout=10)
+            second = call(pending_path, pending_body)
             assert [x["id"] for x in first] == [x["id"] for x in second]
-            assert len(call(f"/schedule-requests/{pending_key}")["publications"]) == 1
-
-            # A bounded wait must report an unresolved outcome while the
-            # original transaction can still commit; retry the same UUID later.
-            timeout_post = call("/posts", {"brand_id": brand, "text": "Long request"})
-            timeout_key = str(uuid.uuid4())
-            timeout_body = {"version": 1, "channel_ids": [channels[0]], "scheduled_at": timestamp(dt.timedelta(hours=9)), "request_id": timeout_key}
-            locker = subprocess.Popen(["docker", "exec", "-i", CONTAINER, "psql", "-X", "-qAt", "-U", USER, "-d", DB,
-                                       "-v", "ON_ERROR_STOP=1"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-            locker.stdin.write(f"BEGIN; SELECT pg_advisory_xact_lock(hashtextextended('{channels[0]}',0)); SELECT 'held';\n")
-            locker.stdin.flush()
-            while locker.stdout.readline().strip() != "held":
-                assert locker.poll() is None, "fixture lock failed"
-            timeout_path = f"/posts/{timeout_post['id']}/schedule?view=summary"
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                original = pool.submit(call, timeout_path, timeout_body)
-                for _ in range(100):
-                    if sql("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%pg_advisory_xact_lock%')") == "t":
-                        break
-                    time.sleep(0.05)
-                else:
-                    raise AssertionError("long request did not wait on channel lock")
-                uncertain = call(timeout_path, timeout_body, expected=409)
-                assert uncertain["error"]["code"] == "schedule_request_in_progress"
-                call(f"/schedule-requests/{timeout_key}", expected=404)
-                locker.stdin.write("COMMIT;\n\\q\n")
-                locker.stdin.flush()
-                locker.wait(timeout=5)
-                locker = None
-                committed = original.result(timeout=10)
-            assert call(timeout_path, timeout_body)[0]["id"] == committed[0]["id"]
-            assert sql(f"SELECT count(*) FROM publications WHERE post_id='{timeout_post['id']}'") == "1"
+            assert [x["id"] for x in call(f"/schedule-requests/{pending_key}")["publications"]] == [x["id"] for x in first]
+            assert sql(f"SELECT count(*) FROM publications WHERE post_id='{pending_post['id']}'") == "1"
 
             # Cancellation/replacement and a newer draft cannot change which
             # publication IDs the original intent returns.
@@ -311,7 +309,7 @@ def run():
             call(f"/brands/{brand}", {"archived": True}, method="PATCH")
             assert [p["id"] for p in call(path, body)] == [p["id"] for p in result["publications"]]
             call(f"/posts/{different['id']}/schedule", {"version": 1, "channel_ids": [channels[0]], "scheduled_at": timestamp(), "request_id": str(uuid.uuid4())}, expected=409)
-            print("PASS same-key concurrency, lost response, in-flight 404/retry, rollback, scope, replacement, precision and 50-channel bounded recovery")
+            print("PASS prompt repeated same-key retries preserve pool capacity and all scheduling recovery invariants")
         finally:
             if locker is not None:
                 locker.stdin.write("ROLLBACK;\n\\q\n")

@@ -231,21 +231,18 @@ pub async fn schedule_post(
     auth.brand(brand)?;
     let mut tx = state.db.begin().await?;
     if let Some(request_id) = request_id {
-        // Only equal owner/key requests serialize here; GET remains read-only and
-        // can return an inconclusive 404 while this transaction is in flight.
-        let lock = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
-            .bind(format!("schedule-request:{}:{request_id}", auth.owner_id))
-            .execute(&mut *tx);
-        match tokio::time::timeout(std::time::Duration::from_secs(5), lock).await {
-            Ok(result) => {
-                result?;
-            }
-            Err(_) => {
-                return Err(ApiError::conflict_code(
-                    "schedule_request_in_progress",
-                    "This scheduling request is still in progress. Check its status or retry with the same request ID.",
-                ));
-            }
+        // A same-key retry must not leave a blocked PostgreSQL query behind:
+        // if the original owns the key, reject promptly and keep GET usable.
+        let admitted: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))")
+                .bind(format!("schedule-request:{}:{request_id}", auth.owner_id))
+                .fetch_one(&mut *tx)
+                .await?;
+        if !admitted {
+            return Err(ApiError::conflict_code(
+                "schedule_request_in_progress",
+                "This scheduling request is still in progress. Check its status or retry with the same request ID.",
+            ));
         }
         let previous = sqlx::query("SELECT post_id,brand_id,post_version,channel_ids,scheduled_at FROM schedule_requests WHERE owner_id=$1 AND request_id=$2")
             .bind(auth.owner_id).bind(request_id).fetch_optional(&mut *tx).await?;
