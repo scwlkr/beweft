@@ -61,6 +61,7 @@ export const ScheduleIntent = z
     rejection_code: z.string().optional(),
     observed_publication_ids: z.array(z.string().uuid()).optional(),
     observed_publications: z.array(ObservedPublication).max(1000).optional(),
+    unverified_publication_ids: z.array(z.string().uuid()).max(1000).optional(),
     active_attempt_id: z.string().uuid().optional(),
   })
   .superRefine((intent, context) => {
@@ -97,6 +98,20 @@ export const ScheduleIntent = z
       context.addIssue({
         code: "custom",
         message: "Invalid observed publication bindings",
+      });
+    if (
+      intent.unverified_publication_ids &&
+      (new Set(intent.unverified_publication_ids).size !==
+        intent.unverified_publication_ids.length ||
+        intent.unverified_publication_ids.some(
+          (id) =>
+            id !== id.toLowerCase() ||
+            !intent.observed_publication_ids?.includes(id),
+        ))
+    )
+      context.addIssue({
+        code: "custom",
+        message: "Invalid unverified publication identities",
       });
     if (
       (intent.mode === "exact" &&
@@ -182,6 +197,8 @@ function persistScheduleIntent(key: string, intent: ScheduleIntent) {
     stored.rejection !== intent.rejection ||
     stored.rejection_code !== intent.rejection_code ||
     stored.active_attempt_id !== intent.active_attempt_id ||
+    JSON.stringify(stored.unverified_publication_ids) !==
+      JSON.stringify(intent.unverified_publication_ids) ||
     JSON.stringify(stored.observed_publications) !==
       JSON.stringify(intent.observed_publications) ||
     JSON.stringify(stored.observed_publication_ids) !==
@@ -401,6 +418,17 @@ function hasPublicationEvidence(intent: ScheduleIntent) {
     intent.observed_publications?.length
   );
 }
+function unverifiedPublicationIds(intent: ScheduleIntent) {
+  const bound = new Set(
+    (intent.observed_publications ?? []).map((row) => row.publication_id),
+  );
+  return [
+    ...new Set([
+      ...(intent.unverified_publication_ids ?? []),
+      ...(intent.observed_publication_ids ?? []).filter((id) => !bound.has(id)),
+    ]),
+  ].sort();
+}
 function analyzePublicationRows(intent: ScheduleIntent, rows: unknown[]) {
   const channels = new Set(intent.channel_ids);
   const ids = new Set<string>(),
@@ -454,7 +482,8 @@ function matchesObservedPublications(
   rows: PublicationSummary[],
 ) {
   const analyzed = analyzePublicationRows(intent, rows);
-  if (!analyzed.complete) return false;
+  if (!analyzed.complete || unverifiedPublicationIds(intent).length)
+    return false;
   const byChannel = new Map(
     analyzed.bindings.map((row) => [row.channel_id, row.publication_id]),
   );
@@ -471,6 +500,7 @@ async function recordPublicationObservations(
   intent: ScheduleIntent,
   rows: unknown[],
   session: ApiSession,
+  verifiedId?: string,
 ) {
   const analyzed = analyzePublicationRows(intent, rows);
   return withWorkspaceSession(session, () => {
@@ -481,6 +511,7 @@ async function recordPublicationObservations(
       );
     const previous = saved.observed_publications ?? [];
     const legacyIds = saved.observed_publication_ids ?? [];
+    const unverified = new Set(unverifiedPublicationIds(saved));
     const bindings = [...previous];
     const keys = new Set(
       previous.map((row) => `${row.channel_id}:${row.publication_id}`),
@@ -520,6 +551,13 @@ async function recordPublicationObservations(
       byChannel.set(row.channel_id, row.publication_id);
       byId.set(row.publication_id, row.channel_id);
     }
+    if (
+      verifiedId &&
+      !mismatch &&
+      analyzed.bindings.length === 1 &&
+      analyzed.bindings[0].publication_id === verifiedId
+    )
+      unverified.delete(verifiedId);
     bindings.sort(
       (a, b) =>
         a.channel_id.localeCompare(b.channel_id) ||
@@ -536,6 +574,9 @@ async function recordPublicationObservations(
       ...saved,
       ...(bindings.length ? { observed_publications: bindings } : {}),
       ...(ids.length ? { observed_publication_ids: ids } : {}),
+      unverified_publication_ids: unverified.size
+        ? [...unverified].sort()
+        : undefined,
       ...(mismatch
         ? {
             uncertain: true,
@@ -549,6 +590,56 @@ async function recordPublicationObservations(
     window.dispatchEvent(new Event(scheduleEvent));
     return { ...analyzed, mismatch, saved: updated };
   });
+}
+// Earlier clients saved only publication IDs. Check their channel bindings
+// against independent owner-scoped summaries before trusting a receipt.
+async function verifyLegacyPublicationBindings(
+  key: string,
+  intent: ScheduleIntent,
+  session: ApiSession,
+  signal?: AbortSignal,
+) {
+  const saved = await requireSavedSchedule(key, intent, session, signal);
+  const ids = unverifiedPublicationIds(saved);
+  for (let offset = 0; offset < ids.length; offset += 5) {
+    await Promise.all(
+      ids.slice(offset, offset + 5).map(async (id) => {
+        const rows = await api(
+          `/publications?brand_id=${encodeURIComponent(intent.post.brand_id)}&id=${encodeURIComponent(id)}&view=summary`,
+          z.array(z.unknown()),
+          "GET",
+          undefined,
+          signal,
+        );
+        const analyzed = analyzePublicationRows(intent, rows);
+        if (
+          rows.length !== 1 ||
+          analyzed.bindings.length !== 1 ||
+          analyzed.bindings[0].publication_id !== id ||
+          analyzed.mismatch
+        ) {
+          if (analyzed.bindings.length)
+            await recordPublicationObservations(key, intent, rows, session);
+          throw new Error(
+            "An earlier publication could not be verified. Check the original schedule again.",
+          );
+        }
+        const observed = await recordPublicationObservations(
+          key,
+          intent,
+          rows,
+          session,
+          id,
+        );
+        if (observed.mismatch)
+          throw new ApiError(
+            "The server record does not match the observed publications.",
+            409,
+            "schedule_request_conflict",
+          );
+      }),
+    );
+  }
 }
 export async function sendScheduleIntent(
   key: string,
@@ -710,6 +801,7 @@ export async function inspectScheduleIntent(
 ) {
   if (!intent.request_contract) return { kind: "legacy" as const };
   requireWorkspaceSession(session);
+  await verifyLegacyPublicationBindings(key, intent, session, signal);
   let receipt: unknown;
   try {
     receipt = await api(
@@ -794,6 +886,8 @@ async function matchScheduleReceipt(
     }
     return { kind: "rejected" as const, error: receipt.error };
   }
+  if (unverifiedPublicationIds(observed.saved).length)
+    return { kind: "partial" as const, publications: observed.publications };
   if (
     receipt.error ||
     (observed.complete &&
@@ -821,6 +915,7 @@ export async function retireScheduleIntent(
     throw new Error("This older schedule cannot be stopped safely here.");
   signal?.throwIfAborted();
   requireWorkspaceSession(session);
+  await verifyLegacyPublicationBindings(key, intent, session, signal);
   const receipt = await api(
     `/schedule-requests/${intent.id}/retire`,
     z.unknown(),

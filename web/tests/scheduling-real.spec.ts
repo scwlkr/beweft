@@ -1595,3 +1595,101 @@ test("a complete matching receipt safely resolves a partially observed POST", as
     expect(f.patches()).toBe(1);
   });
 });
+
+for (const swapped of [false, true]) {
+  test(`legacy ID-only proof is independently verified before ${swapped ? "a swapped" : "a matching"} receipt`, async () => {
+    await withWorkspace(async (page, context, write) => {
+      const f = await twoChannelSetup(page, context, write);
+      let originals: any[] = [],
+        failSummary = !swapped,
+        checks = 0;
+      await page.route(routeFor(f.post.id), async (route) => {
+        const response = await route.fetch();
+        expect(response.ok(), await response.text()).toBe(true);
+        originals = (await response.json()).data;
+        await route.abort("failed");
+      });
+      await page.route(/\/api\/v1\/publications\?.*\bid=/, (route) => {
+        checks++;
+        if (failSummary)
+          return route.fulfill({
+            status: 503,
+            json: {
+              error: { code: "unavailable", message: "Summary unavailable" },
+            },
+          });
+        return route.continue();
+      });
+      if (swapped) {
+        await page.route("**/api/v1/schedule-requests/*", async (route) => {
+          const response = await route.fetch();
+          expect(response.ok(), await response.text()).toBe(true);
+          const data = (await response.json()).data;
+          const [first, second] = data.publications;
+          [first.channel_id, second.channel_id] = [
+            second.channel_id,
+            first.channel_id,
+          ];
+          await route.fulfill({ json: { data } });
+        });
+      }
+      await start(page);
+      await expect(
+        page.getByRole("button", { name: "Check scheduling outcome" }),
+      ).toBeEnabled();
+      await page.evaluate(
+        ({ key, ids }) => {
+          const saved = JSON.parse(localStorage.getItem(key)!);
+          saved.observed_publication_ids = ids;
+          delete saved.observed_publications;
+          localStorage.setItem(key, JSON.stringify(saved));
+        },
+        { key: f.key, ids: originals.map((row) => row.id).sort() },
+      );
+      await page.reload();
+      await page
+        .getByRole("button", { name: "Review pending schedule" })
+        .click();
+      await page
+        .getByRole("button", { name: "Check scheduling outcome" })
+        .click();
+      if (!swapped) {
+        await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+          "Summary unavailable",
+        );
+        expect((await pending(page, f.key)).observed_publication_ids).toEqual(
+          originals.map((row) => row.id).sort(),
+        );
+        failSummary = false;
+        await page
+          .getByRole("button", { name: "Check scheduling outcome" })
+          .click();
+        await expect(
+          page.getByText(/original request is confirmed/),
+        ).toBeVisible();
+        expect(await pending(page, f.key)).toBeNull();
+      } else {
+        await expect(
+          page.getByRole("status").getByText(/server record does not match/),
+        ).toBeVisible();
+        const saved = await pending(page, f.key);
+        expect(saved.observed_publications).toEqual(
+          expect.arrayContaining(
+            originals.map((row) => ({
+              channel_id: row.channel_id,
+              publication_id: row.id,
+            })),
+          ),
+        );
+        expect(saved.rejection_code).toBe("schedule_request_conflict");
+      }
+      expect(checks).toBeGreaterThanOrEqual(2);
+      expect(
+        await read(
+          context,
+          `/publications?brand_id=${f.brand.id}&view=summary`,
+        ),
+      ).toHaveLength(2);
+    });
+  });
+}
