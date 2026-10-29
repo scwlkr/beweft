@@ -48,8 +48,8 @@ three active children plus the orchestrator. Each milestone freezes its SHA.
 
 | Lane | Checkpoint | Next acceptance boundary |
 | --- | --- | --- |
-| Core/providers A+B | Scheduling receipts merged; metadata precondition contract next | Atomic metadata-version checks for exact selected-media snapshots; then production provider wiring and formats. |
-| Web C | PR #14 scheduling; #15 media descriptions; #16 idea organization | PR #15 `a8069f1` fixed pending-save bypass and NUL recovery, but fresh review found a malformed asset-specific intent blocks unrelated assets; that narrow fix is underway. Ideas #16 is merged. Scheduling and preserved manual guidance await integration. |
+| Core/providers A+B | PR #19 metadata preconditions reviewed; provider wiring started | Integrate #15/#19, then qualify production routes and worker dispatch; practical formats still follow. |
+| Web C | PR #14 scheduling; #15 media descriptions; #16 idea organization | PR #15 `bde3d2e` isolates corrupt canonical asset records, but fresh review found a scoped key with no asset separator was ignored; namespace classification and a truthful-status test assertion are being corrected. Ideas #16 is merged. Scheduling and preserved manual guidance await integration. |
 | CLI/operations D+E | PR #18 `89edd85`, full image and rehearsal | Independent review found interruption/shutdown races, mutable image identity and a nondurable restored-worker hold; corrections and fresh review precede delivery. |
 
 Core owns server/worker/providers/migrations/generated exports. Web owns client
@@ -78,12 +78,13 @@ client comparison must preserve microseconds, not truncate through Date.parse.
 The next schedule contract adds an optional normalized media-version map to the
 immutable request and receipt. New clients will supply the complete effective
 media union; the server will lock and check versions in the snapshot transaction.
-This is implemented in PR #19 `74c3fa8` and undergoing independent review; it
-depends on media #15 and needs integration with later web changes. Fresh
-review found historical uppercase channel UUIDs were compared as text, selecting
-base media instead of the variant; UUID-aware selection and canonical read
-responses are being corrected. It prevents an unknown
-schedule after reload from silently snapshotting later description edits.
+PR #19 passed fresh independent review at `b126474`, including legacy UUID
+spellings, populated migration, edit races, scoped receipts, complete rollback
+and concurrent mismatch retries. Read responses normalize known UUID fields
+without changing stored draft JSON or historical publication payloads. Its merge
+awaits #15 and the inherited web dependency conflict; client adoption is still
+unfinished. The contract prevents an unknown schedule after reload from silently
+snapshotting later description edits.
 
 Media saves persist owner/brand/asset/base-version/text before PATCH. Unknown
 outcomes stay unresolved; same-CAS retry is explicit. A read at the base version
