@@ -7,11 +7,15 @@ import {
   type Channel,
   type Media,
   type Publication,
+  type Post,
+  type ApiSession,
 } from "../api";
 import { Network } from "../components/brand";
 import { Empty, ExternalLink, State, Time } from "../components/shared";
 import { Button } from "../components/ui/button";
 
+import type { PendingMedia } from "../usePendingMedia";
+import type { usePendingSchedule } from "../usePendingSchedule";
 import { PublicationDetails } from "./PublicationDetails";
 type Action = (
   fn: () => Promise<unknown>,
@@ -22,6 +26,12 @@ export function Queue({
   allPublications,
   channels,
   media,
+  posts,
+  pendingSchedule,
+  pendingMedia,
+  reconcileMedia,
+  onEdit,
+  onRefresh,
   action,
   pending,
   onCompose,
@@ -30,6 +40,12 @@ export function Queue({
   allPublications: Publication[];
   channels: Channel[];
   media: Media[];
+  posts: Post[];
+  pendingSchedule: ReturnType<typeof usePendingSchedule>;
+  pendingMedia: PendingMedia;
+  reconcileMedia: (media: Media, session: ApiSession) => void;
+  onEdit: (post: Post) => void;
+  onRefresh: () => Promise<void>;
   action: Action;
   pending: boolean;
   onCompose: () => void;
@@ -190,6 +206,30 @@ export function Queue({
                   {p.state === "queued" && p.scheduling_mode === "queue" && (
                     <div className="reorder-buttons">
                       <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={pending}
+                        onClick={() =>
+                          void action(
+                            () =>
+                              api(
+                                `/publications/${p.id}/prioritize`,
+                                z.array(PublicationSchema),
+                                "POST",
+                                { scheduled_at: p.scheduled_at },
+                              ),
+                            "Moved to the first queue slot",
+                          ).then(async (done) => {
+                            if (!done) {
+                              await onRefresh();
+                              setSelected(p);
+                            }
+                          })
+                        }
+                      >
+                        Move to front
+                      </Button>
+                      <Button
                         variant="ghost"
                         size="icon"
                         aria-label={`Move ${p.payload.title || "post"} earlier`}
@@ -218,6 +258,12 @@ export function Queue({
       {selected && (
         <PublicationDetails
           media={media}
+          post={posts.find((post) => post.id === selected.post_id)}
+          pendingSchedule={pendingSchedule}
+          pendingMedia={pendingMedia}
+          reconcileMedia={reconcileMedia}
+          onEdit={onEdit}
+          onRefresh={onRefresh}
           channel={channels.find(
             (channel) => channel.id === selected.channel_id,
           )}

@@ -65,6 +65,7 @@ export type ReconcileRequest = { "external_id"?: string | null; "external_url"?:
 export type ReorderQueueRequest = { "channel_id": string; "publication_ids": Array<string>; };
 export type ReplacePublicationRequest = { "post_version": number; "publication_post_version": number; "scheduled_at": string; };
 export type ReplacedPublication = { "previous_publication_id": string; "publication": Publication; };
+export type ReplacementStatus = { "original": PublicationSummary; "replacement": null | PublicationSummary; };
 export type RescheduleRequest = { "scheduled_at": string; };
 export type ResetExpiredSessionResult = { "next_action": string; "session_reset": boolean; "state": string; };
 export type ResetXUploadRequest = { "confirm_restart": boolean; "observed_attempt_id": string; "observed_checkpoint_id": string; "provider_inspected"?: boolean | null; "sender_stopped": boolean; };
@@ -164,6 +165,7 @@ export interface ApiOperations {
   "GET /api/v1/publications/{id}/provider-status": { request: undefined; response: { "data": ProviderStatus; }; query: {  } };
   "POST /api/v1/publications/{id}/reconcile": { request: ReconcileRequest; response: { "data": Publication; }; query: {  } };
   "POST /api/v1/publications/{id}/replace": { request: ReplacePublicationRequest; response: { "data": ReplacedPublication; }; query: {  } };
+  "GET /api/v1/publications/{id}/replacement-status": { request: undefined; response: { "data": ReplacementStatus; }; query: {  } };
   "POST /api/v1/publications/{id}/reschedule": { request: RescheduleRequest; response: { "data": Publication; }; query: {  } };
   "POST /api/v1/publications/{id}/reset-expired-session": { request: undefined; response: { "data": ResetExpiredSessionResult; }; query: {  } };
   "POST /api/v1/publications/{id}/reset-x-upload": { request: ResetXUploadRequest; response: { "data": ResetExpiredSessionResult; }; query: {  } };

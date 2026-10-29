@@ -41,6 +41,7 @@ import {
   type CorrectionSnapshot,
   type ScheduleIntent,
 } from "./scheduleIntent";
+import { readReplacement } from "./replacementIntent";
 import type { usePendingSchedule } from "./usePendingSchedule";
 import { withMediaScheduleGuard } from "./mediaIntent";
 import type { PendingMedia } from "./usePendingMedia";
@@ -919,6 +920,10 @@ export function useComposer({
         pendingSchedule.key,
         async (lockedSession) => {
           if (!active(lockedSession, signal)) return;
+          if (mode !== "draft" && readReplacement(pendingSchedule.key))
+            throw new Error(
+              "A queued replacement has an unconfirmed outcome. Review it before scheduling another publication.",
+            );
           if (readScheduleIntent(pendingSchedule.key))
             throw new Error(
               "Another tab has an unfinished schedule. Review that original schedule before saving a post.",

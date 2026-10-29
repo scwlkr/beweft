@@ -62,6 +62,7 @@ use serde_json::{Value, json};
         PublicationPayload,
         Publication,
         PublicationSummary,
+        ReplacementStatus,
         ScheduleRequestIntent,
         ScheduleRequestOutcome,
         ScheduleRequestResult,
