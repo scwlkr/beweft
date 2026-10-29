@@ -4,20 +4,21 @@ use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use uuid::Uuid;
 
-fn variant_for<'a>(variants: &'a Value, channel: &str) -> Option<&'a Value> {
-    variants
-        .as_array()?
-        .iter()
-        .find(|v| v["channel_id"].as_str() == Some(channel))
+fn variant_for(variants: &Value, channel: Uuid) -> Option<&Value> {
+    variants.as_array()?.iter().find(|v| {
+        v["channel_id"]
+            .as_str()
+            .and_then(|id| Uuid::parse_str(id).ok())
+            == Some(channel)
+    })
 }
 
-fn effective_media(post: &PgRow, variant: Option<&Value>) -> Result<(Value, Vec<Uuid>)> {
+fn effective_media(post: &PgRow, variant: Option<&Value>) -> Result<Vec<Uuid>> {
     let media: Value = variant
         .and_then(|v| v.get("media_ids"))
         .cloned()
         .unwrap_or(post.get("media_ids"));
-    let ids = serde_json::from_value(media.clone()).map_err(ApiError::internal)?;
-    Ok((media, ids))
+    serde_json::from_value(media).map_err(ApiError::internal)
 }
 
 /// Lock the complete effective media set in a stable order before writing any
@@ -31,7 +32,7 @@ pub async fn lock_effective_media(
     let variants: Value = post.get("variants");
     let mut union = BTreeSet::new();
     for channel in channels {
-        let (_, ids) = effective_media(post, variant_for(&variants, &channel.to_string()))?;
+        let ids = effective_media(post, variant_for(&variants, *channel))?;
         union.extend(ids);
     }
     if let Some(expected) = expected
@@ -76,12 +77,11 @@ pub async fn from_post(
     channel: Uuid,
 ) -> Result<Value> {
     let variants: Value = post.get("variants");
-    let channel_text = channel.to_string();
-    let variant = variant_for(&variants, &channel_text);
+    let variant = variant_for(&variants, channel);
     let text = variant
         .and_then(|v| v["text"].as_str())
         .unwrap_or(post.get("text"));
-    let (media, ids) = effective_media(post, variant)?;
+    let ids = effective_media(post, variant)?;
     if text.trim().is_empty() && ids.is_empty() {
         return Err(ApiError::bad("A scheduled post needs text or media"));
     }
@@ -96,6 +96,6 @@ pub async fn from_post(
         ));
     }
     Ok(
-        json!({"title":post.get::<String,_>("title"),"text":text,"media_ids":media,"options":options,"media_metadata":metadata}),
+        json!({"title":post.get::<String,_>("title"),"text":text,"media_ids":ids,"options":options,"media_metadata":metadata}),
     )
 }

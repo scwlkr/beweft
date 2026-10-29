@@ -80,6 +80,7 @@ projections, and paged response envelopes.
 - GET `/ideas?brand_id=UUID`; POST `/ideas` `{brand_id,title,text?:"",color?:"lavender"}` → idea. PATCH `/ideas/:id` `{title?,text?,color?}`; DELETE `/ideas/:id`.
 - Idea `{id,brand_id,title,text,color,created_at,updated_at}`.
 - GET `/posts?brand_id=UUID`; GET `/posts/:id`.
+- Post responses render base `media_ids` and variant `channel_id` and `media_ids` in canonical lowercase hyphenated UUID form, including older drafts stored with other valid UUID spellings. Other stored fields and existing publication snapshots are unchanged. New snapshots use canonical media IDs.
 - POST `/posts` `{brand_id,title?:"",text,media_ids?:[],options?:{},variants?:[{channel_id,text?,media_ids?,options?}]}` → post.
 - PATCH `/posts/:id` `{version:number,title?,text?,media_ids?,variants?,options?}` → post. Version required for conflict protection. Existing publication snapshots do not change; edit and schedule a new revision explicitly.
 - DELETE `/posts/:id` deletes only drafts with no publications. Other posts remain as history.

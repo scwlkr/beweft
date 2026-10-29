@@ -77,7 +77,7 @@ def run():
 
         def media_conflict(post, channels, versions):
             request_id = str(uuid.uuid4())
-            body = {"version": 1, "channel_ids": channels, "scheduled_at": stamp(),
+            body = {"version": post["version"], "channel_ids": channels, "scheduled_at": stamp(),
                     "request_id": request_id, "media_versions": versions}
             result = call(f"/posts/{post['id']}/schedule?view=summary", body, expected=409)
             assert result["error"]["code"] == "media_version_conflict", result
@@ -154,6 +154,87 @@ def run():
             replay = call(path + "?view=summary", {**body, "channel_ids":selected[::-1], "media_versions":canonical})
             assert [row["id"] for row in replay] == [row["id"] for row in receipt["publications"]]
 
+            # The old raw-JSON API stored UUID spellings as supplied. Reads
+            # must let current clients select those variants, and scheduling
+            # must use the same UUID-value selection for admission and payload.
+            historical = call("/posts", {"brand_id":brand, "text":"Historical variants", "media_ids":[a,d]})
+            raw_media = [a.replace("-", "").upper(), "{" + d.upper() + "}"]
+            raw_variants = [
+                {"channel_id":channels[0].upper(), "text":"Uppercase variant", "media_ids":[b.upper()],
+                 "options":{"original_spelling":b.upper()}, "legacy_extra":{"id":b.upper()}},
+                {"channel_id":"{" + channels[1].upper() + "}", "media_ids":["{" + c.upper() + "}"]},
+                {"channel_id":channels[2].replace("-", "").upper(), "text":"Empty override", "media_ids":[]},
+            ]
+            raw_options = {"original_spelling":a.upper(), "nested":{"id":d.upper()}}
+            sql(f"UPDATE posts SET media_ids='{json.dumps(raw_media)}'::jsonb, "
+                f"variants='{json.dumps(raw_variants)}'::jsonb, options='{json.dumps(raw_options)}'::jsonb "
+                f"WHERE id='{historical['id']}'")
+            raw_select = ("SELECT jsonb_build_object('media_ids',media_ids,'variants',variants,'options',options)::text "
+                          f"FROM posts WHERE id='{historical['id']}'")
+            raw_before = json.loads(sql(raw_select))
+            expected_variants = [
+                {**raw_variants[0], "channel_id":channels[0], "media_ids":[b]},
+                {**raw_variants[1], "channel_id":channels[1], "media_ids":[c]},
+                {**raw_variants[2], "channel_id":channels[2]},
+            ]
+            def assert_historical(value, summary=False):
+                assert value["media_ids"] == [a,d], value
+                if not summary:
+                    assert value["variants"] == expected_variants, value
+                    assert value["options"] == raw_options, value
+
+            loaded = call(f"/posts/{historical['id']}")
+            assert_historical(loaded)
+            for suffix, summary in [("", False), ("&limit=10", False),
+                                    ("&view=summary", True), ("&limit=10&view=summary", True)]:
+                rows = call(f"/posts?brand_id={brand}{suffix}")
+                assert_historical(next(row for row in rows if row["id"] == historical["id"]), summary)
+            assert json.loads(sql(raw_select)) == raw_before
+            # An unrelated edit also preserves raw fields while its response
+            # shows the normalized representation.
+            historical = call(f"/posts/{historical['id']}", {"version":1, "title":"Historical title"}, "PATCH")
+            assert historical["version"] == 2
+            assert_historical(historical)
+            assert json.loads(sql(raw_select)) == raw_before
+
+            # Model the client selecting variants from the normalized response,
+            # including an explicitly empty media override.
+            chosen = [channels[0], channels[1], channels[2]]
+            effective = set()
+            for channel in chosen:
+                variant = next((item for item in loaded["variants"] if item["channel_id"] == channel), None)
+                effective.update(variant["media_ids"] if variant is not None and "media_ids" in variant else loaded["media_ids"])
+            assert effective == {b,c}
+            media_conflict(historical, chosen, {a:1,d:1})
+            historical_key = str(uuid.uuid4())
+            historical_body = {"version":historical["version"], "channel_ids":chosen, "scheduled_at":stamp(),
+                               "request_id":historical_key, "media_versions":{item:1 for item in effective}}
+            historical_rows = call(f"/posts/{historical['id']}/schedule", historical_body)
+            historical_by_channel = {item["channel_id"]:item for item in historical_rows}
+            assert historical_by_channel[channels[0]]["payload"]["media_ids"] == [b]
+            assert historical_by_channel[channels[0]]["payload"]["text"] == "Uppercase variant"
+            assert historical_by_channel[channels[0]]["payload"]["options"] == raw_variants[0]["options"]
+            assert historical_by_channel[channels[1]]["payload"]["media_ids"] == [c]
+            assert historical_by_channel[channels[2]]["payload"]["media_ids"] == []
+            assert call(f"/schedule-requests/{historical_key}")["request"]["media_versions"] == {b:1,c:1}
+
+            # A historical frozen publication retains its original spelling;
+            # replacing it uses the selected variant and canonical IDs anew.
+            original = historical_by_channel[channels[0]]
+            sql(f"UPDATE publications SET payload=jsonb_set(payload,'{{media_ids}}','[\"{b.upper()}\"]'::jsonb) "
+                f"WHERE id='{original['id']}'")
+            replacement = call(f"/publications/{original['id']}/replace", {
+                "post_version":historical["version"], "publication_post_version":historical["version"],
+                "scheduled_at":original["scheduled_at"]})["publication"]
+            assert replacement["payload"]["media_ids"] == [b]
+            replayed = call(f"/posts/{historical['id']}/schedule", historical_body)
+            replayed_by_channel = {item["channel_id"]:item for item in replayed}
+            assert replayed_by_channel[channels[0]]["id"] == original["id"]
+            assert replayed_by_channel[channels[0]]["payload"]["media_ids"] == [b.upper()]
+            assert replayed_by_channel[channels[0]]["state"] == "canceled"
+            assert {item["id"] for item in call(f"/schedule-requests/{historical_key}")["publications"]} == {item["id"] for item in historical_rows}
+            assert json.loads(sql(raw_select)) == raw_before
+
             # Receipt identity uses the original map; later media edits must not
             # change its snapshot or turn a same-key replay into a new conflict.
             updated = call(f"/media/{a}", {"alt_text":"After committed schedule", "metadata_version":1}, "PATCH")
@@ -164,8 +245,17 @@ def run():
             assert next(row for row in old_meta if row["id"] == a)["alt_text"] == ""
             assert call(f"/schedule-requests/{key}")["request"]["media_versions"] == canonical
             for changed in [{**canonical, a:2}, {a:1,b:1}, {**canonical,d:1}, None]:
-                result = call(path, {**body, "media_versions":changed}, expected=409)
-                assert result["error"]["code"] == "schedule_request_conflict"
+                # A previous rejected attempt can briefly retain the request
+                # gate while its transaction rolls back. The documented busy
+                # result is inconclusive; only test mismatch after admission.
+                deadline = time.monotonic() + 5
+                while True:
+                    result = call(path, {**body, "media_versions":changed}, expected=409)
+                    if result["error"]["code"] != "schedule_request_in_progress":
+                        break
+                    assert time.monotonic() < deadline, result
+                    time.sleep(0.01)
+                assert result["error"]["code"] == "schedule_request_conflict", result
 
             # Discard a committed response, edit metadata, then recover and
             # retry the original immutable map without resnapshotting.
@@ -227,13 +317,13 @@ def run():
             legacy_media = next(item for item in [a,b,c,d] if item.upper() != item)
             legacy_version = call(f"/media/{legacy_media}")["metadata_version"]
             legacy = call("/posts", {"brand_id":brand, "text":"Legacy", "media_ids":[legacy_media]})
-            # Historical data may have retained UUID letter case; the snapshot
-            # keeps its existing representation while lock selection normalizes.
+            # Legacy media spellings are canonical in new snapshots even when
+            # the request omits the metadata-version precondition.
             sql(f"UPDATE posts SET media_ids='[\"{legacy_media.upper()}\"]'::jsonb WHERE id='{legacy['id']}'")
             legacy_key = str(uuid.uuid4())
             legacy_body = {"version":1, "channel_ids":[channels[4]], "scheduled_at":stamp(), "request_id":legacy_key}
             legacy_rows = call(f"/posts/{legacy['id']}/schedule", legacy_body)
-            assert legacy_rows[0]["payload"]["media_ids"] == [legacy_media.upper()]
+            assert legacy_rows[0]["payload"]["media_ids"] == [legacy_media]
             assert call(f"/schedule-requests/{legacy_key}")["request"]["media_versions"] is None
             call(f"/media/{legacy_media}", {"alt_text":"Legacy changed later", "metadata_version":legacy_version}, "PATCH")
             assert call(f"/posts/{legacy['id']}/schedule", legacy_body)[0]["id"] == legacy_rows[0]["id"]
