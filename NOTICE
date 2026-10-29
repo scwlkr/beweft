@@ -1,0 +1,7 @@
+beweft source is available under the MIT License; see LICENSE.
+
+The container image also includes third-party software under separate licenses,
+including Alpine Linux packages and FFmpeg's GPL/LGPL components. See
+docs/image-licenses.md and the per-image inventory and license texts under
+/usr/share/beweft/licenses. These notices do not provide corresponding source;
+make a complete source and notice distribution before redistributing an image.

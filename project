@@ -2,6 +2,21 @@
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$root"
+case "${1:-help}" in
+    help|--help|-h)
+        printf '%s\n' \
+            'Usage: ./project <command> [args...]' \
+            '  setup DIRECTORY [PROJECT] [PORT]   Create a private installation configuration' \
+            '  compose DIRECTORY ARGS...          Run Docker Compose for an installation' \
+            '  backup DIRECTORY NEW_BACKUP        Stop writes and create a consistent backup' \
+            '  restore DIRECTORY BACKUP           Restore into a new, empty installation' \
+            '  upgrade DIRECTORY IMAGE BACKUP     Back up and start a different local image'
+        exit 0 ;;
+    setup|compose|backup|restore|upgrade)
+        command=$1
+        shift
+        exec "$root/scripts/$command" "$@" ;;
+esac
 if ! command -v rustc >/dev/null 2>&1; then
     case "${1:-help}" in
         help|--help|-h)

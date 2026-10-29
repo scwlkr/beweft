@@ -1,32 +1,4 @@
 #!/bin/sh
 set -eu
-. "$(dirname -- "$0")/common.sh"
-[ "$#" -ge 1 ] && [ "$#" -le 3 ] || fail 'Usage: scripts/setup NEW_DIRECTORY [project-name] [loopback-port]'
-DEST=$1
-PROJECT=${2:-beweft}
-PORT=${3:-3000}
-case "$PROJECT" in ''|*[!a-z0-9_-]*|[-_]*) fail 'Project name must start with a lowercase letter or digit and contain only lowercase letters, digits, _ or -.';; esac
-case "$PORT" in ''|*[!0-9]*) fail 'Port must be an integer.';; esac
-[ "$PORT" -ge 1024 ] && [ "$PORT" -le 65535 ] || fail 'Port must be between 1024 and 65535.'
-[ ! -e "$DEST" ] || fail 'Installation already exists. Secrets were preserved. Use scripts/compose DIRECTORY up -d --wait, or scripts/upgrade for a new image.'
-command -v docker >/dev/null 2>&1 || fail 'Install Docker with Compose first.'
-docker compose version >/dev/null
-# Refuse a project name already owning resources, even when its original directory moved.
-[ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT")" ] || fail 'Compose project already exists; choose a unique name.'
-[ -z "$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT")" ] || fail 'Compose project volumes already exist; choose a unique name.'
-umask 077
-mkdir "$DEST"
-DEST=$(CDPATH= cd -- "$DEST" && pwd)
-# Generate all bytes inside a small existing Docker runtime; no host Rust/Node/OpenSSL needed.
-docker run --rm --network none alpine:3.22 sh -c 'for name in BEWEFT_DB_PASSWORD BEWEFT_SETUP_SECRET BEWEFT_ENCRYPTION_KEY; do printf "%s=" "$name"; od -An -N32 -tx1 /dev/urandom | tr -d " \n"; printf "\n"; done' > "$DEST/installation.env"
-cat >> "$DEST/installation.env" <<CONFIG
-COMPOSE_PROJECT_NAME=$PROJECT
-BEWEFT_IMAGE=beweft:local
-BEWEFT_PORT=$PORT
-BEWEFT_BIND_IP=127.0.0.1
-BEWEFT_PUBLIC_URL=http://127.0.0.1:$PORT
-BEWEFT_MAX_UPLOAD_BYTES=268435456
-BEWEFT_MEDIA_QUOTA_BYTES=10737418240
-CONFIG
-chmod 600 "$DEST/installation.env"
-printf '%s\n' "Installation configuration created: $DEST/installation.env" 'Keep this private file in your password manager or offline secret store; backups deliberately omit it.' "Next: scripts/compose '$DEST' up -d --build --wait" 'Read BEWEFT_SETUP_SECRET from the private file when creating the first owner. The setup command never prints secrets.'
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec python3 "$script_dir/self_host.py" "$(basename "$0")" "$@"

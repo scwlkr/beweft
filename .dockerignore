@@ -1,5 +1,10 @@
 .git
 .local
+**/installation.env
+**/database.dump
+**/media.tar
+**/key.sha256
+**/.beweft.lock
 .env
 .env.*
 !.env.example

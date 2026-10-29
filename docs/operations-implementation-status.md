@@ -1,92 +1,53 @@
-# CLI and operations handoff — incomplete, not release-ready
+# CLI and self-host operations status
 
-Packaging is in progress and has not completed its delivery rehearsal or fresh
-code review. Existing API, workflow, provider and frontend work belongs to other
-slices. Do not treat these packaging files as a verified installation.
+The CLI/MCP API qualification and worker health slices landed on the handoff
+branch after independent review. The self-host packaging slice adds operator
+commands and a maintained isolated rehearsal; it still requires its own fresh
+review before integration. No live provider publication or production hosting
+has been verified.
 
-## Files owned by this slice
+The CLI and MCP server use scoped API tokens, bounded inputs and outputs,
+server-backed pagination and authoritative readback. Draft writes do not
+implicitly publish. The [CLI guide](cli.md) describes commands, MCP transport,
+scope and unknown-write recovery. In the next request-ID and schedule-discovery
+slice, address PR #10's nonblocking finding that raw `api` queries reject
+percent-encoded values while retaining same-origin and token protections.
 
-- `crates/cli/`: Rust HTTP client, named JSON CLI commands, tool schemas derived
-  from the checked-in OpenAPI artifact, initial newline JSON-RPC stdio MCP loop.
-- `Cargo.toml`: added `crates/cli` workspace member only; preserve provider member.
-- `Cargo.lock`: CLI dependency graph update; preserve concurrent provider changes.
-- `Dockerfile`, `compose.yaml`, `.dockerignore`, `.env.example`: initial packaging.
-- `scripts/common.sh`, `setup`, `compose`, `backup`, `container-entrypoint`: initial
-  operator helpers. No host Cargo/Node required by these helpers.
+The application image contains the built web UI, API, worker, CLI and ffprobe;
+it runs the application as UID 10001. Compose provides persistent PostgreSQL
+and media volumes, a loopback API port and distinct API/worker health checks.
+`./project setup`, `compose`, `backup`, `restore` and `upgrade` are documented
+in the [self-hosting guide](self-hosting.md). The commands use an explicit
+private installation directory and isolate Compose from ambient `BEWEFT_*` and
+`COMPOSE_*` overrides, except the optional CLI's `BEWEFT_TOKEN`. Restore validates a matching key and local image, an
+empty target project, checksums and a bounded, ordinary-file-only media archive
+before creating resources. The restored API starts for verification; its worker
+stays stopped until an operator stops the old worker, reconciles uncertain work
+and explicitly enables it.
 
-This slice adds scoped paged server list queries and per-instance worker health.
-It does not change server state, provider modules, frontend, or project CLI wrapper.
+`beweft-worker --healthcheck` needs an explicit PostgreSQL URL and a unique,
+stable `BEWEFT_WORKER_ID`. It checks the `public` heartbeat table with a
+three-second connect/query and four-second outer binary deadline; no scheduler,
+migration, media directory or heartbeat write is started by the check. Ambient
+`PG*` configuration and password files are ignored in health mode. Compose
+uses `compose-primary`, invokes the same secret-loading entrypoint for startup
+and health, and limits the whole wrapper to five seconds. A crashed worker's
+heartbeat can remain fresh for up to 30 seconds. Assign a different ID to each
+worker sharing a database.
 
-## Implemented in source, still requiring independent review
+The isolated rehearsal is `scripts/tests/self_host_rehearsal.py`; it uses unique
+Compose projects, ports, volumes, owner and manual-channel fixtures. It exercises
+installation, restart, backup, archive/key/destination rejection, restore,
+byte-identical media and queued data, worker-off recovery, image upgrade and
+rollback. The synthetic upgrade image differs by a label, so this rehearsal
+validates deployment and rollback mechanics rather than a schema-changing
+application release. Test resources are removed afterward.
 
-The CLI exposes brands, channels, drafts, one post, queue, history, attempts,
-worker health, draft create/update, explicit queue/exact scheduling and media
-upload. It uses scoped bearer HTTP requests, disallows redirects and off-origin
-escape-hatch paths, supports protected token files, bounds input/output sizes,
-and never retries a failed write. Paged draft, media, queue and history reads
-filter in the scoped API; full post and publication details are separate reads.
-Scheduling returns compact publication summaries to agent clients, while the
-default API response retains full snapshots.
-MCP includes initialize/initialized, ping,
-tools/list and tools/call; its upload root is opened at startup and file paths
-cannot follow symlinks. `crates/cli/tests/integration.py` exercises the real
-isolated API and MCP subprocess, including scope rejection, lost write response,
-readback, upload confinement, redirect refusal and protocol errors. These
-changes landed on the integration branch after independent review. Worker health
-and the packaging work remain subject to their own review and integration.
-
-The image recipe builds web/API/worker/CLI, includes ffprobe through FFmpeg, and
-runs as UID 10001. Compose defines persistent DB/media and loopback API access.
-Setup generates private unique deployment values and refuses existing projects.
-Backup stops API/worker for a DB/media boundary and records a key fingerprint.
-These files have not been built or rehearsed together.
-
-`beweft-worker --healthcheck` only needs `DATABASE_URL` and a stable
-`BEWEFT_WORKER_ID`. It reads that instance's heartbeat from the database with a
-three-second connect/query deadline and a four-second overall probe deadline; it
-does not start a worker, run migrations,
-create media directories or write a heartbeat. The PostgreSQL URL must explicitly
-provide the host (or socket), user and database; its password may be omitted when
-the server permits passwordless authentication. Explicit URL TLS and connection
-options are supported; set required TLS settings in the URL. Ambient `PG*`
-variables and password files are ignored in health mode. Health checks support
-the `public` schema: the connection's
-current schema must be `public`, and the heartbeat lookup is schema-qualified.
-Regular worker configuration is unchanged; its database session must also use
-`public` for this healthcheck to describe that worker. A heartbeat is healthy for 30
-seconds. A crashed worker's last heartbeat can remain fresh until that window
-expires; graceful shutdown removes its row. IDs must be unique per worker sharing
-a database and contain 1–128 ASCII letters, digits, `.`, `_` or `-`. A worker
-without an ID generates one for local development, but the healthcheck requires
-an explicit ID. The default Compose service uses one fixed ID and is not ready
-to scale into multiple workers without assigning a different ID to each. Compose
-invokes the same `container-entrypoint` for startup and health, so a configured
-`BEWEFT_DB_PASSWORD_FILE` produces the same database URL in both processes.
-The binary's probe deadline starts after the entrypoint loads its secret files;
-Compose's five-second healthcheck timeout also bounds the wrapper invocation.
-
-## Explicit unfinished requirements
-
-- Safe archive validation, restore into an explicit empty destination, matching
-  encryption key checks, upgrade command and rollback documentation.
-- Isolated Docker fresh install/restart/backup/restore/upgrade rehearsal including
-  owner access, byte-identical media, drafts, durable queue and no live publishing.
-- Production/TLS placeholder instructions, agent configuration and complete
-  self-hosting documentation; setup currently has only concise command guidance.
-- Dependency copyright/license notices in image and FFmpeg redistribution/source
-  obligations. The entire image must not be represented as MIT.
-- Project wrapper commands and fresh independent review of all new code.
-- In the next CLI request-ID and schedule-discovery slice, address PR #10's
-  nonblocking finding that raw `api` queries reject percent-encoded values while
-  retaining same-origin and token protections.
-
-The official MCP transport/lifecycle/tool specifications linked in
-`operations-requirements.md` were consulted. No production deployment, Docker
-app build, Compose project launch, backup or restore occurred in this slice.
-
-Historical checks before continuation: `cargo check -p beweft-cli`,
-`cargo test -p beweft-cli` (one URL confinement regression), CLI Clippy with
-`-D warnings`, CLI formatting check and POSIX shell syntax checks all passed.
-The temporary Rust/Node image-version probes exited and their `--rm` containers
-were removed. No task-created background process or test installation remains.
-Build output in the shared `target/` is retained for unfinished work.
+The app source is MIT, but the image includes separately licensed Alpine and
+FFmpeg software. The tested FFmpeg reports GPL version 3 or later. Per-image
+inventories, build metadata and license texts are included; see
+[image licenses](image-licenses.md). **An image must not be redistributed until
+the distributor supplies the exact corresponding source and all required
+notices.** The final useful local installation will be created separately after
+integration; production server/domain selection and live provider approval remain
+external decisions.

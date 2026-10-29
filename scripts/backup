@@ -1,31 +1,4 @@
 #!/bin/sh
 set -eu
-. "$(dirname -- "$0")/common.sh"
-[ "$#" -eq 2 ] || fail 'Usage: scripts/backup INSTALLATION_DIRECTORY NEW_BACKUP_DIRECTORY'
-installation "$1"
-DEST=$2
-[ ! -e "$DEST" ] || fail 'Backup destination already exists; refusing overwrite.'
-# Capture service identity before quiescing; never silently restart services that were stopped.
-RUNNING=$(dc ps --status running --services)
-case " $RUNNING " in *api*) ;; *) fail 'API must be running before backup.';; esac
-case " $RUNNING " in *worker*) ;; *) fail 'Worker must be running before backup.';; esac
-API=$(dc ps -q api)
-MEDIA=$(docker inspect "$API" --format '{{range .Mounts}}{{if eq .Destination "/app/media"}}{{.Name}}{{end}}{{end}}')
-[ -n "$MEDIA" ] || fail 'Expected named media volume was not found.'
-umask 077
-mkdir "$DEST"
-DEST=$(CDPATH= cd -- "$DEST" && pwd)
-resume() { dc start api worker >/dev/null; }
-trap resume EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-# API stops first so no new mutations can race the backup. Graceful workers finish
-# their bounded attempt; after six minutes Compose kills and recovery quarantines.
-dc stop -t 360 api worker >/dev/null
-dc exec -T db pg_dump -U beweft -d beweft -Fc > "$DEST/database.dump"
-docker run --rm --network none --read-only --mount "type=volume,src=$MEDIA,dst=/media,readonly" alpine:3.22 tar -C /media -cf - . > "$DEST/media.tar"
-key_digest > "$DEST/key.sha256"
-docker inspect "$API" --format '{{.Image}}' > "$DEST/image-id"
-printf 'format=1\ncreated_utc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$DEST/manifest"
-docker run --rm --network none --read-only --mount "type=bind,src=$DEST,dst=/backup,readonly" alpine:3.22 sh -c 'cd /backup; sha256sum database.dump media.tar key.sha256 image-id manifest' > "$DEST/SHA256SUMS"
-printf '%s\n' "Consistent backup completed: $DEST" 'Keep matching installation.env separately. Archive contains private content but no deployment credentials.'
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec python3 "$script_dir/self_host.py" "$(basename "$0")" "$@"
