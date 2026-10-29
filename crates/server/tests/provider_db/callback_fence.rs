@@ -458,6 +458,19 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
             .status(),
         StatusCode::CONFLICT
     );
+    // A consumed callback with less than the safety margin remaining must
+    // stop before token exchange, based on PostgreSQL's clock.
+    let (short, short_state, short_cookie) = start(&client, &base, &session, brand, channel).await;
+    sqlx::query("UPDATE connection_flows SET expires_at=clock_timestamp()+interval '0.9 seconds' WHERE id=$1")
+        .bind(Uuid::parse_str(&short).unwrap()).execute(&h.state.db).await.unwrap();
+    let response = callback(&short_state, &short_cookie).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let text = response.text().await.unwrap();
+    assert!(text.contains("before the provider request") && text.contains("First inspect your connected channels"));
+    assert_eq!(h.provider.exchange_requests.load(Ordering::SeqCst), exchanges);
+    let stored: (bool, bool) = sqlx::query_as("SELECT consumed_at IS NOT NULL,encrypted_candidates IS NULL FROM connection_flows WHERE id=$1")
+        .bind(Uuid::parse_str(&short).unwrap()).fetch_one(&h.state.db).await.unwrap();
+    assert_eq!(stored, (true, true));
     let (expired, expired_state, expired_cookie) =
         start(&client, &base, &session, brand, channel).await;
     sqlx::query("UPDATE connection_flows SET expires_at=now()-interval '1 second' WHERE id=$1")

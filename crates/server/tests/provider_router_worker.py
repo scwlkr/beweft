@@ -56,6 +56,9 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     photos = []
     feed_mode = "success"
     reply_mode = "success"
+    reply_started = threading.Event()
+    reply_release = threading.Event()
+    reply_returned = threading.Event()
     feed_started = threading.Event()
     feed_release = threading.Event()
     feed_returned = threading.Event()
@@ -120,7 +123,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             if refresh:
                 self.record("x_refresh")
             return self.respond({"access_token":"x-refresh-fixture" if refresh else "x-original-fixture",
-                                 "refresh_token":"x-next-fixture", "expires_in":7200 if refresh else 1,
+                                 "refresh_token":"x-next-fixture", "expires_in":7200 if refresh else -1200,
                                  "scope":"tweet.read tweet.write users.read offline.access media.write"})
         if path == "/2/tweets":
             if self.headers.get("Authorization") == "Bearer x-refresh-fixture":
@@ -161,6 +164,12 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         if path == "/v23.0/comment-1/comments":
             if self.reply_mode == "uncertain":
                 return self.respond({}, 500)
+            if self.reply_mode == "blocked":
+                self.reply_started.set()
+                self.reply_release.wait(20)
+                self.respond({"id":"reply-1"})
+                self.reply_returned.set()
+                return
             return self.respond({"id":"reply-1"})
         return self.respond({}, 404)
 
@@ -185,6 +194,24 @@ def run():
     opener = urllib.request.build_opener(NoRedirect())
     cookies = {}
     with tempfile.TemporaryDirectory(prefix="beweft-provider-router-") as temp:
+        # Shift only the worker's wall clock, not the database, host or test
+        # process. Confirm that Rust's SystemTime actually sees the offset.
+        shim = Path(temp) / "fixture-clock-skew.dylib"
+        probe_source = Path(temp) / "clock-probe.rs"
+        probe_binary = Path(temp) / "clock-probe"
+        monotonic_source = Path(temp) / "monotonic-probe.c"
+        monotonic_binary = Path(temp) / "monotonic-probe"
+        subprocess.run(["cc", "-dynamiclib", ROOT / "crates/server/tests/fixture_clock_skew.c", "-o", shim], check=True)
+        probe_source.write_text('fn main(){println!("{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs())}')
+        subprocess.run(["rustc", probe_source, "-o", probe_binary], check=True)
+        monotonic_source.write_text('#include <time.h>\n#include <stdio.h>\nint main(void){struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); printf("%lld.%09ld",(long long)t.tv_sec,t.tv_nsec);}')
+        subprocess.run(["cc", monotonic_source, "-o", monotonic_binary], check=True)
+        skew_env = dict(os.environ, DYLD_INSERT_LIBRARIES=str(shim), BEWEFT_TEST_CLOCK_OFFSET_SECONDS="-600")
+        skewed_time = int(subprocess.check_output([probe_binary], env=skew_env))
+        assert 595 <= time.time() - skewed_time <= 605, "worker clock skew was not applied"
+        normal_mono = float(subprocess.check_output([monotonic_binary]))
+        skewed_mono = float(subprocess.check_output([monotonic_binary], env=skew_env))
+        assert 0 <= skewed_mono - normal_mono < 3, "fixture changed the monotonic clock"
         env = dict(os.environ, DATABASE_URL=f"postgres://{USER}:{PASSWORD}@localhost:{PORT}/{DB}",
                    BEWEFT_PUBLIC_URL="https://media.fixture", BEWEFT_BIND=app_origin.removeprefix("http://"),
                    BEWEFT_MEDIA_DIR=temp, BEWEFT_SETUP_SECRET="isolated-provider-router-secret",
@@ -194,7 +221,7 @@ def run():
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         processes.append(server)
 
-        def request(path, body=None, method=None, token=None, cookie=True, expected=200):
+        def request(path, body=None, method=None, token=None, cookie=True, expected=200, api_origin=None):
             headers = {"Origin":"https://media.fixture", "X-Beweft-Request":"1"}
             if cookie and cookies:
                 headers["Cookie"] = "; ".join(f"{key}={value}" for key, value in cookies.items())
@@ -202,7 +229,7 @@ def run():
                 headers["Authorization"] = "Bearer " + token
             if body is not None:
                 headers["Content-Type"] = "application/json"
-            request = urllib.request.Request(app_origin + "/api/v1" + path,
+            request = urllib.request.Request((api_origin or app_origin) + "/api/v1" + path,
                 data=None if body is None else json.dumps(body).encode(), headers=headers,
                 method=method or ("POST" if body is not None else "GET"))
             try:
@@ -273,6 +300,13 @@ def run():
             wait_for(ready, "server startup")
             request("/auth/bootstrap", {"setup_secret":env["BEWEFT_SETUP_SECRET"],
                                        "email":"router@example.invalid", "password":"Fixture-password-long!"})
+            # Migration preserves older accepted receipts and keeps its
+            # terminal rejection constraint non-null, using temporary tables.
+            migration = (ROOT / "migrations/0012_schedule_rejections.sql").read_text()
+            assert sql("BEGIN; CREATE TEMP TABLE posts(id uuid PRIMARY KEY); "
+                       "CREATE TEMP TABLE schedule_requests(id uuid,post_id uuid REFERENCES posts(id)); "
+                       "INSERT INTO schedule_requests(id) VALUES(gen_random_uuid()); " + migration +
+                       "SELECT outcome='accepted' AND error_code IS NULL AND error_message IS NULL FROM schedule_requests; ROLLBACK;") == "t"
             # Even a fixture-capable test build does not expose fixture mode
             # unless the explicit runtime opt-in is present.
             disabled_env = dict(env)
@@ -334,6 +368,90 @@ def run():
             request("/analytics", token="invalid-token", expected=401)
             request(f"/analytics?brand_id={other_brand}", token=token, expected=403)
 
+            # New scheduling validates exactly the adapter's local rules and
+            # media bytes before committing any receipt or publication.
+            image = Path(temp) / "fixture.jpg"
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=640x480:r=10",
+                            "-frames:v", "1", str(image)], check=True)
+            image_bytes = image.read_bytes()
+            asset = upload(brand, image_bytes)
+            video = Path(temp) / "fixture.mp4"
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=640x480:r=10",
+                            "-t", "4", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(video)], check=True)
+            video_asset = upload(brand, video.read_bytes(), "fixture.mp4", "video/mp4")
+            corrupt = upload(brand, b"\xff\xd8\xffinvalid-image", "corrupt.jpg")
+            before_validation = dict(Fixture.counts)
+            when = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).isoformat(timespec="microseconds")
+            manual = request("/channels", {"brand_id":brand,"name":"Atomic manual","provider":"manual"})["id"]
+            def rejected_schedule(post, channels):
+                request_id = str(uuid.uuid4())
+                intent = {"version":1,"channel_ids":channels,"scheduled_at":when,"request_id":request_id}
+                result = request(f"/posts/{post['id']}/schedule", intent, expected=400)
+                assert result["error"]["code"] == "provider_format_invalid", result
+                assert sql(f"SELECT count(*) FROM publications WHERE post_id='{post['id']}'") == "0"
+                receipt = request(f"/schedule-requests/{request_id}")
+                assert receipt["outcome"] == "rejected" and receipt["error"] == result["error"]
+                assert receipt["request"]["channel_ids"] == sorted(channels) and receipt["publications"] == []
+                return intent, result
+            too_long = request("/posts", {"brand_id":brand,"text":"x" * 281})
+            rejected_intent, rejected_result = rejected_schedule(too_long, [manual, x["id"]])
+            # Treat the original 400 as lost. A changed adapter rule cannot
+            # make an in-flight retry of the same key create publications.
+            sql(f"UPDATE channels SET provider='manual' WHERE id='{x['id']}'")
+            replay = request(f"/posts/{too_long['id']}/schedule", rejected_intent, expected=400)
+            assert replay == rejected_result
+            assert request(f"/posts/{too_long['id']}/schedule", {**rejected_intent,"version":2}, expected=409)["error"]["code"] == "schedule_request_conflict"
+            fresh_intent = {**rejected_intent,"request_id":str(uuid.uuid4())}
+            corrected = request(f"/posts/{too_long['id']}/schedule", fresh_intent)
+            assert len(corrected) == 2
+            for item in corrected:
+                request(f"/publications/{item['id']}/cancel", {})
+            sql(f"UPDATE channels SET provider='x' WHERE id='{x['id']}'")
+            assert request(f"/schedule-requests/{rejected_intent['request_id']}")["publications"] == []
+            variant_invalid = request("/posts", {"brand_id":brand,"text":"base is valid",
+                                      "variants":[{"channel_id":x["id"],"text":"x" * 281}]})
+            deleted_intent, deleted_result = rejected_schedule(variant_invalid, [manual, x["id"]])
+            other_token = request("/tokens", {"name":"Other brand scope", "scopes":["publishing:write"],
+                                             "brand_ids":[other_brand]})["token"]
+            request(f"/posts/{variant_invalid['id']}", method="DELETE")
+            request(f"/posts/{variant_invalid['id']}", expected=404)
+            assert request(f"/schedule-requests/{deleted_intent['request_id']}")["outcome"] == "rejected"
+            assert request(f"/posts/{variant_invalid['id']}/schedule", deleted_intent, expected=400) == deleted_result
+            request(f"/schedule-requests/{deleted_intent['request_id']}", token=other_token, expected=404)
+            request(f"/posts/{variant_invalid['id']}/schedule", deleted_intent, token=other_token, expected=404)
+            unsupported = request("/posts", {"brand_id":brand,"text":"video","media_ids":[video_asset["id"]]})
+            rejected_schedule(unsupported, [x["id"]])
+            malformed = request("/posts", {"brand_id":brand,"text":"bad image","media_ids":[corrupt["id"]]})
+            rejected_schedule(malformed, [x["id"]])
+            missing_option = request("/posts", {"brand_id":brand,"title":"Video","text":"video",
+                                      "media_ids":[video_asset["id"]],"options":{"privacy":"private"}})
+            rejected_schedule(missing_option, [youtube["id"]])
+            mastodon = str(uuid.uuid4())
+            sql(f"INSERT INTO channels(id,brand_id,name,provider,paused) VALUES('{mastodon}','{brand}','Static options','mastodon',true)")
+            invalid_option = request("/posts", {"brand_id":brand,"text":"visibility", "options":{"visibility":"invalid"}})
+            rejected_schedule(invalid_option, [mastodon])
+
+            valid = request("/posts", {"brand_id":brand,"text":"valid image","media_ids":[asset["id"]]})
+            intent = {"version":1,"channel_ids":[x["id"]],"scheduled_at":when,"request_id":str(uuid.uuid4())}
+            accepted = request(f"/posts/{valid['id']}/schedule?view=summary", intent)[0]
+            # Replay remains authoritative after the installed capability has
+            # changed, even though a new LinkedIn media intent would fail.
+            sql(f"UPDATE channels SET provider='linkedin' WHERE id='{x['id']}'")
+            assert request(f"/posts/{valid['id']}/schedule?view=summary", intent)[0]["id"] == accepted["id"]
+            receipt = request(f"/schedule-requests/{intent['request_id']}")
+            assert receipt["outcome"] == "accepted" and receipt["error"] is None
+            assert receipt["publications"][0]["id"] == accepted["id"]
+            sql(f"UPDATE channels SET provider='x' WHERE id='{x['id']}'")
+            changed = request(f"/posts/{valid['id']}", {"version":1,"text":"x" * 281}, "PATCH")
+            replacement = request(f"/publications/{accepted['id']}/replace",
+                                  {"post_version":changed["version"],"publication_post_version":1,
+                                   "scheduled_at":accepted["scheduled_at"]}, expected=400)
+            assert replacement["error"]["code"] == "provider_format_invalid"
+            assert publication(accepted["id"])["state"] == "queued"
+            assert sql(f"SELECT count(*) FROM publications WHERE post_id='{valid['id']}'") == "1"
+            request(f"/publications/{accepted['id']}/cancel", {})
+            assert Fixture.counts == before_validation, "scheduling validation must make zero provider calls"
+
             # X metered reads are refused without an explicit acknowledgement.
             before_x_reads = Fixture.counts.get("GET /2/tweets/x-post", 0)
             request(f"/channels/{x['id']}/sync", {}, expected=400)
@@ -343,7 +461,13 @@ def run():
             # refresh, provider POST and an attempt-fenced receipt commit.
             request(f"/channels/{x['id']}", {"paused":True}, "PATCH")
             x_post = schedule(brand, x["id"], "Fixture X text")
-            worker = subprocess.Popen(loopback_only([TARGET / "debug/beweft-worker"]), cwd=ROOT, env=env,
+            sql("CREATE TABLE fixture_lease_deltas (publication_id uuid, remaining double precision); "
+                "CREATE FUNCTION fixture_capture_lease() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+                "INSERT INTO fixture_lease_deltas SELECT NEW.publication_id,EXTRACT(EPOCH FROM (lease_until-clock_timestamp())) "
+                "FROM publications WHERE id=NEW.publication_id; RETURN NEW; END $$; "
+                "CREATE TRIGGER fixture_capture_lease AFTER INSERT ON publication_attempts FOR EACH ROW EXECUTE FUNCTION fixture_capture_lease();")
+            worker_env = dict(env, DYLD_INSERT_LIBRARIES=str(shim), BEWEFT_TEST_CLOCK_OFFSET_SECONDS="-600")
+            worker = subprocess.Popen(loopback_only([TARGET / "debug/beweft-worker"]), cwd=ROOT, env=worker_env,
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             processes.append(worker)
             time.sleep(3)
@@ -351,18 +475,89 @@ def run():
             assert Fixture.counts.get("POST /2/tweets", 0) == 0
             request(f"/channels/{x['id']}", {"paused":False}, "PATCH")
             published = wait_for(lambda: state_is(x_post["id"], "published"), "X worker receipt")
+            assert sql(f"SELECT remaining BETWEEN 295 AND 300 FROM fixture_lease_deltas WHERE publication_id='{x_post['id']}'") == "t"
             assert published["external_id"] == "x-post" and Fixture.counts.get("x_refresh", 0) == 1
             assert Fixture.counts.get("x_rotated_authorization", 0) == 1
             attempt = request(f"/publications/{x_post['id']}/attempts")[0]
             assert attempt["state"] == "published" and attempt["receipt"]["verification"] == "unverified_live"
 
+            # Expired and sub-second leases cannot start even the refresh call.
+            # The short lease is set by PostgreSQL during claim, so this test
+            # does not adjust either the shared host or database clock.
+            short_x = connect("x", other_brand)
+            expired = schedule(other_brand, short_x["id"], "Expired admission", delay=60)
+            near = schedule(other_brand, short_x["id"], "Near expiry admission", delay=61)
+            sql("CREATE FUNCTION fixture_admission_lease() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+                f"IF NEW.publication_id='{expired['id']}' THEN UPDATE publications SET lease_until=clock_timestamp()-interval '1 second' WHERE id=NEW.publication_id; "
+                f"ELSIF NEW.publication_id='{near['id']}' THEN UPDATE publications SET lease_until=clock_timestamp()+interval '0.5 seconds' WHERE id=NEW.publication_id; "
+                "END IF; RETURN NEW; END $$; CREATE TRIGGER fixture_admission_lease BEFORE INSERT ON publication_attempts "
+                "FOR EACH ROW EXECUTE FUNCTION fixture_admission_lease();")
+            before_short = dict(Fixture.counts)
+            sql(f"UPDATE publications SET scheduled_at=clock_timestamp() WHERE id='{expired['id']}'")
+            wait_for(lambda: state_is(expired["id"], "uncertain"), "expired lease admission")
+            sql(f"UPDATE publications SET scheduled_at=clock_timestamp() WHERE id='{near['id']}'")
+            wait_for(lambda: state_is(near["id"], "uncertain"), "near-expiry lease admission")
+            assert Fixture.counts == before_short, "an expired or near-expiry claim must make zero provider calls"
+            assert sql(f"SELECT count(*) FROM publication_attempts WHERE publication_id IN ('{expired['id']}','{near['id']}') AND (receipt ? 'provider_receipt' OR receipt->>'verification'='unverified_live')") == "0"
+            sql("DROP TRIGGER fixture_admission_lease ON publication_attempts; DROP FUNCTION fixture_admission_lease();")
+
+            # A stalled channel-row lock must not hold an expired claim or
+            # begin its refresh after the database-derived deadline.
+            blocked = schedule(other_brand, short_x["id"], "Blocked channel admission", delay=60)
+            sql("CREATE FUNCTION fixture_blocked_lease() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+                f"IF NEW.id='{blocked['id']}' AND NEW.state='sending' THEN NEW.lease_until=clock_timestamp()+interval '3 seconds'; END IF; "
+                "RETURN NEW; END $$; CREATE TRIGGER fixture_blocked_lease BEFORE UPDATE OF state ON publications "
+                "FOR EACH ROW EXECUTE FUNCTION fixture_blocked_lease();")
+            locker = subprocess.Popen(["docker", "exec", "-i", CONTAINER, "psql", "-X", "-qAt", "-U", USER, "-d", DB,
+                                       "-v", "ON_ERROR_STOP=1"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            # NO KEY UPDATE blocks the worker's row lock without blocking the
+            # foreign-key checks needed to commit the initial attempt.
+            locker.stdin.write(f"BEGIN; SELECT id FROM channels WHERE id='{short_x['id']}' FOR NO KEY UPDATE; SELECT 'held';\n")
+            locker.stdin.flush()
+            while locker.stdout.readline().strip() != "held":
+                assert locker.poll() is None, "channel row lock fixture failed"
+            before_blocked = dict(Fixture.counts)
+            sql(f"UPDATE publications SET scheduled_at=clock_timestamp() WHERE id='{blocked['id']}'")
+            try:
+                wait_for(lambda: state_is(blocked["id"], "uncertain"), "bounded channel-row wait", seconds=12)
+            except AssertionError:
+                diagnostic = sql(f"SELECT state||':'||COALESCE((lease_until>clock_timestamp())::text,'none')||':'||(SELECT count(*) FROM publication_attempts WHERE publication_id='{blocked['id']}') FROM publications WHERE id='{blocked['id']}'")
+                waits = sql("SELECT COALESCE(string_agg(COALESCE(wait_event_type,'none')||':'||COALESCE(wait_event,'none'),','),'none') FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND state<>'idle'")
+                raise AssertionError(f"bounded channel-row wait failed; publication={diagnostic}, database waits={waits}") from None
+            assert Fixture.counts == before_blocked, "a blocked expired stage must make zero provider calls"
+            locker.stdin.write("COMMIT;\n\\q\n")
+            locker.stdin.flush()
+            locker.wait(timeout=5)
+            locker = None
+            sql("DROP TRIGGER fixture_blocked_lease ON publications; DROP FUNCTION fixture_blocked_lease();")
+
+            # A refresh can rotate a token before local storage passes the
+            # lease boundary. Persist that rotation, but do not send the post.
+            refresh_late = schedule(other_brand, short_x["id"], "Refresh crosses lease", delay=60)
+            sql("CREATE FUNCTION fixture_refresh_lease() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+                f"IF NEW.publication_id='{refresh_late['id']}' THEN UPDATE publications SET lease_until=clock_timestamp()+interval '3 seconds' WHERE id=NEW.publication_id; END IF; "
+                "RETURN NEW; END $$; CREATE TRIGGER fixture_refresh_lease BEFORE INSERT ON publication_attempts "
+                "FOR EACH ROW EXECUTE FUNCTION fixture_refresh_lease(); "
+                "CREATE FUNCTION fixture_slow_rotation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+                f"IF NEW.id='{short_x['id']}' AND NEW.encrypted_credentials IS DISTINCT FROM OLD.encrypted_credentials THEN PERFORM pg_sleep(4); END IF; "
+                "RETURN NEW; END $$; CREATE TRIGGER fixture_slow_rotation BEFORE UPDATE OF encrypted_credentials ON channels "
+                "FOR EACH ROW EXECUTE FUNCTION fixture_slow_rotation();")
+            refresh_before = Fixture.counts.get("x_refresh", 0)
+            posts_before = Fixture.counts.get("POST /2/tweets", 0)
+            sql(f"UPDATE publications SET scheduled_at=clock_timestamp() WHERE id='{refresh_late['id']}'")
+            wait_for(lambda: state_is(refresh_late["id"], "uncertain"), "refresh crosses lease", seconds=25)
+            assert Fixture.counts.get("x_refresh", 0) == refresh_before + 1
+            assert Fixture.counts.get("POST /2/tweets", 0) == posts_before
+            assert sql(f"SELECT count(*) FROM publication_attempts WHERE publication_id='{refresh_late['id']}' AND receipt IS NOT NULL") == "0"
+            sql("DROP TRIGGER fixture_refresh_lease ON publication_attempts; DROP FUNCTION fixture_refresh_lease(); "
+                "DROP TRIGGER fixture_slow_rotation ON channels; DROP FUNCTION fixture_slow_rotation();")
+            rotated = schedule(other_brand, short_x["id"], "Use persisted rotation")
+            wait_for(lambda: state_is(rotated["id"], "published"), "persisted refresh token")
+            assert Fixture.counts.get("x_refresh", 0) == refresh_before + 1
+            assert Fixture.counts.get("x_rotated_authorization", 0) == 2
+
             # The provider fetches the committed media capability while its
             # publish POST is in progress, through the actual public router.
-            image = Path(temp) / "fixture.jpg"
-            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=640x480:r=10",
-                            "-frames:v", "1", str(image)], check=True)
-            image_bytes = image.read_bytes()
-            asset = upload(brand, image_bytes)
             photo = schedule(brand, fb["id"], "Fixture photo", [asset["id"]])
             published = wait_for(lambda: state_is(photo["id"], "published"), "Facebook media receipt")
             assert published["external_id"] == "photo-post" and Fixture.photos == [image_bytes]
@@ -371,6 +566,7 @@ def run():
 
             # Suspend the actual worker while an accepted media stage returns
             # after its lease. It must not persist progress, IDs, or receipts.
+            before_expiring_tweets = Fixture.counts.get("POST /2/tweets", 0)
             expiring = schedule(brand, x["id"], "Expiring media stage", [asset["id"]], delay=60)
             sql("CREATE FUNCTION fixture_short_lease() RETURNS trigger LANGUAGE plpgsql AS $$ "
                 f"BEGIN IF NEW.publication_id='{expiring['id']}' THEN UPDATE publications SET lease_until=clock_timestamp()+interval '4 seconds' WHERE id=NEW.publication_id; END IF; "
@@ -388,16 +584,12 @@ def run():
             assert sql(f"SELECT count(*) FROM provider_delivery_checkpoints WHERE publication_id='{expiring['id']}'") == "0"
             assert sql(f"SELECT COALESCE(external_id,'none') FROM publications WHERE id='{expiring['id']}'") == "none"
             assert sql(f"SELECT count(*) FROM publication_attempts WHERE publication_id='{expiring['id']}' AND receipt IS NOT NULL") == "0"
-            assert Fixture.counts.get("POST /2/tweets") == 1
+            assert Fixture.counts.get("POST /2/tweets", 0) == before_expiring_tweets
             Fixture.x_media_block = False
             sql("DROP TRIGGER fixture_short_lease ON publication_attempts; DROP FUNCTION fixture_short_lease();")
 
             # A real worker saves a resumable YouTube checkpoint; a 404 probe
             # makes it expired but never proves that the video was unpublished.
-            video = Path(temp) / "fixture.mp4"
-            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=640x480:r=10",
-                            "-t", "4", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(video)], check=True)
-            video_asset = upload(brand, video.read_bytes(), "fixture.mp4", "video/mp4")
             upload_post = schedule(brand, youtube["id"], "Fixture video", [video_asset["id"]],
                                    title="Fixture title", options={"privacy":"private","made_for_kids":False})
             wait_for(lambda: state_is(upload_post["id"], "uncertain"), "uncertain YouTube upload")
@@ -424,10 +616,87 @@ def run():
             assert request(f"/inbox/{item['id']}/reply", reply)["state"] == "published"
             assert request(f"/inbox/{item['id']}/reply", reply)["id"] == reply_key
             assert Fixture.counts.get("POST /v23.0/comment-1/comments") == 1
+
+            # Two additional isolated API processes see different wall clocks.
+            # An ahead-of-DB host must still send a live reply; a behind-DB
+            # host must not send an already near-expiry reply.
+            def skewed_api(offset):
+                api_port = free_port()
+                api_origin = f"http://127.0.0.1:{api_port}"
+                api_env = dict(env, BEWEFT_BIND=f"127.0.0.1:{api_port}",
+                               DYLD_INSERT_LIBRARIES=str(shim), BEWEFT_TEST_CLOCK_OFFSET_SECONDS=str(offset))
+                process = subprocess.Popen(loopback_only([TARGET / "debug/beweft-server"]), cwd=ROOT, env=api_env,
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                processes.append(process)
+                def ready_skewed():
+                    if process.poll() is not None:
+                        raise AssertionError("clock-shifted API exited")
+                    try:
+                        return request("/auth/status", cookie=False, api_origin=api_origin)
+                    except OSError:
+                        return False
+                wait_for(ready_skewed, "clock-shifted API")
+                return process, api_origin
+
+            ahead, ahead_origin = skewed_api(600)
+            ahead_key = str(uuid.uuid4())
+            before_ahead = Fixture.counts.get("POST /v23.0/comment-1/comments", 0)
+            assert request(f"/inbox/{item['id']}/reply", {"request_id":ahead_key,"text":"Ahead clock fixture",
+                           "expected_last_request_id":reply_key}, api_origin=ahead_origin)["state"] == "published"
+            assert Fixture.counts.get("POST /v23.0/comment-1/comments", 0) == before_ahead + 1
+            ahead.send_signal(signal.SIGTERM)
+            ahead.wait(timeout=10)
+
+            behind, behind_origin = skewed_api(-600)
+            near_reply = str(uuid.uuid4())
+            sql("CREATE FUNCTION fixture_short_reply() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+                f"IF NEW.id='{near_reply}' THEN NEW.delivery_deadline=clock_timestamp()+interval '0.5 seconds'; END IF; "
+                "RETURN NEW; END $$; CREATE TRIGGER fixture_short_reply BEFORE INSERT ON provider_replies "
+                "FOR EACH ROW EXECUTE FUNCTION fixture_short_reply();")
+            before_near = Fixture.counts.get("POST /v23.0/comment-1/comments", 0)
+            assert request(f"/inbox/{item['id']}/reply", {"request_id":near_reply,"text":"Near-expiry reply fixture",
+                           "expected_last_request_id":ahead_key}, api_origin=behind_origin)["state"] == "uncertain"
+            assert Fixture.counts.get("POST /v23.0/comment-1/comments", 0) == before_near
+            wait_for(lambda: sql(f"SELECT delivery_deadline<=clock_timestamp() FROM provider_replies WHERE id='{near_reply}'") == "t", "reply deadline elapsed")
+            request(f"/inbox/{item['id']}/replies/{near_reply}/resolve", {"resolution":"not_published","note":"Fixture saw no request"})
+            sql("DROP TRIGGER fixture_short_reply ON provider_replies; DROP FUNCTION fixture_short_reply();")
+
+            # If an accepted reply response returns after its DB deadline,
+            # even a suspended API must not install the provider receipt.
+            late_reply = str(uuid.uuid4())
+            sql("CREATE FUNCTION fixture_late_reply() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+                f"IF NEW.id='{late_reply}' THEN NEW.delivery_deadline=clock_timestamp()+interval '3 seconds'; END IF; "
+                "RETURN NEW; END $$; CREATE TRIGGER fixture_late_reply BEFORE INSERT ON provider_replies "
+                "FOR EACH ROW EXECUTE FUNCTION fixture_late_reply();")
+            Fixture.reply_mode = "blocked"
+            late_result = []
+            late_errors = []
+            def late_reply_call():
+                try:
+                    late_result.append(request(f"/inbox/{item['id']}/reply", {"request_id":late_reply,"text":"Late reply fixture",
+                                               "expected_last_request_id":near_reply}, api_origin=behind_origin))
+                except Exception as error:
+                    late_errors.append(error)
+            late_thread = threading.Thread(target=late_reply_call)
+            late_thread.start()
+            assert Fixture.reply_started.wait(10), "reply did not reach the loopback fixture"
+            behind.send_signal(signal.SIGSTOP)
+            Fixture.reply_release.set()
+            assert Fixture.reply_returned.wait(5), "fixture reply response was not released"
+            time.sleep(4)
+            behind.send_signal(signal.SIGCONT)
+            late_thread.join(timeout=10)
+            assert not late_thread.is_alive() and not late_errors and late_result[0]["state"] == "uncertain"
+            assert sql(f"SELECT receipt IS NULL FROM provider_replies WHERE id='{late_reply}'") == "t"
+            request(f"/inbox/{item['id']}/replies/{late_reply}/resolve", {"resolution":"published","note":"Fixture observed the reply"})
+            sql("DROP TRIGGER fixture_late_reply ON provider_replies; DROP FUNCTION fixture_late_reply();")
+            behind.send_signal(signal.SIGTERM)
+            behind.wait(timeout=10)
+
             Fixture.reply_mode = "uncertain"
             uncertain_key = str(uuid.uuid4())
             assert request(f"/inbox/{item['id']}/reply", {"request_id":uncertain_key,"text":"Uncertain fixture reply",
-                           "expected_last_request_id":reply_key})["state"] == "uncertain"
+                           "expected_last_request_id":late_reply})["state"] == "uncertain"
             assert request(f"/inbox/{item['id']}/replies")[0]["id"] == uncertain_key
             request(f"/inbox/{item['id']}/replies/{uncertain_key}/resolve", {"resolution":"not_published","note":"Fixture checked"}, token=token, expected=403)
             resolved = request(f"/inbox/{item['id']}/replies/{uncertain_key}/resolve", {"resolution":"not_published","note":"Fixture checked"})
@@ -529,6 +798,7 @@ def run():
                 locker.wait(timeout=5)
             Fixture.feed_release.set()
             Fixture.x_media_release.set()
+            Fixture.reply_release.set()
             for process in reversed(processes):
                 if process.poll() is None:
                     process.send_signal(signal.SIGCONT)
