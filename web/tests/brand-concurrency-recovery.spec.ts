@@ -431,38 +431,29 @@ test("metadata 401 signs out while brand loading hangs and clears private state 
 
 test("a 401 from the previous brand signs out the same session after a switch", async () => {
   await withWorkspace(async (page, context, write) => {
-    const { beta, beforeBrandResponse } = await fixtures(page, context, write);
-    const metadataRequested = deferred(),
+    const { beta } = await fixtures(page, context, write);
+    const oldBrandsRequested = deferred(),
       release401 = deferred(),
-      alphaBrandsDelivered = deferred(),
       betaBrandsRequested = deferred(),
       releaseBeta = deferred();
-    let holdHealth = true,
-      holdBrands = false;
-    await page.route("**/api/v1/jobs/health", async (route) => {
-      if (!holdHealth) return await route.continue();
-      holdHealth = false;
-      metadataRequested.resolve();
-      await release401.promise;
-      await route.fulfill({
-        status: 401,
-        json: { error: { code: "unauthorized", message: "Session expired" } },
-      });
-    });
-    beforeBrandResponse(async () => {
-      if (holdBrands) {
+    let requests = 0;
+    await page.route("**/api/v1/brands", async (route) => {
+      if (++requests === 1) {
+        oldBrandsRequested.resolve();
+        await release401.promise;
+        await route.fulfill({
+          status: 401,
+          json: { error: { code: "unauthorized", message: "Session expired" } },
+        });
+      } else {
         betaBrandsRequested.resolve();
         await releaseBeta.promise;
-      } else alphaBrandsDelivered.resolve();
+        await route.continue();
+      }
     });
     try {
       await page.clock.fastForward(30_000);
-      await Promise.all([
-        metadataRequested.promise,
-        alphaBrandsDelivered.promise,
-      ]);
-      await afterPaint(page);
-      holdBrands = true;
+      await oldBrandsRequested.promise;
       await page.getByLabel("Current brand").selectOption(beta.id);
       await betaBrandsRequested.promise;
       release401.resolve();

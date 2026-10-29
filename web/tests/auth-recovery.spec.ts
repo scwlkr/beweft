@@ -179,22 +179,26 @@ test("another tab cannot sign in before an earlier logout response completes", a
       await route.fulfill({ response });
     });
     const other = await context.newPage();
-    let logins = 0;
+    let logins = 0,
+      sessionChecks = 0;
     await other.route("**/api/v1/auth/login", (route) => {
       logins++;
+      return route.continue();
+    });
+    await other.route("**/api/v1/auth/me", (route) => {
+      sessionChecks++;
       return route.continue();
     });
     try {
       await page.getByRole("button", { name: "Sign out" }).click();
       await logoutStarted.promise;
       await other.goto("/#drafts");
-      await expect(other.getByLabel("Email address")).toBeVisible();
-      await signIn(other);
-      await expect(
-        other.getByRole("button", { name: "Sign in", exact: true }),
-      ).toBeDisabled();
+      await expect(other.getByText("Loading your workspace…")).toBeVisible();
+      expect(sessionChecks).toBe(0);
       expect(logins).toBe(0);
       releaseLogout.resolve();
+      await expect(other.getByLabel("Email address")).toBeVisible();
+      await signIn(other);
       await expect(other.getByLabel("Current brand")).toHaveValue(brand.id);
       expect(logins).toBe(1);
       await other.reload();

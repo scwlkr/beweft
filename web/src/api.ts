@@ -239,7 +239,25 @@ export async function api<T>(
   method = "GET",
   body?: unknown,
   signal?: AbortSignal,
+  authLockHeld = false,
 ): Promise<T> {
+  // Direct callers that inspect the owner must not observe an intermediate
+  // credential transition. Workspace verification already holds this lock.
+  if (path === "/auth/me" && !authLockHeld) {
+    return authLock(() => {
+      const epoch = readAuthEpoch();
+      if (workspaceEpoch !== epoch) {
+        if (workspaceEpoch !== null)
+          identityListeners.forEach((listener) => listener());
+        throw new ApiError(
+          "The browser session changed. Refreshing your workspace.",
+          401,
+          "session_changed",
+        );
+      }
+      return api(path, schema, method, body, signal, true);
+    }, signal);
+  }
   const session = captureApiSession();
   if (
     ![
@@ -261,64 +279,100 @@ export async function api<T>(
     }
   }
   const multipart = body instanceof FormData;
-  let response: Response;
-  try {
-    response = await fetch(`/api/v1${path}`, {
-      method,
-      credentials: "same-origin",
-      signal,
-      headers: {
-        ...(method === "GET" ? {} : { "X-Beweft-Request": "1" }),
-        ...(body && !multipart ? { "Content-Type": "application/json" } : {}),
-      },
-      body:
-        body === undefined
-          ? undefined
-          : multipart
-            ? body
-            : JSON.stringify(body),
-    });
-  } catch (failure) {
+  // GET deadlines cover the whole response, including a body that stalls
+  // after headers arrive. Mutation outcomes are never retried or timed out here.
+  const controller = method === "GET" ? new AbortController() : null;
+  const cancel = () => controller?.abort();
+  let timedOut = false;
+  const timer = controller
+    ? setTimeout(
+        () => {
+          timedOut = true;
+          controller.abort();
+        },
+        ["/providers", "/jobs/health"].includes(path)
+          ? 5000
+          : path === "/brands"
+            ? 90000
+            : 15000,
+      )
+    : null;
+  if (signal?.aborted) cancel();
+  else if (controller && signal)
+    signal.addEventListener("abort", cancel, { once: true });
+  const handleFailure = (failure: unknown): never => {
     requireCurrentApiSession(session);
+    if (timedOut)
+      throw new ApiError(
+        "The request timed out. Please try again.",
+        0,
+        "timeout",
+      );
     throw failure;
-  }
-  requireCurrentApiSession(session);
-  if (
-    response.status === 401 &&
-    !["/auth/login", "/auth/bootstrap", "/auth/status"].includes(path)
-  )
-    unauthorizedListeners.forEach((listener) => listener(session));
-  let result: unknown;
+  };
   try {
-    result = await response.json();
-  } catch {
+    let response: Response;
+    try {
+      response = await fetch(`/api/v1${path}`, {
+        method,
+        credentials: "same-origin",
+        signal: controller?.signal ?? signal,
+        headers: {
+          ...(method === "GET" ? {} : { "X-Beweft-Request": "1" }),
+          ...(body && !multipart ? { "Content-Type": "application/json" } : {}),
+        },
+        body:
+          body === undefined
+            ? undefined
+            : multipart
+              ? body
+              : JSON.stringify(body),
+      });
+    } catch (failure) {
+      return handleFailure(failure);
+    }
     requireCurrentApiSession(session);
-    throw new ApiError(
-      "The server returned an unreadable response. Please try again.",
-      response.status,
-      "invalid_response",
-    );
+    if (
+      response.status === 401 &&
+      !["/auth/login", "/auth/bootstrap", "/auth/status"].includes(path)
+    )
+      unauthorizedListeners.forEach((listener) => listener(session));
+    let result: unknown;
+    try {
+      result = await response.json();
+    } catch (failure) {
+      if (timedOut || signal?.aborted) handleFailure(failure);
+      requireCurrentApiSession(session);
+      throw new ApiError(
+        "The server returned an unreadable response. Please try again.",
+        response.status,
+        "invalid_response",
+      );
+    }
+    requireCurrentApiSession(session);
+    if (!response.ok) {
+      const error = z
+        .object({ error: z.object({ code: z.string(), message: z.string() }) })
+        .safeParse(result);
+      throw new ApiError(
+        error.success
+          ? error.data.error.message
+          : `Request failed (${response.status}).`,
+        response.status,
+        error.success ? error.data.error.code : "request_failed",
+      );
+    }
+    const envelope = z.object({ data: schema }).safeParse(result);
+    if (!envelope.success)
+      throw new ApiError(
+        "The server response did not match the API contract. Refresh after checking that the server and web app versions match.",
+        response.status,
+        "contract_mismatch",
+      );
+    return envelope.data.data;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+    if (controller && signal) signal.removeEventListener("abort", cancel);
   }
-  requireCurrentApiSession(session);
-  if (!response.ok) {
-    const error = z
-      .object({ error: z.object({ code: z.string(), message: z.string() }) })
-      .safeParse(result);
-    throw new ApiError(
-      error.success
-        ? error.data.error.message
-        : `Request failed (${response.status}).`,
-      response.status,
-      error.success ? error.data.error.code : "request_failed",
-    );
-  }
-  const envelope = z.object({ data: schema }).safeParse(result);
-  if (!envelope.success)
-    throw new ApiError(
-      "The server response did not match the API contract. Refresh after checking that the server and web app versions match.",
-      response.status,
-      "contract_mismatch",
-    );
-  return envelope.data.data;
 }
 export const ok = z.object({ ok: z.boolean() });

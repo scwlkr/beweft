@@ -84,6 +84,7 @@ export function useWorkspace() {
   const session = useRef(0);
   const sessionEpoch = useRef<string | null>(null);
   const verification = useRef(0);
+  const verificationController = useRef<AbortController | null>(null);
   const [sessionRevision, setSessionRevision] = useState(0);
   const selection = useRef(0);
   // Only an explicit choice invalidates in-flight brand-list snapshots. An
@@ -104,6 +105,9 @@ export function useWorkspace() {
   });
   const finishedLoading = useRef(0);
   const actionGeneration = useRef(0);
+  const metadataRequests = useRef<
+    Partial<Record<"providers" | "health", AbortController>>
+  >({});
   const context = useRef(brandId);
   const brand = brands.find((b) => b.id === brandId);
   const clearBrandData = useCallback(() => {
@@ -114,6 +118,12 @@ export function useWorkspace() {
     setPublications([]);
     setComposer(undefined);
   }, []);
+  const abortMetadata = useCallback(() => {
+    for (const controller of Object.values(metadataRequests.current))
+      controller.abort();
+    metadataRequests.current = {};
+  }, []);
+  useEffect(() => () => abortMetadata(), [abortMetadata]);
   const setReady = useCallback(
     (value: boolean, epoch?: string) => {
       if (value && !epoch)
@@ -133,6 +143,8 @@ export function useWorkspace() {
       setSessionRevision((current) => current + 1);
       if (value) setSignOutError("");
       if (clear) {
+        abortMetadata();
+        verificationController.current?.abort();
         ++selection.current;
         ++actionGeneration.current;
         clearBrandData();
@@ -150,23 +162,37 @@ export function useWorkspace() {
       }
       setReadyState(value);
     },
-    [clearBrandData],
+    [abortMetadata, clearBrandData],
   );
   const verifySession = useCallback(async () => {
     if (signingOutRef.current) return;
+    verificationController.current?.abort();
+    const controller = new AbortController();
+    verificationController.current = controller;
     const check = ++verification.current;
     let captured: ApiSession | undefined;
     try {
-      captured = captureApiSession();
-      await api("/auth/me", z.object({ id: z.string(), email: z.string() }));
-      if (
-        check === verification.current &&
-        isCurrentApiSession(captured) &&
-        !signingOutRef.current
-      )
-        setReady(true, captured.epoch);
+      await authLock(async () => {
+        if (check !== verification.current || signingOutRef.current) return;
+        captured = captureApiSession();
+        await api(
+          "/auth/me",
+          z.object({ id: z.string(), email: z.string() }),
+          "GET",
+          undefined,
+          controller.signal,
+          true,
+        );
+        if (
+          check === verification.current &&
+          isCurrentApiSession(captured) &&
+          !signingOutRef.current
+        )
+          setReady(true, captured.epoch);
+      }, controller.signal);
     } catch (failure) {
       if (
+        controller.signal.aborted ||
         check !== verification.current ||
         (captured && !isCurrentApiSession(captured))
       )
@@ -179,6 +205,9 @@ export function useWorkspace() {
             ? failure.message
             : "Unable to check your session.",
         );
+    } finally {
+      if (verificationController.current === controller)
+        verificationController.current = null;
     }
   }, [setReady]);
   const identityChanged = useCallback(() => {
@@ -238,6 +267,7 @@ export function useWorkspace() {
     void verifySession();
     return () => {
       ++verification.current;
+      verificationController.current?.abort();
     };
   }, [verifySession]);
   const signOut = async () => {
@@ -256,11 +286,8 @@ export function useWorkspace() {
           superseded = true;
           return;
         }
-        try {
-          await api("/auth/logout", ok, "POST", {}, controller.signal);
-        } finally {
-          rotateAuthEpoch();
-        }
+        rotateAuthEpoch();
+        await api("/auth/logout", ok, "POST", {}, controller.signal);
       }, controller.signal);
     } catch (failure) {
       if (failure instanceof AuthStorageError) setSignOutError(failure.message);
@@ -297,6 +324,7 @@ export function useWorkspace() {
   }, [toast]);
   const selectBrand = useCallback(
     (id: string) => {
+      abortMetadata();
       ++selection.current;
       context.current = id;
       setError("");
@@ -309,7 +337,7 @@ export function useWorkspace() {
       setSearch("");
       setLoading(true);
     },
-    [clearBrandData],
+    [abortMetadata, clearBrandData],
   );
   const chooseBrand = useCallback(
     (id: string) => {
@@ -366,24 +394,40 @@ export function useWorkspace() {
     };
     const metadata = <T>(
       area: "providers" | "health",
-      promise: Promise<T>,
+      request: (signal: AbortSignal) => Promise<T>,
       update: (value: T) => void,
     ) => {
-      void promise.then(
-        (value) => {
-          apply(area, () => update(value));
-          report(area, "");
-        },
-        (e: unknown) => report(area, (e as Error).message),
-      );
+      metadataRequests.current[area]?.abort();
+      const controller = new AbortController();
+      metadataRequests.current[area] = controller;
+      void request(controller.signal)
+        .then(
+          (value) => {
+            if (controller.signal.aborted) return;
+            apply(area, () => update(value));
+            report(area, "");
+          },
+          (e: unknown) => {
+            if (!controller.signal.aborted) report(area, (e as Error).message);
+          },
+        )
+        .finally(() => {
+          if (metadataRequests.current[area] === controller)
+            delete metadataRequests.current[area];
+        });
     };
     setLoading(true);
     metadata(
       "providers",
-      api("/providers", z.array(ProviderSchema)),
+      (signal) =>
+        api("/providers", z.array(ProviderSchema), "GET", undefined, signal),
       setProviders,
     );
-    metadata("health", api("/jobs/health", HealthSchema), setHealth);
+    metadata(
+      "health",
+      (signal) => api("/jobs/health", HealthSchema, "GET", undefined, signal),
+      setHealth,
+    );
     let area: LoadArea = "brands";
     try {
       const bs = await api("/brands", z.array(BrandSchema));
