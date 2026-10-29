@@ -1,9 +1,11 @@
 import { Feather, Plus, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, ok, type Post } from "../api";
 import { Empty, Time } from "../components/shared";
 import { Button } from "../components/ui/button";
 import { Dialog } from "../components/ui/dialog";
+import { readScheduleIntent, scheduleLock } from "../scheduleIntent";
+import type { usePendingSchedule } from "../usePendingSchedule";
 
 type Action = (
   fn: () => Promise<unknown>,
@@ -17,6 +19,7 @@ export function Drafts({
   onDuplicate,
   onCompose,
   protectedPostId,
+  pendingSchedule,
 }: {
   posts: Post[];
   action: Action;
@@ -25,9 +28,19 @@ export function Drafts({
   onDuplicate: (p: Post) => void;
   onCompose: () => void;
   protectedPostId?: string;
+  pendingSchedule: ReturnType<typeof usePendingSchedule>;
 }) {
   const drafts = posts.filter((p) => p.status === "draft");
   const [confirm, setConfirm] = useState<Post | null>(null);
+  const lifetime = useRef<AbortController | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    lifetime.current = controller;
+    return () => {
+      controller.abort();
+      if (lifetime.current === controller) lifetime.current = null;
+    };
+  }, []);
   return (
     <>
       {drafts.length === 0 ? (
@@ -70,7 +83,7 @@ export function Drafts({
                 variant="ghost"
                 size="icon"
                 aria-label={`Delete ${p.title || "draft"}`}
-                disabled={p.id === protectedPostId}
+                disabled={!pendingSchedule.ready || p.id === protectedPostId}
                 onClick={() => setConfirm(p)}
               >
                 <Trash2 size={17} />
@@ -92,10 +105,28 @@ export function Drafts({
             </Button>
             <Button
               variant="destructive"
-              disabled={pending}
+              disabled={
+                pending ||
+                !pendingSchedule.ready ||
+                confirm.id === protectedPostId
+              }
               onClick={() =>
                 void action(
-                  () => api(`/posts/${confirm.id}`, ok, "DELETE"),
+                  () =>
+                    scheduleLock(
+                      pendingSchedule.key,
+                      async () => {
+                        if (
+                          readScheduleIntent(pendingSchedule.key)?.post.id ===
+                          confirm.id
+                        )
+                          throw new Error(
+                            "This draft has an unresolved schedule. Check it before deleting.",
+                          );
+                        return api(`/posts/${confirm.id}`, ok, "DELETE");
+                      },
+                      lifetime.current?.signal,
+                    ),
                   "Draft deleted",
                 ).then((ok) => ok && setConfirm(null))
               }

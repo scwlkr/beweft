@@ -76,7 +76,7 @@ export function Composer({
     <Dialog
       open
       onOpenChange={(v) => {
-        if (!v && !busy) onClose();
+        if (!v && (!busy || !!intent)) onClose();
       }}
       title={post?.id ? "Edit post" : "Create a post"}
       description="One idea. A version that feels right on every channel."
@@ -350,14 +350,16 @@ export function Composer({
             </strong>
             <p>
               {recoveryMessage ||
-                "The outcome is not yet confirmed. This saved revision and its channel choices are locked until you check or retry the original schedule."}
+                (intent?.request_contract === "request-id-v1"
+                  ? "The outcome is not yet confirmed. This saved revision and its channel choices are locked until you check or retry the original schedule."
+                  : "This older request has no recovery ID. Check its destinations and keep this record; retrying could create a duplicate.")}
             </p>
           </div>
         </div>
       )}
       {error && <ErrorNotice message={error} />}
       <footer className="dialog-footer">
-        <Button variant="ghost" onClick={onClose} disabled={busy}>
+        <Button variant="ghost" onClick={onClose} disabled={busy && !intent}>
           {intent || recovery === "complete" ? "Close" : "Cancel"}
         </Button>
         {intent ? (
@@ -365,7 +367,7 @@ export function Composer({
             <Button
               variant="secondary"
               onClick={() => void recover(false)}
-              disabled={busy}
+              disabled={busy || !pendingSchedule.ready}
             >
               Check scheduling outcome
             </Button>
@@ -374,8 +376,13 @@ export function Composer({
                 Release and refresh
               </Button>
             ) : (
-              recovery !== "partial" && (
-                <Button onClick={() => void recover(true)} disabled={busy}>
+              intent.request_contract === "request-id-v1" &&
+              intent.uncertain &&
+              !["mismatch", "legacy"].includes(recovery) && (
+                <Button
+                  onClick={() => void recover(true)}
+                  disabled={busy || !pendingSchedule.ready}
+                >
                   Retry original schedule
                 </Button>
               )

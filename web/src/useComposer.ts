@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import {
   api,
+  captureWorkspaceSession,
+  isCurrentWorkspaceSession,
+  requireWorkspaceSession,
   PostSchema,
+  type ApiSession,
   type Brand,
   type Channel,
   type Media,
@@ -17,10 +21,20 @@ import {
   inspectScheduleIntent,
   makeScheduleIntent,
   readScheduleIntent,
+  sameScheduleIntent,
   scheduleLock,
   sendScheduleIntent,
+  type PublicationSummary,
 } from "./scheduleIntent";
 import type { usePendingSchedule } from "./usePendingSchedule";
+function confirmationMessage(rows: PublicationSummary[]) {
+  const canceled = rows.filter((row) => row.state === "canceled").length;
+  return `The original request is confirmed for ${rows.length} ${rows.length === 1 ? "channel" : "channels"}.${
+    canceled
+      ? ` ${canceled} ${canceled === 1 ? "item is" : "items are"} now canceled.`
+      : ""
+  }`;
+}
 export function useComposer({
   brand,
   channels,
@@ -42,12 +56,28 @@ export function useComposer({
 }) {
   const mounted = useRef(true);
   const running = useRef(false);
+  const lifetime = useRef<AbortController | null>(null);
   useEffect(() => {
     mounted.current = true;
+    const controller = new AbortController();
+    lifetime.current = controller;
     return () => {
       mounted.current = false;
+      controller.abort();
+      if (lifetime.current === controller) lifetime.current = null;
     };
   }, []);
+  const active = (session: ApiSession, signal?: AbortSignal) => {
+    if (
+      !mounted.current ||
+      !lifetime.current ||
+      lifetime.current.signal !== signal ||
+      signal?.aborted
+    )
+      return false;
+    requireWorkspaceSession(session);
+    return true;
+  };
   const [post, setPost] = useState(initial);
   const [title, setTitle] = useState(initial?.title ?? "");
   const [text, setText] = useState(initial?.text ?? "");
@@ -92,7 +122,13 @@ export function useComposer({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [recovery, setRecovery] = useState<
-    "unchecked" | "retry" | "release" | "partial" | "complete"
+    | "unchecked"
+    | "retry"
+    | "release"
+    | "partial"
+    | "mismatch"
+    | "legacy"
+    | "complete"
   >("unchecked");
   const [recoveryMessage, setRecoveryMessage] = useState("");
   const intent = pendingSchedule.intent;
@@ -129,9 +165,9 @@ export function useComposer({
     setRecoveryMessage("");
     // Each stored intent represents an immutable post revision.
   }, [intent?.id]);
-  const active = channels.find((c) => c.id === tab);
+  const activeChannel = channels.find((c) => c.id === tab);
   const currentText = tab === "all" ? text : (variants[tab] ?? text);
-  const previewChannel = active;
+  const previewChannel = activeChannel;
   const activeMedia =
     tab === "all" ? mediaIds : (variantMedia[tab] ?? mediaIds);
   const setActiveMedia = (ids: string[]) =>
@@ -139,81 +175,189 @@ export function useComposer({
       ? setMediaIds(ids)
       : setVariantMedia({ ...variantMedia, [tab]: ids });
   const selectedMedia = media.filter((m) => activeMedia.includes(m.id));
-  const recover = async (_retry: boolean) => {
+  const recover = async (retry: boolean) => {
     if (running.current || !pendingSchedule.ready || !intent) return;
+    let session: ApiSession;
+    try {
+      session = captureWorkspaceSession();
+    } catch {
+      return;
+    }
+    const signal = lifetime.current?.signal;
     running.current = true;
     setBusy(true);
     setError("");
     try {
-      await scheduleLock(pendingSchedule.key, async () => {
-        const saved = readScheduleIntent(pendingSchedule.key);
-        if (!saved || saved.id !== intent.id)
-          throw new Error(
-            "This scheduling intent changed in another tab. Reopen it to review the current outcome.",
+      await scheduleLock(
+        pendingSchedule.key,
+        async (lockedSession) => {
+          if (!active(lockedSession, signal)) return;
+          const saved = readScheduleIntent(pendingSchedule.key);
+          if (!saved || !sameScheduleIntent(saved, intent))
+            throw new Error(
+              "This scheduling intent changed in another tab. Reopen it to review the current outcome.",
+            );
+          if (retry) {
+            if (saved.request_contract !== "request-id-v1" || !saved.uncertain)
+              throw new Error(
+                "Only an unresolved request with its original request ID can be retried.",
+              );
+            const rows = await sendScheduleIntent(
+              pendingSchedule.key,
+              saved,
+              lockedSession,
+              true,
+              signal,
+            );
+            if (!active(lockedSession, signal)) return;
+            await clearScheduleIntent(
+              pendingSchedule.key,
+              saved.id,
+              lockedSession,
+              signal,
+            );
+            if (!active(lockedSession, signal)) return;
+            setRecovery("complete");
+            setRecoveryMessage(confirmationMessage(rows));
+            await onSaved();
+            return;
+          }
+          const state = await inspectScheduleIntent(
+            saved,
+            lockedSession,
+            signal,
           );
-        const state = await inspectScheduleIntent(saved);
-        if (state.recorded.length) {
-          if (mounted.current) {
+          if (!active(lockedSession, signal)) return;
+          if (state.kind === "complete") {
+            await clearScheduleIntent(
+              pendingSchedule.key,
+              saved.id,
+              lockedSession,
+              signal,
+            );
+            if (!active(lockedSession, signal)) return;
+            setRecovery("complete");
+            setRecoveryMessage(confirmationMessage(state.publications));
+            await onSaved();
+          } else if (state.kind === "legacy") {
+            setRecovery("legacy");
+            setRecoveryMessage(
+              "This older request was sent without a recovery ID. Check the original destinations and keep this record; retrying could create a duplicate.",
+            );
+          } else if (state.kind === "mismatch") {
+            setRecovery("mismatch");
+            setRecoveryMessage(
+              "The server record does not match this saved request. The original remains locked for review.",
+            );
+          } else if (state.kind === "partial") {
             setRecovery("partial");
             setRecoveryMessage(
-              "Matching publications exist, but cannot yet be tied to this request. Review the queue and keep this intent until request-specific recovery is available.",
+              "The server returned only part of this request. The original remains saved; check again or retry the same request ID.",
             );
-          }
-        } else if (state.fenced || state.rejected) {
-          if (mounted.current) {
+          } else if (!saved.uncertain && saved.rejection) {
             setRecovery("release");
             setRecoveryMessage(
-              state.fenced
-                ? "The post changed after this request. The original revision can no longer be scheduled; refresh the post before editing."
-                : `The server rejected this request. ${saved.rejection ?? "Review the post before trying again."}`,
+              `The original request was rejected: ${saved.rejection}`,
+            );
+          } else {
+            setRecovery("retry");
+            setRecoveryMessage(
+              "No request record is visible yet. The original may still complete; an explicit retry uses the same request ID and revision.",
             );
           }
-        } else if (mounted.current) {
-          setRecovery("retry");
-          setRecoveryMessage(
-            "No publication was found yet. The original request could still complete; request-specific recovery is needed before retrying.",
-          );
-        }
-      });
+        },
+        signal,
+        session,
+        true,
+      );
     } catch (e) {
-      if (mounted.current)
+      if (
+        mounted.current &&
+        lifetime.current?.signal === signal &&
+        isCurrentWorkspaceSession(session)
+      )
         setError(
           `${e instanceof Error ? e.message : "Unable to check scheduling."} The original schedule is still saved for recovery.`,
         );
     } finally {
       running.current = false;
-      if (mounted.current) setBusy(false);
+      if (
+        mounted.current &&
+        lifetime.current?.signal === signal &&
+        isCurrentWorkspaceSession(session)
+      )
+        setBusy(false);
     }
   };
   const release = async () => {
     if (running.current || !pendingSchedule.ready || !intent) return;
+    let session: ApiSession;
+    try {
+      session = captureWorkspaceSession();
+    } catch {
+      return;
+    }
+    const signal = lifetime.current?.signal;
     running.current = true;
     setBusy(true);
     setError("");
     try {
-      await scheduleLock(pendingSchedule.key, async () => {
-        const saved = readScheduleIntent(pendingSchedule.key);
-        if (!saved || saved.id !== intent.id)
-          throw new Error("Scheduling intent changed in another tab.");
-        const state = await inspectScheduleIntent(saved);
-        if (state.recorded.length || !(state.fenced || state.rejected))
-          throw new Error(
-            "The original outcome is not yet safe to release. Check it again.",
+      await scheduleLock(
+        pendingSchedule.key,
+        async (lockedSession) => {
+          if (!active(lockedSession, signal)) return;
+          const saved = readScheduleIntent(pendingSchedule.key);
+          if (!saved || !sameScheduleIntent(saved, intent))
+            throw new Error("Scheduling intent changed in another tab.");
+          if (
+            saved.request_contract !== "request-id-v1" ||
+            saved.uncertain ||
+            !saved.rejection
+          )
+            throw new Error(
+              "The original outcome is not yet safe to release. Check it again.",
+            );
+          const state = await inspectScheduleIntent(
+            saved,
+            lockedSession,
+            signal,
           );
-        clearScheduleIntent(pendingSchedule.key, saved.id);
-        if (mounted.current) {
+          if (!active(lockedSession, signal)) return;
+          if (state.kind !== "missing")
+            throw new Error(
+              "A server record exists or could not be verified. Check the original outcome again.",
+            );
+          await clearScheduleIntent(
+            pendingSchedule.key,
+            saved.id,
+            lockedSession,
+            signal,
+          );
+          if (!active(lockedSession, signal)) return;
           await onSaved();
-          if (mounted.current) onClose();
-        }
-      });
+          if (active(lockedSession, signal)) onClose();
+        },
+        signal,
+        session,
+        true,
+      );
     } catch (e) {
-      if (mounted.current)
+      if (
+        mounted.current &&
+        lifetime.current?.signal === signal &&
+        isCurrentWorkspaceSession(session)
+      )
         setError(
           e instanceof Error ? e.message : "Unable to release the schedule.",
         );
     } finally {
       running.current = false;
-      if (mounted.current) setBusy(false);
+      if (
+        mounted.current &&
+        lifetime.current?.signal === signal &&
+        isCurrentWorkspaceSession(session)
+      )
+        setBusy(false);
     }
   };
   const submit = async () => {
@@ -224,6 +368,13 @@ export function useComposer({
       recovery === "complete"
     )
       return;
+    let session: ApiSession;
+    try {
+      session = captureWorkspaceSession();
+    } catch {
+      return;
+    }
+    const signal = lifetime.current?.signal;
     setError("");
     const hasContent = (id: string) =>
       (variants[id] ?? text).trim().length > 0 ||
@@ -283,53 +434,67 @@ export function useComposer({
             : {}),
         })),
       };
-      await scheduleLock(pendingSchedule.key, async () => {
-        if (readScheduleIntent(pendingSchedule.key))
-          throw new Error(
-            "Another tab has an unfinished schedule. Review that original schedule before saving a post.",
-          );
-        const saved = await api(
-          post?.id ? `/posts/${post.id}` : "/posts",
-          PostSchema,
-          post?.id ? "PATCH" : "POST",
-          post?.id
-            ? ({ ...body, version: post.version! } satisfies UpdatePostRequest)
-            : ({ ...body, brand_id: brand.id } satisfies CreatePostRequest),
-        );
-        if (mounted.current) setPost(saved);
-        if (!mounted.current) return;
-        if (mode !== "draft") {
-          const schedule = makeScheduleIntent(saved, selected, mode, date);
-          const result = await sendScheduleIntent(
-            pendingSchedule.key,
-            schedule,
-          );
-          if (
-            !schedule.channel_ids.every((id) =>
-              result.some(
-                (p) =>
-                  p.channel_id === id &&
-                  p.post_id === saved.id &&
-                  p.post_version === saved.version,
-              ),
-            )
-          )
+      await scheduleLock(
+        pendingSchedule.key,
+        async (lockedSession) => {
+          if (!active(lockedSession, signal)) return;
+          if (readScheduleIntent(pendingSchedule.key))
             throw new Error(
-              "The scheduling response was incomplete. Check the original outcome before trying again.",
+              "Another tab has an unfinished schedule. Review that original schedule before saving a post.",
             );
-          clearScheduleIntent(pendingSchedule.key, schedule.id);
-        }
-        if (mounted.current) {
+          const saved = await api(
+            post?.id ? `/posts/${post.id}` : "/posts",
+            PostSchema,
+            post?.id ? "PATCH" : "POST",
+            post?.id
+              ? ({
+                  ...body,
+                  version: post.version!,
+                } satisfies UpdatePostRequest)
+              : ({ ...body, brand_id: brand.id } satisfies CreatePostRequest),
+          );
+          if (!active(lockedSession, signal)) return;
+          setPost(saved);
+          if (mode !== "draft") {
+            const schedule = makeScheduleIntent(saved, selected, mode, date);
+            await sendScheduleIntent(
+              pendingSchedule.key,
+              schedule,
+              lockedSession,
+              false,
+              signal,
+            );
+            if (!active(lockedSession, signal)) return;
+            await clearScheduleIntent(
+              pendingSchedule.key,
+              schedule.id,
+              lockedSession,
+              signal,
+            );
+          }
+          if (!active(lockedSession, signal)) return;
           await onSaved();
-          if (mounted.current) onClose();
-        }
-      });
+          if (active(lockedSession, signal)) onClose();
+        },
+        signal,
+        session,
+        true,
+      );
     } catch (e) {
-      if (mounted.current)
+      if (
+        mounted.current &&
+        lifetime.current?.signal === signal &&
+        isCurrentWorkspaceSession(session)
+      )
         setError(e instanceof Error ? e.message : "Unable to save your post.");
     } finally {
       running.current = false;
-      if (mounted.current) setBusy(false);
+      if (
+        mounted.current &&
+        lifetime.current?.signal === signal &&
+        isCurrentWorkspaceSession(session)
+      )
+        setBusy(false);
     }
   };
   return {
@@ -363,7 +528,7 @@ export function useComposer({
     recoveryMessage,
     recover,
     release,
-    active,
+    active: activeChannel,
     currentText,
     previewChannel,
     activeMedia,

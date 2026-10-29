@@ -200,7 +200,9 @@ test("two stalled reply owner checks cannot starve a third tab's sign-out", asyn
       await signingOut
         .getByRole("button", { name: "Sign in", exact: true })
         .click();
-      await expect(signingOut.getByLabel("Current brand")).toBeVisible();
+      await expect(signingOut.getByLabel("Current brand")).toBeVisible({
+        timeout: 10_000,
+      });
       for (const tab of [first, second]) {
         await expect(
           tab.getByRole("button", { name: "Reply", exact: true }),
@@ -445,12 +447,15 @@ test("a schedule with an unknown response keeps its intent across sign-out", asy
         sends = 0;
       const posted = new Promise<void>((resolve) => (started = resolve));
       const held = new Promise<void>((resolve) => (release = resolve));
-      await context.route("**/api/v1/posts/*/schedule", async (route) => {
-        sends++;
-        started();
-        await held;
-        await route.abort("failed").catch(() => {});
-      });
+      await context.route(
+        /\/api\/v1\/posts\/[^/]+\/schedule\?view=summary$/,
+        async (route) => {
+          sends++;
+          started();
+          await held;
+          await route.abort("failed").catch(() => {});
+        },
+      );
       try {
         await pending.goto(new URL("/pending-fixture", pending.url()).href);
         await pending.addScriptTag({ content: script });

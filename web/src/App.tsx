@@ -250,6 +250,7 @@ export default function App() {
                       action={action}
                       pending={pending}
                       protectedPostId={pendingSchedule.intent?.post.id}
+                      pendingSchedule={pendingSchedule}
                       onEdit={setComposer}
                       onDuplicate={(post) =>
                         setComposer({
