@@ -14,7 +14,7 @@ Rust-generated request types are consumed by draft creation/editing, idea creati
 
 Regression scenarios cover late schedule loads, a completed mutation after a brand switch, delayed analytics, channel-only drafts, filtered queue reordering, calendar day selection, and mobile focus trapping/Escape. These use real local API/database workflows; response delays are controlled in the browser. Additional controlled provider-response fixtures verify partial-sync errors and counts, connection/reconnect controls, permission metadata, private Mastodon reply audience, owner-attestation receipts, and expired YouTube session reset without automatic retry. They prove UI behavior, not real provider access. Temporary test output is removed even after a failed assertion.
 
-Latest local run: `pnpm build` and the isolated `pnpm test:e2e` passed on 2026-10-29. This verifies local workflows only; the provider connection and live inbox/publishing paths were not exercised against real accounts.
+Before the final partial handoff changes, `pnpm build` and all twelve isolated browser scenarios passed on 2026-10-29 at `c1fc4f4`. The later `ef3120a` checkpoint passes build/TypeScript but its brand-fallback and unwired scheduling-intent changes have not passed new E2E checks or fresh review. Provider connection and live inbox/publishing paths were not exercised against real accounts.
 
 ## Scope still requiring subsequent slices
 

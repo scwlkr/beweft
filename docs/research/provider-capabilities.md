@@ -39,6 +39,22 @@ The current [Buffer channel matrix](https://support.buffer.com/articles/supporte
 | Substack | Buffer lists it, but this investigation did not establish a supported public publishing API suitable for an independent self-hoster. Use manual handoff; do not use reverse-engineered private endpoints. |
 | Start Pages | Buffer's own product, not an independent social network. No dependency or cloned proprietary service is required for beweft. |
 
+### Google Business Profile implementation notes
+
+The [create method](https://developers.google.com/my-business/reference/rest/v4/accounts.locations.localPosts/create)
+accepts a LocalPost under `accounts/{account}/locations/{location}` using
+`business.manage`. The [resource contract](https://developers.google.com/my-business/reference/rest/v4/accounts.locations.localPosts)
+distinguishes STANDARD, EVENT and OFFER; events and offers need event dates,
+CALL omits a URL, and other calls to action use a URL. Persist the returned
+resource name, state and search URL. Media uses a publicly reachable source URL.
+An ambiguous create cannot be declared absent from a missing local receipt.
+
+[Project eligibility](https://developers.google.com/my-business/content/prereqs)
+requires an active verified profile for at least 60 days, a representative
+website and API approval. Saving OAuth credentials does not establish those
+conditions. This is a practical adapter candidate with operator qualification;
+it is not automatically blocked merely because no account is connected yet.
+
 ## Analytics and inbox contract
 
 Treat metrics as observations with provider, account, post, measurement time, period and coverage. Missing, delayed, inaccessible and zero are different values. Store the actual provider receipt; never fabricate engagement to fill a chart. For YouTube, the [Analytics reports endpoint](https://developers.google.com/youtube/analytics/reference/reports/query) documents channel-authorized metrics and its analytics scopes, with an additional `youtube.readonly` requirement noted on the page. A publishing grant alone is insufficient.

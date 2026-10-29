@@ -8,8 +8,7 @@ retry, reorder, or delete account content.
 ## Observation boundary
 
 The existing Chrome profile was inspected through native browser accessibility
-tools, with REA passive CDP observation added after the owner explicitly approved
-enabling remote debugging permanently. REA's exact-origin filter limited the
+tools, with authorized REA passive CDP observation. REA's exact-origin filter limited the
 observation to Buffer; text, script source, storage keys/fingerprints, console text
 and response-body capture remained off. Account plan limits prevent inspection
 of paid-only workflows. No private endpoints were invoked directly.

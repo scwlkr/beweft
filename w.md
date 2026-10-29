@@ -1,14 +1,23 @@
 # beweft project notes
 
-Status: full implementation in progress. Research and architecture decisions are
+Status: implementation paused at the owner's request for orchestrator handoff.
+Start continuation with [ORCHESTRATOR-HANDOFF.md](ORCHESTRATOR-HANDOFF.md), which
+contains the launch prompt, five-agent ownership, PR stack and unresolved review
+findings. No previous implementation agents remain active. Research decisions are
 in `docs/research/` and `docs/architecture.md`. REA is installed for local Codex;
-authorized passive Buffer investigation has begun. Provider implementation and
+the authorized passive Buffer inventory is recorded in `docs/research/buffer.md`.
+Provider implementation and
 fixture verification do not establish live account access or publication.
 
 Owner decisions: unicorn mascot and feel; self-host deployment uses placeholders
 until a server/domain is selected. No production deployment target is approved.
-Existing Chrome remote debugging was enabled with explicit permanent approval.
+Machine-specific browser configuration and approvals stay in the ignored local handoff.
 Repository: https://github.com/scwlkr/beweft (already public; admin access verified).
+
+Integrated: research/standards PR #2 and durable API/worker PR #3. Draft PRs #4–#7
+preserve the web, workflows, providers and CLI/operations checkpoints. They are
+not all ready to merge. See `docs/delivery.md` for the unfinished delivery work.
+`docs/operations-requirements.md` defines installation and recovery acceptance.
 
 The [build brief](HANDOFF.md) describes the intended product. A local private
 handoff, when present, contains the owner's complete request for a build chat.
