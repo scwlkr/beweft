@@ -10,6 +10,10 @@ PROFILE = '(version 1) (allow default) (deny network-outbound) (allow network-ou
 
 
 def loopback_only(command, allow_docker=False):
+    # Children inherit the verified parent sandbox; applying a second, different
+    # profile is not supported on all macOS versions.
+    if os.environ.get('BEWEFT_PROVIDER_TEST_SANDBOX') == '1':
+        return list(map(str, command))
     sandbox = Path('/usr/bin/sandbox-exec')
     if sys.platform != 'darwin' or not sandbox.is_file():
         raise RuntimeError('Provider fixture tests require a verified loopback-only subprocess sandbox on this host')
