@@ -11,7 +11,9 @@ ancestry intact. Main merge `a60b531` has exactly the application tree reviewed
 at `3b4445b`. Reviewed continuation PRs through #23 include owner/brand/session
 recovery, scoped CLI/MCP, worker health, provider removal fences, media
 metadata, idea organization, durable scheduling receipts, production provider
-wiring, X video, and connection/manual/reply recovery UI.
+wiring, X video, and connection/manual/reply recovery UI. Bluesky video and
+its explicit quota-rejection retry correction also landed through PR #26.
+Live provider access remains unverified.
 
 A fresh independent reviewer exercised the built image through first-owner
 setup, invalid setup secret/timezone, empty initial data, manual channel,
@@ -35,10 +37,10 @@ dev database/media remain preserved separately.
 
 | Milestone | State |
 | --- | --- |
-| Meta formats #24 | Frozen `38e83e5`, practical independent review passed. Facebook Page Reels and Instagram/Threads carousels; live access unverified. Lands with its consumer UI. |
-| Content/owner UI #25 | Correction active after review found an unknown queued replacement could be dismissed while the original was sending. A narrow audit-linked read endpoint will recover exact replacement identity. Templates, queued edits/priority, brand archive/restore, owner sessions/password and Meta recovery are in this milestone. |
-| Bluesky video #26 | Frozen candidate/testing. Job/blob checkpoints, stable record identity, PDS compatibility guard and bounded notification reads. Replies remain unfinished and disabled. |
-| LinkedIn media #27 | Testing image/video stages and exact-ID owner recovery. Member grants preserved; organization opt-in/discovery remains unfinished. |
+| Meta formats #24 / correction #28 | Original format review passed. A subsequent accepted-Reel processing defect is being corrected and independently reviewed in cumulative #28: accepted remote work must remain sending/uncertain, never become an ordinary cancelable queued item. The cumulative merge includes #24 and #27 so the unsafe intermediate state does not land. |
+| Content/owner UI #25 | The queued replacement correction uses a narrow audit-linked read endpoint to recover exact successor identity. Final recovery wording and fresh review are active. Templates, queued edits/priority, brand archive/restore, owner sessions/password, Meta and LinkedIn recovery are included. |
+| Bluesky video #26 | Merged at `1320d7e` after fresh review of explicit quota-rejection retry. Job/blob checkpoints, stable record identity, PDS compatibility guard and bounded notification reads are included. Replies remain unfinished and disabled. |
+| LinkedIn media #27 | Frozen `899c370`, practical independent review passed. Member image/video stages and exact-ID owner recovery will land through cumulative #28. Organization opt-in/discovery remains unfinished. |
 
 Each consequential revision still receives a brand-new read-only reviewer.
 All implementation/review agents use `gpt-6.1-terra` at `max`, with at most three
@@ -58,7 +60,10 @@ Exact times retain UTC microseconds. Media description writes use CAS versions;
 new publication snapshots freeze their descriptions.
 
 Provider upload/container IDs and public-write boundaries survive worker claims.
-Unknown public outcomes never cause blind automatic reposting. X recovery binds
+Unknown public outcomes must not cause blind automatic reposting. For an accepted
+remote operation that may still finish, a stopped local sender and an absent post
+are insufficient evidence to retry: the remote operation must have definitively
+ended without publication. X recovery binds
 owner inspection and sender-stopped attestation to observed attempt/checkpoint
 IDs, then requires explicit reset and retry. Reply recovery uses observed
 revision and active-executor guards. An owner attestation is not provider proof;

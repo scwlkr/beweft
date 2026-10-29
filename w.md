@@ -8,8 +8,9 @@ release qualification, remaining formats and review findings are in
 
 The practical local release target is 2026-10-29 at 16:30 America/Chicago. Core
 UI/API/worker use and a real schema-changing image upgrade/rollback passed;
-provider fixtures do not establish live account access or publication. Additional
-content/owner UI and Meta, Bluesky and LinkedIn formats remain active milestones.
+provider fixtures do not establish live account access or publication. Bluesky
+video is merged; additional content/owner UI, Meta and LinkedIn formats remain
+active milestones, including accepted remote-processing recovery.
 The full intended product scope stays open until its feasible work is finished.
 
 Owner decisions: original unicorn identity; self-host deployment uses placeholders
