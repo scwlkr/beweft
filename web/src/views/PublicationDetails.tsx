@@ -1,7 +1,13 @@
 import { Copy, ExternalLink as LinkIcon, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { z } from "zod";
-import { api, PublicationSchema, type Publication, type Media } from "../api";
+import {
+  api,
+  PublicationSchema,
+  type Channel,
+  type Publication,
+  type Media,
+} from "../api";
 import {
   ErrorNotice,
   ExternalLink,
@@ -13,6 +19,7 @@ import {
 } from "../components/shared";
 import { Button } from "../components/ui/button";
 import { ProviderRecovery } from "./ProviderRecovery";
+import { XRecovery } from "./XRecovery";
 import { AttemptHistory, isOwnerAttestation } from "./AttemptHistory";
 import { Dialog } from "../components/ui/dialog";
 
@@ -21,20 +28,43 @@ type Action = (
   message?: string,
 ) => Promise<boolean>;
 const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+function safeDestination(value: string | null | undefined) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password
+      ? url.href
+      : null;
+  } catch {
+    return null;
+  }
+}
 export function PublicationDetails({
   publication: p,
+  channel,
   media,
   onClose,
   action,
   pending,
 }: {
   publication: Publication;
+  channel?: Channel;
   media: Media[];
   onClose: () => void;
   action: Action;
   pending: boolean;
 }) {
-  const [retryAllowed, setRetryAllowed] = useState(p.provider !== "youtube");
+  const guidance =
+    p.provider === "manual" &&
+    channel?.provider === "manual" &&
+    channel.id === p.channel_id &&
+    channel.brand_id === p.brand_id
+      ? channel.manual_guidance
+      : null;
+  const destination = safeDestination(guidance?.compose_url);
+  const [retryAllowed, setRetryAllowed] = useState(
+    !["youtube", "x"].includes(p.provider),
+  );
   const [copyStatus, setCopyStatus] = useState("");
   const [url, setUrl] = useState("");
   const [note, setNote] = useState("");
@@ -123,6 +153,22 @@ export function PublicationDetails({
                 result here. This button does not publish for you.
               </span>
             </div>
+            {guidance && (
+              <section className="detail-section">
+                <h3>Current destination · {guidance.name}</h3>
+                <p>{guidance.guidance}</p>
+                {destination && (
+                  <a
+                    className="button button-secondary"
+                    href={destination}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    Open {guidance.name} <LinkIcon size={16} />
+                  </a>
+                )}
+              </section>
+            )}
             <Button
               type="button"
               variant="secondary"
@@ -146,7 +192,9 @@ export function PublicationDetails({
               </p>
             )}
             {p.payload.media_ids.map((id) => {
-              const m = media.find((m) => m.id === id);
+              const m = media.find(
+                (m) => m.id === id && m.brand_id === p.brand_id,
+              );
               return m ? (
                 <a
                   className="button button-secondary"
@@ -183,7 +231,7 @@ export function PublicationDetails({
             <Submit pending={pending}>I published this post</Submit>
           </form>
         )}
-        {p.state === "uncertain" && (
+        {p.state === "uncertain" && p.provider !== "x" && (
           <form
             className="form-stack"
             onSubmit={(e) => {
@@ -264,6 +312,14 @@ export function PublicationDetails({
               pending={pending}
             />
           )}
+        {p.provider === "x" && ["uncertain", "failed"].includes(p.state) && (
+          <XRecovery
+            publication={p}
+            onRetryAllowed={setRetryAllowed}
+            action={action}
+            pending={pending}
+          />
+        )}
         {p.state === "failed" && (
           <Button
             disabled={pending || !retryAllowed}

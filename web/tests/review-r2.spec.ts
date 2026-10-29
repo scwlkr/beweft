@@ -59,6 +59,7 @@ test("lost reply response recovers one durable attempt across close and reload (
         {
           id: request.request_id,
           inbox_id: itemId,
+          revision: 1,
           text: request.text,
           state: "uncertain",
           error: "Provider response was lost",
@@ -74,6 +75,8 @@ test("lost reply response recovers one durable attempt across close and reload (
       const body = route.request().postDataJSON();
       resolutions++;
       expect(body.resolution).toBe("not_published");
+      expect(body.observed_revision).toBe(1);
+      expect(body.sender_stopped).toBe(true);
       rows[0] = {
         ...rows[0],
         state: "failed",
@@ -160,6 +163,11 @@ test("lost reply response recovers one durable attempt across close and reload (
     await page
       .getByRole("checkbox", {
         name: "I checked the network and verified this outcome.",
+      })
+      .check();
+    await page
+      .getByRole("checkbox", {
+        name: /I confirmed the original sender has stopped/,
       })
       .check();
     await page

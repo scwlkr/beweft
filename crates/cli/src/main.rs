@@ -29,7 +29,7 @@ async fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || matches!(args[0].as_str(), "help" | "--help" | "-h") {
         println!(
-            "beweft <tool> [--json FILE|-]\nbeweft schema <tool>\nbeweft api <GET|POST|PATCH|PUT|DELETE> /path [--json FILE|-]\nbeweft mcp\n\nTools: {}\nUse underscores or hyphens. Outputs JSON. Tokens: BEWEFT_TOKEN_FILE (chmod 600) or BEWEFT_TOKEN.\nServer origin: BEWEFT_URL (default http://127.0.0.1:3000). No automatic write retries.",
+            "beweft <tool> [--json FILE|-]\nbeweft schema <tool>\nbeweft api <GET|POST|PATCH|PUT|DELETE> /path [--json FILE|-]\nbeweft mcp\n\nTools: {}\nUse underscores or hyphens. Outputs JSON. Tokens: BEWEFT_TOKEN_FILE (chmod 600) or BEWEFT_TOKEN.\nServer origin: BEWEFT_URL (default http://127.0.0.1:3000). No automatic write retries.\nBefore scheduling, save the request UUID and exact approved body. For an unknown result, use schedule-request with that UUID; 404 does not prove failure.",
             tools::NAMES.join(", ")
         );
         return Ok(());

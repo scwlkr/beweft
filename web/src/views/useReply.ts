@@ -16,10 +16,12 @@ import {
   type Pending,
 } from "./replyIntent";
 import { ItemSchema } from "./insight-contracts";
+import type { ResolveProviderReplyRequest } from "../lib/api-contract.generated";
 const Attempt = z.object({
   id: z.string().uuid(),
   inbox_id: z.string(),
   text: z.string(),
+  revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   state: z.enum(["sending", "uncertain", "published", "failed"]),
   error: z.string().nullable().optional(),
   receipt: z.unknown().optional(),
@@ -34,6 +36,7 @@ const unresolved = (attempt: Attempt) =>
 export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
   const [text, setText] = useState("");
   const [attempt, setAttempt] = useState<Attempt | null>(null);
+  const [observation, setObservation] = useState(0);
   const [pending, setPending] = useState<Pending | null>(null);
   const [historyChanged, setHistoryChanged] = useState(false);
   const [latest, setLatest] = useState<Attempt | null>(null);
@@ -140,6 +143,7 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
           !ordered.some((row) => row.id === remembered.request_id),
       );
       setAttempt(recorded);
+      setObservation((value) => value + 1);
       setPending(remembered);
       if (recorded || remembered) setText(recorded?.text ?? remembered!.text);
       if (
@@ -377,6 +381,7 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
     resolution: "published" | "not_published";
     note: string;
     external_url?: string;
+    sender_stopped?: true;
   }) => {
     if (!attempt || attempt.state !== "uncertain" || running.current || !ready)
       return;
@@ -395,7 +400,10 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
         `/inbox/${item.id}/replies/${attempt.id}/resolve`,
         Attempt,
         "POST",
-        body,
+        {
+          ...body,
+          observed_revision: attempt.revision,
+        } satisfies ResolveProviderReplyRequest,
       );
       if (result.id !== attempt.id || result.inbox_id !== item.id)
         throw new Error("Reply resolution identity did not match.");
@@ -436,6 +444,7 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
     text,
     setText,
     attempt,
+    observation,
     pending,
     busy,
     ready,

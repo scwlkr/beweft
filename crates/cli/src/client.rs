@@ -29,6 +29,21 @@ fn known_guidance(status: u16, bytes: &[u8]) -> Option<&'static str> {
         (409, "post_version_conflict") => Some(
             "The draft changed. Read the current post version before submitting a new request.",
         ),
+        (409, "schedule_request_in_progress") => Some(
+            "The request is still in progress and its outcome is unresolved. Wait and read the same request ID.",
+        ),
+        (409, "schedule_request_conflict") => Some(
+            "This request ID belongs to a different saved intent. Read its receipt and compare the saved body.",
+        ),
+        (409, "schedule_request_retired") => Some(
+            "This request was retired and cannot create publications. Review a new intent before using a new request ID.",
+        ),
+        (409, "media_version_conflict") => Some(
+            "The effective media or metadata versions do not match. Review the current post and media before a new intent.",
+        ),
+        (400, "provider_format_invalid") => Some(
+            "The content failed provider format checks. Review corrections before another action.",
+        ),
         (400, "invalid_cursor") => Some(
             "The cursor is invalid or incompatible. Restart the listing with a valid limit, the same filters and authorized brand scope.",
         ),
@@ -140,6 +155,7 @@ impl Api {
         );
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(120))
             .build()?;

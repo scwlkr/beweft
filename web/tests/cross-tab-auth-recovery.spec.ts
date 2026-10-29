@@ -812,6 +812,7 @@ test("a reply claim queued before sign-out cannot create a stale intent", async 
           data: {
             id: body.request_id,
             inbox_id: itemId,
+            revision: 1,
             text: body.text,
             state: "published",
             error: null,
@@ -962,6 +963,7 @@ test("a queued terminal reply cleanup waits for a current session", async () => 
       const row = {
         id: body.request_id,
         inbox_id: itemId,
+        revision: 1,
         text: body.text,
         state: "published",
         error: null,
@@ -1041,6 +1043,7 @@ test("a queued reply history acknowledgment cannot update an old session", async
             {
               id: newest,
               inbox_id: itemId,
+              revision: 1,
               text: "Newer server reply",
               state: "published",
               error: null,

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Exercise the actual CLI and MCP subprocess against an isolated API/database.
 
-Build first: cargo build -p beweft-server --bin beweft-server -p beweft-cli
+Build first: cargo build -p beweft-server --bin beweft-server
+             cargo build -p beweft-cli --bin beweft
 Run: python3 crates/cli/tests/integration.py
 Uses a uniquely named database in the configured test PostgreSQL container and
 removes that database and its temporary files on exit. No worker or provider is run.
@@ -63,6 +64,7 @@ def cli(env, *args, body=None, success=True):
                             text=True, capture_output=True, timeout=20)
     assert (result.returncode == 0) == success, (args, result.returncode, result.stderr)
     assert env.get("BEWEFT_TOKEN", "unlikely-secret") not in result.stderr
+    assert env.get("BEWEFT_TOKEN", "unlikely-secret") not in result.stdout
     return json.loads(result.stdout) if success else result.stderr
 
 
@@ -327,7 +329,7 @@ def actionable_errors_test(env, read_env, call, brand, channel, upload_root, med
             wait_for_upload_cleanup(call, media_dir, before, existing_files)
 
         post = call("/posts", {"brand_id": brand, "text": "Needs posting rule"})
-        schedule = {"id": post["id"], "intent": "queue", "body": {"version": post["version"], "channel_ids": [channel]}}
+        schedule = {"id": post["id"], "intent": "queue", "body": {"version": post["version"], "channel_ids": [channel], "request_id": str(uuid.uuid4()), "media_versions": {}}}
         for error in (cli(env, "schedule", "--json", "-", body=schedule, success=False), mcp.call("schedule", schedule, error=True)):
             assert "HTTP 400" in error and "posting schedule" in error and "exact" in error and "outcome may be unknown" not in error
         assert call("/posts/" + post["id"])["status"] == "draft"
@@ -339,7 +341,7 @@ def actionable_errors_test(env, read_env, call, brand, channel, upload_root, med
         pair.sort()
         call("/schedules", {"channel_id": pair[0], "days": [1, 2, 3, 4, 5, 6, 7], "time": "00:01", "timezone": "UTC"})
         rollback_post = call("/posts", {"brand_id": brand, "text": "Rollback schedule fixture"})
-        rollback_args = {"id": rollback_post["id"], "intent": "queue", "body": {"version": rollback_post["version"], "channel_ids": pair}}
+        rollback_args = {"id": rollback_post["id"], "intent": "queue", "body": {"version": rollback_post["version"], "channel_ids": pair, "request_id": str(uuid.uuid4()), "media_versions": {}}}
         assert "posting schedule" in mcp.call("schedule", rollback_args, error=True)
         assert not any(row["post_id"] == rollback_post["id"] for row in call("/publications"))
         assert call("/posts/" + rollback_post["id"])["status"] == "draft"
@@ -677,6 +679,192 @@ def page_limit_error_test(env, origin):
         mcp.close()
 
 
+def schedule_recovery_test(env, read_env, outside_env, origin, call, brand, upload_root):
+    """Exercise scheduling recovery through real CLI/MCP clients and the API."""
+    channel = call("/channels", {"brand_id": brand, "name": "Recovery fixture", "provider": "manual"})["id"]
+    rule = call("/schedules", {"channel_id": channel, "days": [1, 2, 3, 4, 5], "time": "09:15", "timezone": "America/Chicago"})
+    image = upload_root / "schedule-recovery.png"
+    image.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII="))
+    media = cli(env, "media-upload", "--json", "-", body={"brand_id": brand, "path": str(image)})["data"]
+    post = call("/posts", {"brand_id": brand, "text": "Saved schedule recovery", "media_ids": [media["id"]]})
+    request_id = str(uuid.uuid4())
+    stamp = "2099-01-02T12:34:56.123456-05:30"
+    body = {"version": post["version"], "channel_ids": [channel], "scheduled_at": stamp,
+            "request_id": request_id, "media_versions": {media["id"]: media["metadata_version"]}}
+    args = {"id": post["id"], "intent": "exact", "body": body}
+    retire = {"request_id": request_id, "body": {"post_id": post["id"], "brand_id": brand,
+              "version": body["version"], "channel_ids": body["channel_ids"],
+              "scheduled_at": stamp, "media_versions": body["media_versions"]}}
+    mcp = Mcp(env)
+    denied = Mcp(read_env)
+    try:
+        mcp.initialize()
+        denied.initialize()
+        tools = {item["name"]: item for item in mcp.request("tools/list")["result"]["tools"]}
+        schema = cli(env, "schema", "schedule")["inputSchema"]["properties"]["body"]
+        assert schema == tools["schedule"]["inputSchema"]["properties"]["body"]
+        assert {"request_id", "media_versions"}.issubset(schema["required"])
+        assert schema["properties"]["request_id"]["type"] == "string"
+        assert schema["properties"]["media_versions"]["type"] == "object"
+        assert "media_versions" in tools["schedule_retire"]["inputSchema"]["properties"]["body"]["required"]
+        assert tools["schedules"]["annotations"]["readOnlyHint"]
+        assert tools["schedule_request"]["annotations"]["readOnlyHint"]
+        assert not tools["schedule_retire"]["annotations"]["readOnlyHint"]
+        assert cli(read_env, "schedules", "--json", "-", body={"channel_id": channel})["data"][0]["id"] == rule["id"]
+        assert mcp.call("schedules", {"channel_id": channel})["data"][0]["id"] == rule["id"]
+        assert "403" in cli(outside_env, "schedules", "--json", "-", body={"channel_id": channel}, success=False)
+        assert mcp.call("post", {"id": post["id"]})["data"]["media_ids"] == [media["id"]]
+        assert any(row["id"] == media["id"] and row["metadata_version"] == media["metadata_version"] for row in mcp.call("media", {"brand_id": brand})["data"])
+
+        # An unreachable endpoint proves these failures happen before a write
+        # can be sent, for both command and MCP invocations.
+        unreachable = dict(env, BEWEFT_URL=f"http://127.0.0.1:{unused_port()}")
+        preflight = Mcp(unreachable)
+        try:
+            preflight.initialize()
+            for bad_body, expected in [({k: v for k, v in body.items() if k != "request_id"}, "request_id"),
+                                       ({**body, "request_id": "invalid"}, "UUID"),
+                                       ({k: v for k, v in body.items() if k != "media_versions"}, "media_versions"),
+                                       ({**body, "media_versions": None}, "media_versions")]:
+                invalid = {**args, "body": bad_body}
+                assert expected in cli(unreachable, "schedule", "--json", "-", body=invalid, success=False)
+                assert expected in preflight.call("schedule", invalid, error=True)
+            invalid_retire = {**retire, "body": {**retire["body"], "media_versions": None}}
+            assert "media_versions" in preflight.call("schedule_retire", invalid_retire, error=True)
+            assert "UUID" in cli(unreachable, "schedule-retire", "--json", "-",
+                                 body={**retire, "request_id": "invalid"}, success=False)
+        finally:
+            preflight.close()
+        missing = mcp.call("schedule_request", {"request_id": request_id}, error=True)
+        assert "404" in missing and "does not prove" in missing
+        assert not any(row["post_id"] == post["id"] for row in call("/publications"))
+        assert "403" in denied.call("schedule", args, error=True)
+        assert "403" in denied.call("schedule_retire", retire, error=True)
+
+        calls = []
+        class Proxy(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+            def do_POST(self):
+                sent = self.rfile.read(int(self.headers["Content-Length"]))
+                calls.append((self.path, json.loads(sent)))
+                request = urllib.request.Request(origin + self.path, data=sent, headers={
+                    "Authorization": self.headers["Authorization"], "Content-Type": self.headers["Content-Type"],
+                    "X-Beweft-Request": "1"})
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    assert response.status == 200
+                    response.read()
+                self.connection.shutdown(socket.SHUT_RDWR)
+                self.connection.close()
+        proxy = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+        thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+        thread.start()
+        try:
+            error = cli(dict(env, BEWEFT_URL=f"http://127.0.0.1:{proxy.server_port}"),
+                        "schedule", "--json", "-", body=args, success=False)
+            assert "outcome may be unknown" in error and "schedule_request" in error
+            assert calls == [(f"/api/v1/posts/{post['id']}/schedule?view=summary", body)]
+        finally:
+            proxy.shutdown()
+            proxy.server_close()
+            thread.join(timeout=5)
+
+        receipt = mcp.call("schedule_request", {"request_id": request_id})["data"]
+        assert receipt["outcome"] == "accepted" and receipt["request"]["media_versions"] == body["media_versions"]
+        assert receipt["request"]["scheduled_at"] == "2099-01-02T18:04:56.123456Z"
+        publication_id = receipt["publications"][0]["id"]
+        # A later media edit must not be substituted into the saved replay.
+        cli(env, "api", "PATCH", f"/media/{media['id']}", "--json", "-",
+            body={"metadata_version": media["metadata_version"], "alt_text": "Changed after scheduling"})
+        assert mcp.call("schedule", args)["data"][0]["id"] == publication_id
+        assert len([row for row in call("/publications") if row["post_id"] == post["id"]]) == 1
+
+        # A new schedule must include the complete effective set and current
+        # versions; a saved replay above still uses its original map.
+        for versions in ({}, {media["id"]: media["metadata_version"]}):
+            review_post = call("/posts", {"brand_id": brand, "text": "Media precondition", "media_ids": [media["id"]]})
+            review_args = {"id": review_post["id"], "intent": "exact", "body": {
+                "version": review_post["version"], "channel_ids": [channel], "scheduled_at": stamp,
+                "request_id": str(uuid.uuid4()), "media_versions": versions}}
+            error = mcp.call("schedule", review_args, error=True)
+            assert "409" in error and "media" in error.lower()
+            assert not any(row["post_id"] == review_post["id"] for row in call("/publications"))
+        accepted = cli(env, "schedule-retire", "--json", "-", body=retire)["data"]
+        assert accepted["outcome"] == "accepted" and accepted["publications"][0]["id"] == publication_id
+        assert mcp.call("publication", {"id": publication_id})["data"]["state"] == "queued"
+        assert "404" in cli(outside_env, "schedule-request", "--json", "-", body={"request_id": request_id}, success=False)
+
+        unused = call("/posts", {"brand_id": brand, "text": "Retire without scheduling"})
+        unused_id = str(uuid.uuid4())
+        unused_body = {"version": unused["version"], "channel_ids": [channel], "scheduled_at": stamp,
+                       "request_id": unused_id, "media_versions": {}}
+        unused_retire = {"request_id": unused_id, "body": {"post_id": unused["id"], "brand_id": brand,
+                         "version": unused_body["version"], "channel_ids": [channel],
+                         "scheduled_at": stamp, "media_versions": {}}}
+        rejected = mcp.call("schedule_retire", unused_retire)["data"]
+        assert rejected["outcome"] == "rejected" and rejected["error"]["code"] == "schedule_request_retired"
+        assert rejected["publications"] == []
+        assert "retired" in cli(env, "schedule", "--json", "-", body={"id": unused["id"], "intent": "exact", "body": unused_body}, success=False)
+        assert not any(row["post_id"] == unused["id"] for row in call("/publications"))
+        assert cli(env, "schedule-request", "--json", "-", body={"request_id": unused_id})["data"] == rejected
+
+        # Hold a channel lock while the original request has entered the server.
+        # Its missing receipt and competing in-progress response are unresolved.
+        pending_post = call("/posts", {"brand_id": brand, "text": "In-flight schedule"})
+        pending_id = str(uuid.uuid4())
+        pending_stamp = "2099-01-02T12:45:00-05:30"
+        pending_body = {"version": pending_post["version"], "channel_ids": [channel],
+                        "scheduled_at": pending_stamp, "request_id": pending_id, "media_versions": {}}
+        pending_args = {"id": pending_post["id"], "intent": "exact", "body": pending_body}
+        pending_retire = {"request_id": pending_id, "body": {"post_id": pending_post["id"],
+                          "brand_id": brand, "version": pending_post["version"], "channel_ids": [channel],
+                          "scheduled_at": pending_stamp, "media_versions": {}}}
+        locker = subprocess.Popen(["docker", "exec", "-i", CONTAINER, "psql", "-X", "-qAt", "-U", DB_USER,
+                                   "-d", DB, "-v", "ON_ERROR_STOP=1"], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        original = None
+        try:
+            locker.stdin.write(f"BEGIN; SELECT pg_advisory_xact_lock(hashtextextended('{channel}',0)); SELECT 'held';\n")
+            locker.stdin.flush()
+            while locker.stdout.readline().strip() != "held":
+                assert locker.poll() is None, "fixture lock failed"
+            original = subprocess.Popen([str(BIN / "beweft"), "schedule", "--json", "-"], env=env,
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            original.stdin.write(json.dumps(pending_args))
+            original.stdin.close()
+            original.stdin = None
+            for _ in range(100):
+                query = "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%pg_advisory_xact_lock%')"
+                state = subprocess.run(["docker", "exec", CONTAINER, "psql", "-X", "-qAt", "-U", DB_USER,
+                                        "-d", DB, "-c", query], text=True, capture_output=True, check=True).stdout.strip()
+                if state == "t":
+                    break
+                assert original.poll() is None, "original schedule ended before waiting"
+                time.sleep(0.05)
+            else:
+                raise AssertionError("schedule did not enter the fixture lock")
+            assert "does not prove" in mcp.call("schedule_request", {"request_id": pending_id}, error=True)
+            assert "in progress" in mcp.call("schedule", pending_args, error=True)
+            assert "in progress" in mcp.call("schedule_retire", pending_retire, error=True)
+            locker.stdin.write("ROLLBACK;\n\\q\n")
+            locker.stdin.close()
+            assert locker.wait(timeout=10) == 0
+            stdout, stderr = original.communicate(timeout=15)
+            assert env["BEWEFT_TOKEN"] not in stdout + stderr
+            assert original.returncode == 0, stderr
+            pending_publication = json.loads(stdout)["data"][0]["id"]
+            assert mcp.call("schedule_request", {"request_id": pending_id})["data"]["publications"][0]["id"] == pending_publication
+        finally:
+            if locker.poll() is None:
+                locker.stdin.close()
+                stop(locker)
+            if original is not None and original.poll() is None:
+                stop(original)
+    finally:
+        denied.close()
+        mcp.close()
+
+
 def lost_response_test(env, origin, brand):
     """Commit a write through the real API, then discard its response."""
     calls = []
@@ -846,7 +1034,7 @@ def request_bounds_test(env, call, brand, initial_channel):
     mcp = Mcp(env)
     try:
         mcp.initialize()
-        result = mcp.call("schedule", {"id": post["id"], "intent": "exact", "body": schedule_body})["data"]
+        result = mcp.call("schedule", {"id": post["id"], "intent": "exact", "body": {**schedule_body, "request_id": str(uuid.uuid4()), "media_versions": {}}})["data"]
         ids = {row["id"] for row in result}
         assert len(result) == len(ids) == 50
         assert all(row["state"] == "queued" and "payload" not in row for row in result)
@@ -975,6 +1163,10 @@ def run(temporary):
         env = dict(clean_env, BEWEFT_URL=origin, BEWEFT_TOKEN=write,
                    BEWEFT_UPLOAD_ROOT=str(upload_root), BEWEFT_MCP_CALLS_PER_MINUTE="120")
         read_env = dict(env, BEWEFT_TOKEN=read)
+        if os.environ.get("BEWEFT_CLI_SCHEDULE_ONLY") == "1":
+            schedule_recovery_test(env, read_env, dict(env, BEWEFT_TOKEN=other_write), origin, call, brand["id"], upload_root)
+            print("PASS: isolated API CLI/MCP scheduling receipts, replay, retirement and scopes")
+            return
         auth_error_test(env, brand["id"])
         page_limit_error_test(env, origin)
         assert [item["id"] for item in cli(read_env, "brands")["data"]] == [brand["id"]]
@@ -1012,7 +1204,7 @@ def run(temporary):
             assert "next_cursor" not in legacy and legacy["data"][0]["variants"][0]["text"] == "fixture variant"
         updated = cli(env, "draft-update", "--json", "-", body={"id": created["id"], "body": {"version": created["version"], "text": "CLI revised"}})["data"]
         assert cli(env, "post", "--json", "-", body={"id": created["id"]})["data"]["text"] == "CLI revised"
-        schedule = {"id": created["id"], "intent": "exact", "body": {"version": updated["version"], "channel_ids": [channel["id"]], "scheduled_at": "2099-01-01T00:00:00Z"}}
+        schedule = {"id": created["id"], "intent": "exact", "body": {"version": updated["version"], "channel_ids": [channel["id"]], "scheduled_at": "2099-01-01T00:00:00Z", "request_id": str(uuid.uuid4()), "media_versions": {}}}
         assert "scheduled_at" in cli(env, "schedule", "--json", "-", body={**schedule, "intent": "queue"}, success=False)
         assert "403" in cli(read_env, "schedule", "--json", "-", body=schedule, success=False)
         publication = cli(env, "schedule", "--json", "-", body=schedule)["data"][0]
@@ -1104,7 +1296,8 @@ def run(temporary):
         race_test(env, upload_root, temp / "race-secret", brand["id"])
         pagination_test(env, dict(env, BEWEFT_TOKEN=unrestricted), call, brand["id"], other["id"], channel["id"])
         request_bounds_test(env, call, brand["id"], channel["id"])
-        print("PASS: isolated API CLI/MCP, full multipart field/epilogue drain and bounds, post-commit 401, redacted errors, large upload cleanup and byte readback, raw limit guidance, schedule rollback, lost-response recovery, scoped pagination, compact scheduling and bounded envelopes")
+        schedule_recovery_test(env, read_env, dict(env, BEWEFT_TOKEN=other_write), origin, call, brand["id"], upload_root)
+        print("PASS: isolated API CLI/MCP, scoped scheduling receipts, exact replay and retirement, full multipart drain and bounds, post-commit 401, redacted errors, upload cleanup, pagination and bounded envelopes")
     finally:
         stop(server)
 

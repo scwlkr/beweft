@@ -21,6 +21,7 @@ export function Reply({
     text,
     setText,
     attempt,
+    observation,
     pending,
     busy,
     ready,
@@ -109,8 +110,12 @@ export function Reply({
             </div>
           </div>
         )}
-        {attempt?.state === "uncertain" && (
-          <ReplyResolution disabled={busy || !ready} onResolve={resolve} />
+        {attempt?.state === "uncertain" && ready && (
+          <ReplyResolution
+            key={`${attempt.id}:${attempt.revision}:${observation}`}
+            disabled={busy}
+            onResolve={resolve}
+          />
         )}
         {!attempt && pending && (
           <p role="status">
