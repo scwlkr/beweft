@@ -50,7 +50,7 @@ three active children plus the orchestrator. Each milestone freezes its SHA.
 | Lane | Checkpoint | Next acceptance boundary |
 | --- | --- | --- |
 | Core/providers A+B | PR #20 merged `f2ad5a5`; X video milestone started | Current v2 streaming upload, durable stages and uncertainty handling; thread media needs an explicit snapshot contract afterward. |
-| Web C | PR #14 at `cf31286`, fresh review in progress; #15 and #16 merged | Review reproduced a valid publication ID discarded when another field was missing, plus correction preference recovery/fencing issues. Further correction is required. Preserved manual guidance awaits integration. |
+| Web C | PR #14 at `a22550d`, fresh review in progress; #15 and #16 merged | Previous review found discarded partial IDs and preference recovery/fencing issues. The correction candidate also replaces a timing-sensitive aggregate owner-test assertion with per-request checks. Preserved manual guidance awaits integration. |
 | CLI/operations D+E | PR #18 correction after `f65402d` | Recovery, controlled state and subprocess supervision passed targeted review. The remaining initializer helper needs a durable operation identity and exact cleanup across interruption. |
 
 PR #20 now wires the production provider routes and worker, durable terminal
@@ -117,7 +117,10 @@ normal browsers are protected.
 At merged `6e57386`, the root workspace build, web build, both scheduling API
 suites and all 93 isolated Chromium scenarios passed. Temporary fixture resources
 were cleaned by the harnesses. At `f2ad5a5`, the root workspace and web builds plus both scheduling API
-suites passed again. Root binaries and web/dist now match that provider-wiring
+suites passed again. The full server integration suite also passed, including
+restart/two-worker recovery, scoped authentication, workflow operations, password
+rotation races, streamed uploads and populated-schema migration. This does not
+replace the final image/schema upgrade rehearsal. Root binaries and web/dist now match that provider-wiring
 merge; they are not a running preview.
 
 During provider #20 qualification, a shared-target feature mismatch may have
@@ -130,9 +133,10 @@ changes remain outside testing authorization.
 
 Workers own isolated test databases/processes/artifacts. Shared mutable outputs
 are avoided; retained builds are tied to a source SHA. Finished review worktrees
-are retired through Codex. Six merged local branches and five merged remote
+are retired through Codex. Eleven merged local branches and ten merged remote
 branches were removed after checking ancestry; active and stacked PR branches
-remain protected. The orchestrator owns final cleanup and a useful
+remain protected. A research branch with unique history was also retained.
+The orchestrator owns final cleanup and a useful
 running local installation. Hosting remains placeholders until the owner chooses
 a server/domain. Missing adapter code is unfinished work, not an external blocker.
 
