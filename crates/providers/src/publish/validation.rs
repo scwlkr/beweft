@@ -162,9 +162,14 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
         }
         "linkedin" => {
             post_limit(p, 3000)?;
-            if !p.media.is_empty() {
+            if p.media.len() > 20
+                || p.media
+                    .iter()
+                    .any(|m| !matches!(m.mime.as_str(), "image/jpeg" | "image/png" | "video/mp4"))
+                || p.media.iter().any(|m| m.alt_text.chars().count() > 4086)
+            {
                 return Err(invalid(
-                    "LinkedIn adapter currently publishes text only; use manual handoff for media",
+                    "LinkedIn supports up to 20 JPEG/PNG images or one MP4 video; descriptions must be at most 4,086 characters",
                 ));
             }
         }

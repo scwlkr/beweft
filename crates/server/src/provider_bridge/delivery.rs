@@ -31,7 +31,10 @@ pub(super) async fn save_attempt_checkpoint_tx(
     let x_checkpoint = cp["stage"]
         .as_str()
         .is_some_and(|stage| stage.starts_with("x_"));
-    if x_checkpoint {
+    let linkedin_checkpoint = cp["stage"]
+        .as_str()
+        .is_some_and(|stage| stage.starts_with("linkedin_"));
+    if x_checkpoint || linkedin_checkpoint {
         cp["attempt_id"] = json!(attempt);
         cp["checkpoint_id"] = json!(Uuid::new_v4());
         if let Some(object) = cp.as_object_mut() {

@@ -208,6 +208,61 @@ async fn fenced_step(
                     )));
                 }
             }
+            if channel.app.provider == "linkedin" && stage.starts_with("linkedin_") {
+                if matches!(stage, "linkedin_image_upload" | "linkedin_video_upload") {
+                    let expiry = saved["upload_expires_ms"].as_i64().unwrap_or(0);
+                    let live: bool = sqlx::query_scalar(
+                        "SELECT $1::bigint > EXTRACT(EPOCH FROM clock_timestamp()) * 1000",
+                    )
+                    .bind(expiry)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    if !live {
+                        return Ok(Err(providers::error(
+                            FailureKind::ExpiredSession,
+                            "LinkedIn upload URL expired; inspect the delivery before restarting.",
+                        )));
+                    }
+                }
+                if timing
+                    .as_ref()
+                    .is_some_and(|row| row.get::<bool, _>("waiting"))
+                {
+                    return Ok(Ok(Step::Wait(saved.clone())));
+                }
+                let previous = saved["attempt_id"]
+                    .as_str()
+                    .and_then(|value| value.parse::<Uuid>().ok());
+                if previous != Some(attempt) {
+                    if stage == "linkedin_post_started" {
+                        return Ok(Err(providers::error(
+                            FailureKind::Uncertain,
+                            "An earlier LinkedIn post may have started. Inspect LinkedIn before resolving it.",
+                        )));
+                    }
+                    let rebound = save_attempt_checkpoint_tx(
+                        &mut tx,
+                        state,
+                        id,
+                        attempt,
+                        saved,
+                        stage_started,
+                        None,
+                    )
+                    .await?;
+                    return Ok(Ok(Step::Checkpoint(rebound)));
+                }
+                if stage == "linkedin_post_started"
+                    && overall
+                        .and_then(|deadline| deadline.remaining())
+                        .is_none_or(|remaining| remaining < std::time::Duration::from_secs(80))
+                {
+                    return Ok(Err(providers::error(
+                        FailureKind::Uncertain,
+                        "The LinkedIn post boundary needs owner inspection before recovery.",
+                    )));
+                }
+            }
         }
         let mut result = adapter.publish_step(&channel, &p, cp.as_ref()).await;
         // Recheck under the same locks after network I/O, before mutating any
@@ -234,6 +289,11 @@ async fn fenced_step(
         if let Ok(Step::Checkpoint(next) | Step::Wait(next)) = &mut result {
             let wait = if next["stage"] == "x_video_processing" {
                 next["check_after_secs"].as_u64()
+            } else if matches!(
+                next["stage"].as_str(),
+                Some("linkedin_image_processing" | "linkedin_video_processing")
+            ) {
+                Some(3)
             } else {
                 None
             };
@@ -272,11 +332,11 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
     };
     let overall = providers::SuspendInstant::now()
         .and_then(|start| start.deadline(std::time::Duration::from_secs(180)));
-    let mut completed_x_checkpoint = false;
+    let mut completed_private_checkpoint = false;
     let mut post_started = false;
     for step in 0..48 {
         if overall.and_then(|deadline| deadline.remaining()).is_none() {
-            if completed_x_checkpoint && !post_started {
+            if completed_private_checkpoint && !post_started {
                 return BridgeOutcome::Continue;
             }
             break;
@@ -284,22 +344,34 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
         match fenced_step(state, id, attempt, channel, overall).await {
             Ok(Ok(Step::Checkpoint(next))) => {
                 let stage = next["stage"].as_str().unwrap_or("");
-                if stage.starts_with("x_") {
-                    completed_x_checkpoint = true;
-                    post_started = stage == "x_post_started" || stage == "x_legacy_ambiguous";
+                if stage.starts_with("x_") || stage.starts_with("linkedin_") {
+                    completed_private_checkpoint = true;
+                    post_started = matches!(
+                        stage,
+                        "x_post_started" | "x_legacy_ambiguous" | "linkedin_post_started"
+                    );
                     let remaining = overall
                         .and_then(|deadline| deadline.remaining())
                         .unwrap_or_default();
                     if post_started {
                         if remaining < std::time::Duration::from_secs(80) {
-                            return BridgeOutcome::Uncertain { reason: "The X post may have started. Inspect its outcome before retrying.".into() };
+                            return BridgeOutcome::Uncertain { reason: "The provider post may have started. Inspect its outcome before retrying.".into() };
                         }
                     } else if step >= 11 || remaining < std::time::Duration::from_secs(80) {
                         return BridgeOutcome::Continue;
                     }
                 }
             }
-            Ok(Ok(Step::Wait(next))) if next["stage"] == "x_video_processing" => {
+            Ok(Ok(Step::Wait(next)))
+                if matches!(
+                    next["stage"].as_str(),
+                    Some(
+                        "x_video_processing"
+                            | "linkedin_image_processing"
+                            | "linkedin_video_processing"
+                    )
+                ) =>
+            {
                 return BridgeOutcome::Continue;
             }
             Ok(Ok(Step::Wait(_))) => tokio::time::sleep(std::time::Duration::from_secs(3)).await,
@@ -325,7 +397,7 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
             Ok(Err(e)) => return BridgeOutcome::Rejected { reason: e.message },
             Err(e)
                 if e.1 == "delivery_paused"
-                    && (step == 0 || (completed_x_checkpoint && !post_started)) =>
+                    && (step == 0 || (completed_private_checkpoint && !post_started)) =>
             {
                 return BridgeOutcome::Continue;
             }

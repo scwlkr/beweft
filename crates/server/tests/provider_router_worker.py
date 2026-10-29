@@ -76,6 +76,12 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     x_video_wait = 2
     x_video_fail = ""
     x_tweet_fail = False
+    linkedin_mode = "success"
+    linkedin_posts = []
+    linkedin_poll_count = 0
+    linkedin_upload_started = threading.Event()
+    linkedin_upload_release = threading.Event()
+    linkedin_upload_returned = threading.Event()
 
     def log_message(self, *_):
         pass
@@ -100,6 +106,18 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
         self.record("GET " + path)
+        if path == "/v2/userinfo":
+            return self.respond({"sub":"linkedin-member", "name":"Fixture LinkedIn"})
+        if path.startswith("/rest/images/") or path.startswith("/rest/videos/"):
+            assert self.headers.get("Authorization") == "Bearer linkedin-fixture"
+            type(self).linkedin_poll_count += 1
+            status = "PROCESSING_FAILED" if self.linkedin_mode == "processing_failed" else "PROCESSING" if self.linkedin_poll_count == 1 else "AVAILABLE"
+            kind = "image" if path.startswith("/rest/images/") else "video"
+            if kind == "image":
+                assert self.headers.get("Linkedin-Version") is None
+            else:
+                assert self.headers.get("Linkedin-Version") == "202610"
+            return self.respond({"id":f"urn:li:{kind}:fixture", "owner":"urn:li:person:linkedin-member", "status":status})
         if path == "/2/media/upload":
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             assert query == {"command":["STATUS"], "media_id":["123456789"]}, query
@@ -130,6 +148,28 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         self.record("POST " + path)
+        if path == "/oauth/v2/accessToken":
+            return self.respond({"access_token":"linkedin-fixture", "expires_in":7200, "scope":"openid profile w_member_social"})
+        if path in ("/rest/images", "/rest/videos"):
+            action = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("action")
+            value = json.loads(body)
+            assert self.headers.get("Linkedin-Version") == "202610"
+            if action == ["initializeUpload"]:
+                assert value["initializeUploadRequest"]["owner"] == "urn:li:person:linkedin-member"
+                expiry = int((time.time()+3600)*1000)
+                if path == "/rest/images":
+                    return self.respond({"value":{"image":"urn:li:image:fixture", "uploadUrl":"https://www.linkedin.com/dms-uploads/image", "uploadUrlExpiresAt":expiry}})
+                size = value["initializeUploadRequest"]["fileSizeBytes"]
+                return self.respond({"value":{"video":"urn:li:video:fixture", "uploadUrlsExpireAt":expiry, "uploadToken":"", "uploadInstructions":[{"firstByte":0,"lastByte":size-1,"uploadUrl":"https://www.linkedin.com/dms-uploads/video"}]}})
+            assert action == ["finalizeUpload"] and value["finalizeUploadRequest"]["uploadedPartIds"] == ["fixture-part"]
+            return self.respond({})
+        if path == "/rest/posts":
+            value = json.loads(body)
+            with self.lock:
+                self.linkedin_posts.append(value)
+            if self.linkedin_mode == "lost_post":
+                return self.respond({}, 502)
+            return self.respond({}, 201, {"x-restli-id":"urn:li:share:12345"})
         if path == "/v23.0/oauth/access_token":
             return self.respond({"access_token":"facebook-short-fixture", "expires_in":7200})
         if path == "/token":
@@ -230,8 +270,18 @@ class Fixture(http.server.BaseHTTPRequestHandler):
 
     def do_PUT(self):
         path = urllib.parse.urlsplit(self.path).path
-        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         self.record("PUT " + path)
+        if path.startswith("/dms-uploads/"):
+            assert body
+            if self.linkedin_mode == "block_upload":
+                self.linkedin_upload_started.set()
+                self.linkedin_upload_release.wait(20)
+            if self.linkedin_mode == "lost_upload":
+                return self.respond({}, 502)
+            self.respond({}, 200, {"ETag":"\"fixture-part\""})
+            self.linkedin_upload_returned.set()
+            return
         if path == "/upload/youtube/v3/videos/session-fixture":
             return self.respond({}, 404)
         return self.respond({}, 404)
@@ -406,6 +456,7 @@ def run():
             request("/provider-apps/x", {"client_id":"x-client", "client_secret":"fixture-secret"}, "PUT")
             request("/provider-apps/youtube", {"client_id":"youtube-client", "client_secret":"fixture-secret"}, "PUT")
             request("/provider-apps/bluesky", {"client_id":""}, "PUT")
+            request("/provider-apps/linkedin", {"client_id":"linkedin-client", "client_secret":"fixture-secret"}, "PUT")
             apps = request("/provider-apps")
             assert all("client_secret" not in item and "revocation_id" in item for item in apps)
             assert next(item for item in request("/providers") if item["id"] == "facebook")["configuration"] == "configured"
@@ -427,6 +478,8 @@ def run():
             sibling = connect("facebook", other_brand)
             x = connect("x", brand)
             youtube = connect("youtube", brand)
+            linkedin = connect("linkedin", brand)
+            assert linkedin["capabilities"]["permissions"]["actions"]["media"]["status"] == "granted"
             # Omitted/null values remain new connections; a valid ID continues
             # the exact matching destination for both OAuth and Bluesky.
             for reconnect in ("omitted", None, x["id"]):
@@ -559,7 +612,7 @@ def run():
             intent = {"version":1,"channel_ids":[x["id"]],"scheduled_at":when,"request_id":str(uuid.uuid4())}
             accepted = request(f"/posts/{valid['id']}/schedule?view=summary", intent)[0]
             # Replay remains authoritative after the installed capability has
-            # changed, even though a new LinkedIn media intent would fail.
+            # changed, even though a new provider intent could be validated differently.
             sql(f"UPDATE channels SET provider='linkedin' WHERE id='{x['id']}'")
             assert request(f"/posts/{valid['id']}/schedule?view=summary", intent)[0]["id"] == accepted["id"]
             receipt = request(f"/schedule-requests/{intent['request_id']}")
@@ -604,6 +657,31 @@ def run():
             assert Fixture.counts.get("x_rotated_authorization", 0) == 1
             attempt = request(f"/publications/{x_post['id']}/attempts")[0]
             assert attempt["state"] == "published" and attempt["receipt"]["verification"] == "unverified_live"
+
+            # LinkedIn member text, image and video exercise real routing,
+            # frozen descriptions, processing and durable post receipts.
+            text_post = schedule(brand, linkedin["id"], "LinkedIn text")
+            wait_for(lambda: state_is(text_post["id"], "published"), "LinkedIn text")
+            Fixture.linkedin_poll_count = 0
+            image_post = schedule(brand, linkedin["id"], "LinkedIn image", [asset["id"]], options={"alt_text":"Blue fixture"})
+            wait_for(lambda: state_is(image_post["id"], "published"), "LinkedIn image", seconds=40)
+            assert Fixture.linkedin_posts[-1]["content"]["media"]["altText"] == "Blue fixture"
+            Fixture.linkedin_poll_count = 0
+            video_post_li = schedule(brand, linkedin["id"], "LinkedIn video", [video_asset["id"]], title="Fixture title")
+            wait_for(lambda: state_is(video_post_li["id"], "published"), "LinkedIn video", seconds=40)
+            assert Fixture.linkedin_posts[-1]["content"]["media"]["id"] == "urn:li:video:fixture"
+            before_li_posts = Fixture.counts.get("POST /rest/posts", 0)
+            Fixture.linkedin_mode = "processing_failed"
+            broken_li = schedule(brand, linkedin["id"], "Rejected image", [asset["id"]])
+            wait_for(lambda: state_is(broken_li["id"], "failed"), "LinkedIn processing rejection", seconds=30)
+            assert Fixture.counts.get("POST /rest/posts", 0) == before_li_posts
+            Fixture.linkedin_mode = "lost_post"
+            unknown_li = schedule(brand, linkedin["id"], "LinkedIn lost response")
+            wait_for(lambda: state_is(unknown_li["id"], "uncertain"), "LinkedIn lost post")
+            assert Fixture.counts.get("POST /rest/posts", 0) == before_li_posts + 1
+            time.sleep(3)
+            assert Fixture.counts.get("POST /rest/posts", 0) == before_li_posts + 1
+            Fixture.linkedin_mode = "success"
 
             # Expired and sub-second leases cannot start even the refresh call.
             # The short lease is set by PostgreSQL during claim, so this test
