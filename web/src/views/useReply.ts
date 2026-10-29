@@ -35,68 +35,101 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
   const [error, setError] = useState("");
   const key = useRef("");
   const alive = useRef(true);
-  const running = useRef(false);
+  const running = useRef<object | null>(null);
+  const recoveryController = useRef<AbortController | null>(null);
   const identity = `${brandId}:${item.channel_id}:${item.id}`;
   const currentIdentity = useRef(identity);
   currentIdentity.current = identity;
   const current = () => alive.current && currentIdentity.current === identity;
 
   const recover = async () => {
-    setReady(false);
-    const owner = await api("/auth/me", z.object({ id: z.string() }));
-    const storageKey = `beweft.pending-reply:${owner.id}:${identity}`;
-    const rows = await api(`/inbox/${item.id}/replies`, z.array(Attempt));
-    if (rows.some((row) => row.inbox_id !== item.id))
-      throw new Error(
-        "Reply recovery returned a different conversation. Sending is blocked.",
-      );
-    const remembered = readIntent(storageKey);
-    const ordered = rows;
-    const outstanding = ordered.find(unresolved);
-    const recorded =
-      outstanding ??
-      (remembered
-        ? (ordered.find((row) => row.id === remembered.request_id) ?? null)
-        : (ordered[0] ?? null));
     if (!current()) return null;
-    key.current = storageKey;
-    lastSeen.current = ordered[0]?.id ?? null;
-    setLatest(ordered[0] ?? null);
-    setHistoryChanged(
-      !!remembered &&
-        remembered.expected_last_request_id !== lastSeen.current &&
-        !ordered.some((row) => row.id === remembered.request_id),
-    );
-    setAttempt(recorded);
-    setPending(remembered);
-    if (recorded || remembered) setText(recorded?.text ?? remembered!.text);
-    if (
-      recorded &&
-      !unresolved(recorded) &&
-      recorded.id === remembered?.request_id
-    ) {
-      await lockIntent(storageKey, () => forgetIntent(storageKey, recorded.id));
-      setPending(null);
+    recoveryController.current?.abort();
+    const controller = new AbortController();
+    recoveryController.current = controller;
+    const active = () =>
+      current() &&
+      !controller.signal.aborted &&
+      recoveryController.current === controller;
+    setReady(false);
+    try {
+      const owner = await api(
+        "/auth/me",
+        z.object({ id: z.string() }),
+        "GET",
+        undefined,
+        controller.signal,
+      );
+      if (!active()) return null;
+      const storageKey = `beweft.pending-reply:${owner.id}:${identity}`;
+      const rows = await api(
+        `/inbox/${item.id}/replies`,
+        z.array(Attempt),
+        "GET",
+        undefined,
+        controller.signal,
+      );
+      if (rows.some((row) => row.inbox_id !== item.id))
+        throw new Error(
+          "Reply recovery returned a different conversation. Sending is blocked.",
+        );
+      const remembered = readIntent(storageKey);
+      const ordered = rows;
+      const outstanding = ordered.find(unresolved);
+      const recorded =
+        outstanding ??
+        (remembered
+          ? (ordered.find((row) => row.id === remembered.request_id) ?? null)
+          : (ordered[0] ?? null));
+      if (!active()) return null;
+      key.current = storageKey;
+      lastSeen.current = ordered[0]?.id ?? null;
+      setLatest(ordered[0] ?? null);
+      setHistoryChanged(
+        !!remembered &&
+          remembered.expected_last_request_id !== lastSeen.current &&
+          !ordered.some((row) => row.id === remembered.request_id),
+      );
+      setAttempt(recorded);
+      setPending(remembered);
+      if (recorded || remembered) setText(recorded?.text ?? remembered!.text);
+      if (
+        recorded &&
+        !unresolved(recorded) &&
+        recorded.id === remembered?.request_id
+      ) {
+        await lockIntent(storageKey, () => {
+          if (active()) forgetIntent(storageKey, recorded.id);
+        });
+        if (!active()) return null;
+        setPending(null);
+      }
+      setReady(true);
+      setError(recorded?.error ?? "");
+      return { rows, recorded, remembered };
+    } finally {
+      if (recoveryController.current === controller)
+        recoveryController.current = null;
     }
-    setReady(true);
-    setError(recorded?.error ?? "");
-    return { rows, recorded, remembered };
   };
   const check = async () => {
     if (running.current) return;
-    running.current = true;
+    const operation = {};
+    running.current = operation;
     setBusy(true);
     setError("");
     try {
       await recover();
     } catch (failure) {
-      if (current())
+      if (current() && running.current === operation)
         setError(
           `${(failure as Error).message} The existing reply must be checked before sending.`,
         );
     } finally {
-      running.current = false;
-      if (current()) setBusy(false);
+      if (running.current === operation) {
+        running.current = null;
+        if (current()) setBusy(false);
+      }
     }
   };
   useEffect(() => {
@@ -104,13 +137,16 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
     void check();
     return () => {
       alive.current = false;
+      recoveryController.current?.abort();
+      running.current = null;
     };
     // The parent keys this hook's dialog by brand, channel, and inbox item.
   }, [identity]);
 
   const send = async () => {
     if (running.current || !ready || (attempt && unresolved(attempt))) return;
-    running.current = true;
+    const operation = {};
+    running.current = operation;
     setBusy(true);
     setError("");
     const intentAtClick = pending;
@@ -120,12 +156,13 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
       // Recheck durable attempts immediately before sending. The server also guards
       // concurrent tabs, which can race between this read and the POST.
       const recovered = await recover();
-      if (!recovered || !current()) return;
+      if (!recovered || !current() || running.current !== operation) return;
       if (recovered.rows.some(unresolved)) return;
       const head = recovered.rows[0]?.id ?? null;
       // Claim only the intent the user actually saw. Another tab may have written
       // an intent while this tab's GET was in flight; do not overwrite or send it.
       const outgoing = await lockIntent(key.current, () => {
+        if (!current() || running.current !== operation) return null;
         const remembered = readIntent(key.current) ?? recovered.remembered;
         if (
           remembered &&
@@ -171,7 +208,7 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
         localStorage.setItem(key.current, JSON.stringify(claimed));
         return claimed;
       });
-      if (!outgoing || !current()) return;
+      if (!outgoing || !current() || running.current !== operation) return;
       setPending(outgoing);
       setText(outgoing.text);
       setAttempt(null);
@@ -185,7 +222,7 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
         throw new Error(
           "Reply response identity did not match. Check the existing attempt.",
         );
-      if (!current()) return;
+      if (!current() || running.current !== operation) return;
       setAttempt(result);
       setError(result.error ?? "");
       if (!unresolved(result)) {
@@ -195,7 +232,7 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
         setPending(null);
       }
     } catch (failure) {
-      if (current()) {
+      if (current() && running.current === operation) {
         setReady(false);
         setError(
           failure instanceof ApiError &&
@@ -205,8 +242,10 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
         );
       }
     } finally {
-      running.current = false;
-      if (current()) setBusy(false);
+      if (running.current === operation) {
+        running.current = null;
+        if (current()) setBusy(false);
+      }
     }
   };
   const acknowledgeHistory = async () => {
@@ -241,7 +280,8 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
   }) => {
     if (!attempt || attempt.state !== "uncertain" || running.current || !ready)
       return;
-    running.current = true;
+    const operation = {};
+    running.current = operation;
     setBusy(true);
     setError("");
     try {
@@ -253,17 +293,20 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
       );
       if (result.id !== attempt.id || result.inbox_id !== item.id)
         throw new Error("Reply resolution identity did not match.");
+      if (!current() || running.current !== operation) return;
       await recover();
     } catch (failure) {
-      if (current()) {
+      if (current() && running.current === operation) {
         setReady(false);
         setError(
           `${(failure as Error).message} Check the recorded outcome before continuing.`,
         );
       }
     } finally {
-      running.current = false;
-      if (current()) setBusy(false);
+      if (running.current === operation) {
+        running.current = null;
+        if (current()) setBusy(false);
+      }
     }
   };
   const another = () => {

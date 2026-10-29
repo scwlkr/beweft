@@ -4,6 +4,7 @@ import {
   api,
   advanceApiSession,
   authLock,
+  withOwnerCheck,
   ApiError,
   AuthStorageError,
   authEpochKey,
@@ -72,6 +73,7 @@ export function useWorkspace() {
   const [pending, setPending] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState("");
+  const [sessionCheckFailed, setSessionCheckFailed] = useState(false);
   const signingOutRef = useRef(false);
   const [sidebar, setSidebar] = useState(false);
   const [composer, setComposer] = useState<
@@ -141,7 +143,10 @@ export function useWorkspace() {
       ++session.current;
       advanceApiSession();
       setSessionRevision((current) => current + 1);
-      if (value) setSignOutError("");
+      if (value) {
+        setSignOutError("");
+        setSessionCheckFailed(false);
+      }
       if (clear) {
         abortMetadata();
         verificationController.current?.abort();
@@ -166,13 +171,15 @@ export function useWorkspace() {
   );
   const verifySession = useCallback(async () => {
     if (signingOutRef.current) return;
+    setSessionCheckFailed(false);
+    setSignOutError("");
     verificationController.current?.abort();
     const controller = new AbortController();
     verificationController.current = controller;
     const check = ++verification.current;
     let captured: ApiSession | undefined;
     try {
-      await authLock(async () => {
+      await withOwnerCheck(async (ownerSignal) => {
         if (check !== verification.current || signingOutRef.current) return;
         captured = captureApiSession();
         await api(
@@ -180,7 +187,7 @@ export function useWorkspace() {
           z.object({ id: z.string(), email: z.string() }),
           "GET",
           undefined,
-          controller.signal,
+          ownerSignal,
           true,
         );
         if (
@@ -198,13 +205,17 @@ export function useWorkspace() {
       )
         return;
       setReady(false);
-      if (failure instanceof AuthStorageError) setSignOutError(failure.message);
-      else if (!(failure instanceof ApiError && failure.status === 401))
+      if (failure instanceof AuthStorageError) {
+        setSignOutError(failure.message);
+        setSessionCheckFailed(true);
+      } else if (!(failure instanceof ApiError && failure.status === 401)) {
         setSignOutError(
           failure instanceof Error
             ? failure.message
             : "Unable to check your session.",
         );
+        setSessionCheckFailed(true);
+      }
     } finally {
       if (verificationController.current === controller)
         verificationController.current = null;
@@ -558,6 +569,8 @@ export function useWorkspace() {
     acceptSession,
     signingOut,
     signOutError,
+    sessionCheckFailed,
+    retrySession: verifySession,
     signOut,
     route,
     brands,

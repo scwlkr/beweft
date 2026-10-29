@@ -286,6 +286,45 @@ test("a tab cannot validate a transition epoch before login releases the lock", 
   });
 });
 
+test("a session check that times out behind a slow login can be retried", async () => {
+  await withWorkspace(async (old, context, write) => {
+    const { brand, other } = await fixture(old, context, write);
+    const loginStarted = deferred(),
+      releaseLogin = deferred();
+    let rechecks = 0;
+    await old.route("**/api/v1/auth/me", (route) => {
+      rechecks++;
+      return route.continue();
+    });
+    try {
+      await forceSignInView(other);
+      await other.route("**/api/v1/auth/login", async (route) => {
+        const response = await route.fetch();
+        loginStarted.resolve();
+        await releaseLogin.promise;
+        await route.fulfill({ response });
+      });
+      await signIn(other);
+      await loginStarted.promise;
+      await expect(old.getByText(/session check timed out/i)).toBeVisible({
+        timeout: 8_000,
+      });
+      expect(rechecks).toBe(0);
+      releaseLogin.resolve();
+      await expect(other.getByLabel("Current brand")).toHaveValue(brand.id);
+      await old.getByRole("button", { name: "Retry session check" }).click();
+      await expect(old.getByLabel("Current brand")).toHaveValue(brand.id);
+      await expect(
+        old.getByRole("heading", { name: "Session fixture draft" }),
+      ).toBeVisible();
+      expect(rechecks).toBeGreaterThan(0);
+    } finally {
+      releaseLogin.resolve();
+      await other.close();
+    }
+  });
+});
+
 test("direct owner lookup in an old editor waits for the credential transition", async () => {
   await withWorkspace(async (old, context, write) => {
     await holdIdentityEvents(old);

@@ -8,12 +8,15 @@ import {
 } from "./scheduleIntent";
 export function usePendingSchedule(brandId: string) {
   const [key, setKey] = useState("");
+  const [verifiedBrand, setVerifiedBrand] = useState("");
   const [intent, setIntent] = useState<ScheduleIntent | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
     let storageKey = "";
     setKey("");
+    setVerifiedBrand("");
     setIntent(null);
     setError("");
     const read = () => {
@@ -24,13 +27,20 @@ export function usePendingSchedule(brandId: string) {
           throw new Error("Pending schedule belongs to another brand.");
         setIntent(pending);
         setKey(storageKey);
+        setVerifiedBrand(brandId);
         setError("");
       } catch (failure) {
         setKey("");
         setError((failure as Error).message);
       }
     };
-    void api("/auth/me", z.object({ id: z.string() }))
+    void api(
+      "/auth/me",
+      z.object({ id: z.string() }),
+      "GET",
+      undefined,
+      controller.signal,
+    )
       .then((owner) => {
         storageKey = `beweft.pending-schedule:${owner.id}:${brandId}`;
         read();
@@ -42,9 +52,11 @@ export function usePendingSchedule(brandId: string) {
     window.addEventListener(scheduleEvent, read);
     return () => {
       active = false;
+      controller.abort();
       window.removeEventListener("storage", read);
       window.removeEventListener(scheduleEvent, read);
     };
   }, [brandId]);
-  return { key, intent, error, ready: !!key };
+  const ready = !!key && verifiedBrand === brandId;
+  return { key: ready ? key : "", intent: ready ? intent : null, error, ready };
 }

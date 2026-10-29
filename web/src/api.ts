@@ -233,6 +233,36 @@ export async function authLock<T>(
   if (!navigator.locks) throw new Error("Sign-in requires HTTPS or localhost.");
   return navigator.locks.request("beweft:authentication", { signal }, work);
 }
+// Owner reads share the credential lock, but must not delay sign-in or sign-out
+// for an unbounded queue or a response whose body never arrives.
+export async function withOwnerCheck<T>(
+  work: (signal: AbortSignal) => Promise<T>,
+  signal?: AbortSignal,
+) {
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, 5000);
+  if (signal?.aborted) cancel();
+  else signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    return await authLock(() => work(controller.signal), controller.signal);
+  } catch (failure) {
+    if (timedOut)
+      throw new ApiError(
+        "The session check timed out. Please try again.",
+        0,
+        "timeout",
+      );
+    throw failure;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", cancel);
+  }
+}
 export async function api<T>(
   path: string,
   schema: z.ZodType<T>,
@@ -244,7 +274,7 @@ export async function api<T>(
   // Direct callers that inspect the owner must not observe an intermediate
   // credential transition. Workspace verification already holds this lock.
   if (path === "/auth/me" && !authLockHeld) {
-    return authLock(() => {
+    return withOwnerCheck((ownerSignal) => {
       const epoch = readAuthEpoch();
       if (workspaceEpoch !== epoch) {
         if (workspaceEpoch !== null)
@@ -255,7 +285,7 @@ export async function api<T>(
           "session_changed",
         );
       }
-      return api(path, schema, method, body, signal, true);
+      return api(path, schema, method, body, ownerSignal, true);
     }, signal);
   }
   const session = captureApiSession();

@@ -34,6 +34,8 @@ export default function App() {
     acceptSession,
     signingOut,
     signOutError,
+    sessionCheckFailed,
+    retrySession,
     route,
     brands,
     brandId,
@@ -70,6 +72,8 @@ export default function App() {
       <Auth
         signingOut={signingOut}
         signOutError={signOutError}
+        sessionCheckFailed={sessionCheckFailed}
+        onRetrySession={retrySession}
         onReady={acceptSession}
       />
     );

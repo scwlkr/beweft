@@ -9,10 +9,14 @@ export function Auth({
   onReady,
   signingOut,
   signOutError,
+  sessionCheckFailed,
+  onRetrySession,
 }: {
   onReady: (epoch: string) => void;
   signingOut: boolean;
   signOutError: string;
+  sessionCheckFailed: boolean;
+  onRetrySession: () => void;
 }) {
   const [initialized, setInitialized] = useState<boolean | null>(null);
   const [error, setError] = useState("");
@@ -180,6 +184,16 @@ export function Auth({
               </Field>
               {(error || signOutError) && (
                 <ErrorNotice message={error || signOutError} />
+              )}
+              {sessionCheckFailed && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={busy || signingOut}
+                  onClick={onRetrySession}
+                >
+                  Retry session check
+                </Button>
               )}
               <Submit pending={busy || signingOut}>
                 {signingOut
