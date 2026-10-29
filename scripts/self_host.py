@@ -26,6 +26,7 @@ IMAGE_PATTERN = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._:/@-]{0,511}\Z")
 HEX64 = re.compile(r"[a-fA-F0-9]{64}\Z")
 IMAGE_ID = re.compile(r"sha256:[a-f0-9]{64}\Z")
 BACKUP_FILES = ("database.dump", "media.tar", "key.sha256", "image-id", "postgres-image-id", "manifest")
+STATE_FILE = "installation-state.json"
 CLEANUP_SECONDS = 150
 
 
@@ -42,6 +43,10 @@ class Cancelled(OperationError):
 
 
 class BackupDeadline(OperationError):
+    pass
+
+
+class DockerCallInterrupted(Exception):
     pass
 
 
@@ -73,6 +78,14 @@ def require(condition, message):
         raise OperationError(message)
 
 
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result, "Installation state contains duplicate fields.")
+        result[key] = value
+    return result
+
+
 def environment():
     # Compose gives ambient variables precedence over --env-file. An unrelated
     # shell must never redirect an operation to another project or credentials.
@@ -90,7 +103,37 @@ def kill_owned(process):
         pass
 
 
-def call(args, *, capture=True, stdin=None, stdout=None, ok=True, timeout=None, deadline=None, cancellation=None):
+@contextmanager
+def standalone_sigterm(enabled):
+    # Backup installs its own recovery handler; it must remain authoritative.
+    previous = signal.getsignal(signal.SIGTERM)
+    local = Cancellation() if enabled and previous == signal.SIG_DFL else None
+    if local is not None:
+        signal.signal(signal.SIGTERM, local.handle)
+    try:
+        yield local
+    finally:
+        if local is not None:
+            signal.signal(signal.SIGTERM, previous)
+
+
+def check_standalone_signal(local):
+    if local is not None and local.signal:
+        raise DockerCallInterrupted()
+
+
+def call(args, *, capture=True, stdin=None, stdout=None, ok=True, timeout=None, deadline=None, cancellation=None, env_overrides=None):
+    with standalone_sigterm(capture or timeout is not None or deadline is not None) as local:
+        try:
+            return call_supervised(args, capture=capture, stdin=stdin, stdout=stdout, ok=ok,
+                                   timeout=timeout, deadline=deadline, cancellation=cancellation,
+                                   env_overrides=env_overrides, local=local)
+        except DockerCallInterrupted as error:
+            raise OperationError("The Docker operation was interrupted; the daemon may have admitted it. Inspect the installation before recovery or retry.") from error
+
+
+def call_supervised(args, *, capture, stdin, stdout, ok, timeout, deadline, cancellation, env_overrides, local):
+    env = dict(environment(), **(env_overrides or {}))
     try:
         if deadline is not None:
             # Only use this path for read-only metadata calls: killing the client
@@ -98,11 +141,13 @@ def call(args, *, capture=True, stdin=None, stdout=None, ok=True, timeout=None, 
             require(capture and stdin is None and stdout is None and cancellation is not None,
                     "Invalid supervised Docker metadata request.")
             cancellation.check()
-            process = subprocess.Popen(args, env=environment(), stdout=subprocess.PIPE,
+            check_standalone_signal(local)
+            process = subprocess.Popen(args, env=env, stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE, start_new_session=True)
             try:
                 while True:
                     cancellation.check()
+                    check_standalone_signal(local)
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise BackupDeadline("The backup downtime limit expired; recovering the original services.")
@@ -113,14 +158,43 @@ def call(args, *, capture=True, stdin=None, stdout=None, ok=True, timeout=None, 
                     except subprocess.TimeoutExpired:
                         continue
                 cancellation.check()
+                check_standalone_signal(local)
             except BaseException:
                 kill_owned(process)
                 process.communicate(timeout=5)
                 raise
+        elif timeout is not None or capture:
+            check_standalone_signal(local)
+            process = subprocess.Popen(args, env=env, stdin=stdin,
+                                       stdout=subprocess.PIPE if capture and stdout is None else stdout,
+                                       stderr=subprocess.PIPE if capture else None, start_new_session=True)
+            try:
+                end = time.monotonic() + timeout if timeout is not None else None
+                while True:
+                    check_standalone_signal(local)
+                    remaining = None if end is None else end - time.monotonic()
+                    if remaining is not None and remaining <= 0:
+                        raise subprocess.TimeoutExpired(args, timeout)
+                    interval = min(0.1, remaining) if remaining is not None else (0.1 if local is not None else None)
+                    try:
+                        out, err = process.communicate(timeout=interval)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if end is not None and time.monotonic() >= end:
+                            raise
+                check_standalone_signal(local)
+            except (subprocess.TimeoutExpired, KeyboardInterrupt, DockerCallInterrupted) as error:
+                kill_owned(process)
+                try:
+                    process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+                raise OperationError("The Docker operation was interrupted or exceeded its deadline; the daemon may have admitted it. Inspect the installation before recovery or retry.") from error
+            result = subprocess.CompletedProcess(args, process.returncode, out, err)
         else:
-            result = subprocess.run(args, env=environment(), stdin=stdin,
+            result = subprocess.run(args, env=env, stdin=stdin,
                                     stdout=subprocess.PIPE if capture and stdout is None else stdout,
-                                    stderr=subprocess.PIPE if capture else None, check=False, timeout=timeout,
+                                    stderr=subprocess.PIPE if capture else None, check=False,
                                     start_new_session=capture)
     except FileNotFoundError as error:
         raise OperationError("Docker with Compose is required.") from error
@@ -143,7 +217,7 @@ def output(*args, **kwargs):
 
 
 def check_prerequisites():
-    docker("compose", "version")
+    docker("compose", "version", timeout=15)
 
 
 def validate_project(project):
@@ -172,7 +246,7 @@ def empty_project(project):
     for resource in ("container", "volume", "network"):
         args = {"container": ["ps", "-aq"], "volume": ["volume", "ls", "-q"],
                 "network": ["network", "ls", "-q"]}[resource]
-        require(not output(*args, "--filter", f"label=com.docker.compose.project={project}"),
+        require(not output(*args, "--filter", f"label=com.docker.compose.project={project}", timeout=15),
                 f"The destination Compose project already has {resource} resources; choose an empty project.")
     for suffix in ("database", "media"):
         require(not named_resource_exists("volume", f"{project}_{suffix}"),
@@ -242,7 +316,7 @@ def assert_project_ownership(project, owner):
                     f"The project has an unowned {kind} name; refusing to adopt or modify it.")
 
 
-def setup(destination, project, port, postgres_image):
+def setup(destination, project, port, postgres_image, worker_held):
     check_prerequisites()
     validate_project(project)
     require(1024 <= port <= 65535, "Port must be between 1024 and 65535.")
@@ -262,9 +336,7 @@ def setup(destination, project, port, postgres_image):
     values = {
         "COMPOSE_PROJECT_NAME": project,
         "BEWEFT_INSTALLATION_ID": owner,
-        "BEWEFT_IMAGE": "unconfigured",
         "BEWEFT_POSTGRES_IMAGE": postgres,
-        "BEWEFT_WORKER_ACTIVE": "true",
         "BEWEFT_PORT": str(port),
         "BEWEFT_BIND_IP": "127.0.0.1",
         "BEWEFT_PUBLIC_URL": f"http://127.0.0.1:{port}",
@@ -279,15 +351,25 @@ def setup(destination, project, port, postgres_image):
         reserve(project, owner, path, postgres)
         acquired = True
         empty_project(project)
+        state_fd = os.open(path / STATE_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(state_fd, "w", encoding="utf-8") as file:
+            json.dump({"image": "unconfigured", "worker_active": not worker_held}, file)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
         fd = os.open(path / "installation.env", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as file:
             file.writelines(f"{key}={value}\n" for key, value in values.items())
+            file.flush()
+            os.fsync(file.fileno())
     except BaseException:
         if acquired:
             assert_reservation(project, owner, path, postgres)
             docker("volume", "rm", reservation_name(project), timeout=15)
         if (path / "installation.env").exists():
             (path / "installation.env").unlink()
+        if (path / STATE_FILE).exists():
+            (path / STATE_FILE).unlink()
         path.rmdir()
         raise
     print(f"Installation configuration created: {path / 'installation.env'}")
@@ -302,6 +384,7 @@ class Installation:
         self.path = Path(directory).expanduser().resolve(strict=True)
         require(self.path.is_dir(), "Specify an existing installation directory.")
         self.envfile = self.path / "installation.env"
+        self.statefile = self.path / STATE_FILE
         self.read_settings()
         check_prerequisites()
 
@@ -318,13 +401,29 @@ class Installation:
                     "installation.env contains a malformed or duplicate setting.")
             require(not any(ch in value for ch in "\r\n$'\"\\"), "installation.env values must be unquoted literals without interpolation.")
             self.values[key] = value
-        required = ("COMPOSE_PROJECT_NAME", "BEWEFT_INSTALLATION_ID", "BEWEFT_IMAGE", "BEWEFT_POSTGRES_IMAGE", "BEWEFT_WORKER_ACTIVE", "BEWEFT_PORT", "BEWEFT_BIND_IP", "BEWEFT_PUBLIC_URL",
+        require("BEWEFT_IMAGE" not in self.values and "BEWEFT_WORKER_ACTIVE" not in self.values,
+                "Image and worker activation are managed state; remove those settings from installation.env and use the project commands.")
+        required = ("COMPOSE_PROJECT_NAME", "BEWEFT_INSTALLATION_ID", "BEWEFT_POSTGRES_IMAGE", "BEWEFT_PORT", "BEWEFT_BIND_IP", "BEWEFT_PUBLIC_URL",
                     "BEWEFT_DB_PASSWORD", "BEWEFT_SETUP_SECRET", "BEWEFT_ENCRYPTION_KEY")
         require(all(self.values.get(key) for key in required), "installation.env is missing a required setting.")
         self.project = self.values["COMPOSE_PROJECT_NAME"]
         validate_project(self.project)
         require(HEX64.fullmatch(self.values["BEWEFT_INSTALLATION_ID"]) is not None,
                 "Installation identity is missing or invalid.")
+        try:
+            info = self.statefile.lstat()
+        except FileNotFoundError as error:
+            raise OperationError("Installation state is missing; no operation was attempted.") from error
+        require(stat.S_ISREG(info.st_mode) and info.st_mode & 0o077 == 0 and info.st_size <= 1024,
+                "Installation state must be a private regular file; no operation was attempted.")
+        fd = os.open(self.statefile, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "r", encoding="utf-8") as file:
+            state = json.load(file, object_pairs_hook=unique_object)
+        require(isinstance(state, dict) and set(state) == {"image", "worker_active"} and
+                isinstance(state["image"], str) and type(state["worker_active"]) is bool,
+                "Installation state is missing or invalid; no operation was attempted.")
+        self.values["BEWEFT_IMAGE"] = state["image"]
+        self.values["BEWEFT_WORKER_ACTIVE"] = "true" if state["worker_active"] else "false"
         require(self.values["BEWEFT_IMAGE"] == "unconfigured" or IMAGE_ID.fullmatch(self.values["BEWEFT_IMAGE"]) is not None,
                 "Installation image must be an immutable ID selected with ./project image or build.")
         require(IMAGE_ID.fullmatch(self.values["BEWEFT_POSTGRES_IMAGE"]) is not None,
@@ -339,7 +438,9 @@ class Installation:
         profile = ["--profile", "worker"] if self.values["BEWEFT_WORKER_ACTIVE"] == "true" else []
         return docker("compose", "--env-file", str(self.envfile), "--project-name", self.project,
                       "-f", str(COMPOSE), *profile, *args, capture=capture, stdin=stdin, stdout=stdout, ok=ok, timeout=timeout,
-                      deadline=deadline, cancellation=cancellation)
+                      deadline=deadline, cancellation=cancellation,
+                      env_overrides={"BEWEFT_IMAGE": self.values["BEWEFT_IMAGE"],
+                                     "BEWEFT_WORKER_ACTIVE": self.values["BEWEFT_WORKER_ACTIVE"]})
 
     @contextmanager
     def locked(self):
@@ -364,26 +465,31 @@ class Installation:
 
     def image_id(self, image):
         require(IMAGE_PATTERN.fullmatch(image) is not None, "Invalid image reference.")
-        result = output("image", "inspect", "--format", "{{.Id}}", image)
+        result = output("image", "inspect", "--format", "{{.Id}}", image, timeout=15)
         require(IMAGE_ID.fullmatch(result) is not None, "Docker returned an invalid image ID.")
         return result
 
-    def replace_settings(self, updates):
+    def replace_state(self, updates):
         require(set(updates) <= {"BEWEFT_IMAGE", "BEWEFT_WORKER_ACTIVE"}, "Invalid installation update.")
         if "BEWEFT_IMAGE" in updates:
             require(IMAGE_ID.fullmatch(updates["BEWEFT_IMAGE"]) is not None, "Image must be an immutable local image ID.")
         if "BEWEFT_WORKER_ACTIVE" in updates:
             require(updates["BEWEFT_WORKER_ACTIVE"] in ("true", "false"), "Invalid worker activation state.")
-        lines = self.envfile.read_text(encoding="utf-8").splitlines()
-        lines = [line.split("=", 1)[0] + "=" + updates[line.split("=", 1)[0]]
-                 if line.split("=", 1)[0] in updates else line for line in lines]
-        fd, name = tempfile.mkstemp(prefix=".installation-", dir=self.path)
+        state = {"image": updates.get("BEWEFT_IMAGE", self.values["BEWEFT_IMAGE"]),
+                 "worker_active": updates.get("BEWEFT_WORKER_ACTIVE", self.values["BEWEFT_WORKER_ACTIVE"]) == "true"}
+        fd, name = tempfile.mkstemp(prefix=".state-", dir=self.path)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as file:
-                file.write("\n".join(lines) + "\n")
+                json.dump(state, file)
+                file.write("\n")
                 file.flush()
                 os.fsync(file.fileno())
-            os.replace(name, self.envfile)
+            os.replace(name, self.statefile)
+            directory = os.open(self.path, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         finally:
             if os.path.exists(name):
                 os.unlink(name)
@@ -630,7 +736,7 @@ def restart_original(install, stops, cleanup):
             docker("exec", api["container"], "wget", "-q", "-T", "5", "-O", "/dev/null",
                    "http://127.0.0.1:3000/healthz", timeout=cleanup_remaining(cleanup))
     except (OperationError, OSError) as error:
-        raise OperationError("Could not verify restarted API and worker; check the installation before continuing.") from error
+        raise OperationError("Could not verify restarted API and worker; a Docker request may have reached the daemon. Inspect the installation before continuing.") from error
 
 
 def snapshot(install, destination, *, resume, max_downtime):
@@ -847,15 +953,15 @@ def extract_media(install, media, members):
 
 
 def restore(install, backup):
-    allowed = {"installation.env", ".beweft.lock"}
+    allowed = {"installation.env", STATE_FILE, ".beweft.lock"}
     require({item.name for item in install.path.iterdir()} <= allowed,
-            "Restore requires an empty installation directory containing only installation.env.")
+            "Restore requires an empty installation directory containing only its private configuration and state.")
     empty_project(install.project)
     with verified_backup(backup, install) as (files, members):
         # Validation may take time for large media; check again immediately
         # before creating the destination project.
         empty_project(install.project)
-        install.replace_settings({"BEWEFT_WORKER_ACTIVE": "false"})
+        install.replace_state({"BEWEFT_WORKER_ACTIVE": "false"})
         print("Backup, image, key, paths and empty destination verified; restoring into the new project.", flush=True)
         install.compose("up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never", "db")
         install.compose("exec", "-T", "db", "pg_restore", "--exit-on-error", "--single-transaction", "--no-owner",
@@ -875,9 +981,9 @@ def upgrade(install, image, backup, max_downtime):
             "Running and configured image differ; reconcile them before upgrade.")
     old_image = snapshot(install, backup, resume=False, max_downtime=max_downtime)
     require(old_image == current, "Running and configured image differ; services remain stopped. Resolve this before upgrade.")
-    install.replace_settings({"BEWEFT_IMAGE": new_image})
+    install.replace_state({"BEWEFT_IMAGE": new_image})
     print("Starting the new image. If this fails, restore the backup into a new empty project using the old image and key.", flush=True)
-    install.compose("up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never", "--force-recreate")
+    install.compose("up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never", "--force-recreate", timeout=150)
     print(f"Upgrade completed. Prior image ID: {old_image}. Preserve that image and the matching backup for rollback.")
 
 
@@ -885,7 +991,7 @@ def select_image(install, image):
     empty_project(install.project)
     require(install.values["BEWEFT_IMAGE"] == "unconfigured", "Image selection is only for a new installation; use upgrade afterward.")
     selected = install.image_id(image)
-    install.replace_settings({"BEWEFT_IMAGE": selected})
+    install.replace_state({"BEWEFT_IMAGE": selected})
     print(f"Pinned local application image: {selected}")
 
 
@@ -899,7 +1005,7 @@ def build_image(install, node_image):
         command += ["--build-arg", "NODE_IMAGE=" + node_image]
     docker(*command, str(ROOT), capture=False)
     selected = install.image_id(tag)
-    install.replace_settings({"BEWEFT_IMAGE": selected})
+    install.replace_state({"BEWEFT_IMAGE": selected})
     print(f"Built {tag} and pinned application image: {selected}")
 
 
@@ -908,7 +1014,7 @@ def activate(install, reviewed):
     require(install.values["BEWEFT_WORKER_ACTIVE"] == "false", "The worker is already enabled.")
     require(IMAGE_ID.fullmatch(install.values["BEWEFT_IMAGE"]) is not None, "Select an immutable image before activation.")
     # This is an explicit operator attestation, not proof of remote outcomes.
-    install.replace_settings({"BEWEFT_WORKER_ACTIVE": "true"})
+    install.replace_state({"BEWEFT_WORKER_ACTIVE": "true"})
     print("Worker activation requested; it may publish queued items. If startup fails, inspect its state before retrying.", flush=True)
     install.compose("up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never", "--force-recreate", "worker")
 
@@ -942,6 +1048,55 @@ def validate_compose_options(args):
                 "Invalid Compose profile name.")
         index += 1
     require(index < len(args), "Supply a Compose command.")
+    command = args[index]
+    flags = {
+        "up": {"-d", "--detach", "--wait", "--no-build", "--no-deps", "--force-recreate", "--no-recreate", "--remove-orphans"},
+        "start": {"--wait"},
+        "stop": set(), "restart": set(),
+        "down": {"-v", "--volumes", "--remove-orphans"},
+        "ps": {"-a", "--all", "-q", "--quiet", "--services"},
+        "logs": {"-f", "--follow", "-t", "--timestamps", "--no-color"},
+        "config": {"--quiet"},
+    }
+    value_flags = {
+        "up": {"--wait-timeout": "seconds", "--pull": "pull"},
+        "start": {"--wait-timeout": "seconds"},
+        "stop": {"-t": "seconds", "--timeout": "seconds"},
+        "restart": {"-t": "seconds", "--timeout": "seconds"},
+        "down": {"-t": "seconds", "--timeout": "seconds"},
+        "ps": {"--status": "status"}, "logs": {"--tail": "tail"}, "config": {},
+    }
+    require(command in flags,
+            "Unsupported Compose command; run and exec are not permitted. Use ./project cli for the scoped CLI.")
+    following = args[index + 1:]
+    if command == "config":
+        require(following == ["--quiet"], "Expanded Compose config exposes secrets. Use config --quiet.")
+    position = 0
+    while position < len(following):
+        token = following[position]
+        if token in {"api", "db", "worker", "cli"} and command != "config":
+            position += 1
+            continue
+        if token in flags[command]:
+            position += 1
+            continue
+        key, sep, value = token.partition("=")
+        require(key in value_flags[command], "Unsupported Compose option or service.")
+        if not sep:
+            position += 1
+            require(position < len(following), "A Compose option value is required.")
+            value = following[position]
+        kind = value_flags[command][key]
+        if kind == "seconds":
+            require(value.isascii() and value.isdigit() and len(value) <= 5 and int(value) <= 86400, "Invalid Compose timeout.")
+        elif kind == "pull":
+            require(value == "never", "Compose startup may only use --pull never.")
+        elif kind == "status":
+            require(value in {"created", "restarting", "running", "removing", "paused", "exited", "dead"}, "Invalid Compose status.")
+        else:
+            require(value == "all" or (value.isascii() and value.isdigit() and len(value) <= 8), "Invalid log tail count.")
+        position += 1
+    return index
 
 
 def main():
@@ -953,7 +1108,11 @@ def main():
     p.add_argument("project", nargs="?", default="beweft")
     p.add_argument("port", nargs="?", type=int, default=3000)
     p.add_argument("--postgres-image", default="postgres:17-alpine", metavar="LOCAL_IMAGE")
+    p.add_argument("--worker-held", action="store_true")
     p = commands.add_parser("compose")
+    p.add_argument("directory")
+    p.add_argument("args", nargs=argparse.REMAINDER)
+    p = commands.add_parser("cli")
     p.add_argument("directory")
     p.add_argument("args", nargs=argparse.REMAINDER)
     p = commands.add_parser("image")
@@ -981,23 +1140,36 @@ def main():
     p.add_argument("--max-downtime", type=int, default=1800, metavar="SECONDS")
     args = parser.parse_args()
     if args.command == "setup":
-        setup(args.directory, args.project, args.port, args.postgres_image)
+        setup(args.directory, args.project, args.port, args.postgres_image, args.worker_held)
         return
     install = Installation(args.directory)
     with install.locked():
         if args.command == "compose":
             require(args.args, "Supply Compose arguments.")
-            validate_compose_options(args.args)
-            require("config" not in args.args or args.args == ["config", "--quiet"],
-                    "Expanded Compose config exposes secrets. Use config --quiet.")
-            require("build" not in args.args and "--build" not in args.args,
-                    "Build separately with ./project build; normal Compose commands never rebuild an installation image.")
-            if any(item in {"up", "run", "start", "restart", "create"} for item in args.args):
+            index = validate_compose_options(args.args)
+            command = args.args[index]
+            if command in {"up", "start", "restart"}:
                 require(IMAGE_ID.fullmatch(install.values["BEWEFT_IMAGE"]) is not None,
                         "Select an immutable image with ./project image or build before starting services.")
-            result = install.compose(*args.args, capture=False, ok=False)
+            compose_args = list(args.args)
+            if command == "up":
+                compose_args[index + 1:index + 1] = ["--no-build", "--pull", "never"]
+            elif command == "down":
+                # A restored worker can exist under the opt-in profile even
+                # while held; include every defined service when retiring it.
+                compose_args[0:0] = ["--profile", "worker", "--profile", "tools"]
+            result = install.compose(*compose_args, capture=False, ok=False)
             if result.returncode:
                 raise OperationError(f"Compose exited with status {result.returncode}.")
+        elif args.command == "cli":
+            require(IMAGE_ID.fullmatch(install.values["BEWEFT_IMAGE"]) is not None,
+                    "Select an immutable image before running the scoped CLI.")
+            # End Compose's flag parsing before the service and all user CLI
+            # arguments, so they cannot become run environment/entrypoint flags.
+            result = install.compose("--profile", "tools", "run", "--rm", "-T", "--no-deps", "--pull", "never", "--", "cli", *args.args,
+                                     capture=False, ok=False)
+            if result.returncode:
+                raise OperationError(f"Scoped CLI exited with status {result.returncode}.")
         elif args.command == "backup":
             snapshot(install, args.destination, resume=True, max_downtime=args.max_downtime)
         elif args.command == "restore":

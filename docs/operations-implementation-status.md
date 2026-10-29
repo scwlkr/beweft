@@ -16,12 +16,14 @@ percent-encoded values while retaining same-origin and token protections.
 The application image contains the built web UI, API, worker, CLI and ffprobe;
 it runs the application as UID 10001. Compose provides persistent PostgreSQL
 and media volumes, a loopback API port and distinct API/worker health checks.
-`./project setup`, `build`, `image`, `compose`, `backup`, `restore`, `activate`,
+`./project setup`, `build`, `image`, `compose`, `cli`, `backup`, `restore`, `activate`,
 `upgrade` and `release` are documented
 in the [self-hosting guide](self-hosting.md). The commands use an explicit
 private installation directory and isolate Compose from ambient `BEWEFT_*` and
 `COMPOSE_*` overrides, except the optional CLI's `BEWEFT_TOKEN`. Normal startup
-uses immutable application and PostgreSQL image IDs. A Docker reservation binds
+uses immutable application and PostgreSQL image IDs. Controlled installation
+state holds the approved application image and worker activation; edits to the
+ordinary configuration cannot change either. A Docker reservation binds
 each project to its installation identity and directory, and its PostgreSQL pin
 cannot change through ordinary startup or application upgrade. Only the
 backup-first upgrade changes the application pin. Restore validates a matching key

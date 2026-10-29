@@ -68,6 +68,8 @@ def project(*args, **kwargs):
 
 def settings(directory):
     values = dict(line.split("=", 1) for line in (directory / "installation.env").read_text().splitlines() if line)
+    state = json.loads((directory / "installation-state.json").read_text())
+    values.update(BEWEFT_IMAGE=state["image"], BEWEFT_WORKER_ACTIVE="true" if state["worker_active"] else "false")
     SENSITIVE.update(values[key] for key in ("BEWEFT_DB_PASSWORD", "BEWEFT_SETUP_SECRET", "BEWEFT_ENCRYPTION_KEY"))
     return values
 
@@ -186,6 +188,35 @@ def started_at(container):
     return docker("inspect", "--format", "{{.State.StartedAt}}", container).stdout.strip()
 
 
+def managed_state_refusal(source, alternate_image):
+    """Editing ordinary config or losing state cannot switch the approved image."""
+    config = source / "installation.env"
+    state = source / "installation-state.json"
+    original_config, original_state = config.read_text(), state.read_text()
+    api = container_for(source, "api")
+    image = image_for(source)
+    for line in ("BEWEFT_IMAGE=" + alternate_image, "BEWEFT_WORKER_ACTIVE=true"):
+        try:
+            config.write_text(original_config + line + "\n")
+            config.chmod(0o600)
+            project("compose", source, "up", "-d", success=False)
+        finally:
+            config.write_text(original_config)
+            config.chmod(0o600)
+    for invalid in (None, "{}\n", '{"image":"unconfigured","worker_active":true,"worker_active":false}\n'):
+        try:
+            if invalid is None:
+                state.unlink()
+            else:
+                state.write_text(invalid)
+                state.chmod(0o600)
+            project("compose", source, "up", "-d", success=False)
+        finally:
+            state.write_text(original_state)
+            state.chmod(0o600)
+    assert container_for(source, "api") == api and image_for(source) == image
+
+
 def instrumented_docker(temp):
     """Observe only test-owned helper mounts, or stall one read-only client call."""
     directory = temp / "docker-wrapper"
@@ -208,6 +239,21 @@ if stall and state_target and args == ["inspect", "--format", "{{json .State}}",
     count_file.write_text(str(count))
     if count == 2:
         pathlib.Path(stall).write_text("waiting after stop")
+        time.sleep(90)
+delayed_start = os.environ.get("OPS_TEST_START_MARKER")
+if delayed_start and "compose" in args and "start" in args:
+    delay = os.environ.get("OPS_TEST_START_DELAY", "6")
+    program = "import os,sys,time; time.sleep(float(sys.argv[1])); open(sys.argv[2], 'w').write('admitted'); os.execv(sys.argv[3], sys.argv[3:])"
+    child = subprocess.Popen([sys.executable, "-c", program, delay, delayed_start, real, *args])
+    pathlib.Path(delayed_start + ".pid").write_text(str(child.pid))
+    time.sleep(90)
+stall_list = os.environ.get("OPS_TEST_STALL_LIST")
+if stall_list and len(args) == 4 and args[:3] == ["ps", "-aq", "--filter"] and args[3].startswith("label=com.docker.compose.project="):
+    count_file = pathlib.Path(stall_list + ".count")
+    count = int(count_file.read_text()) + 1 if count_file.exists() else 1
+    count_file.write_text(str(count))
+    if count == 2:
+        pathlib.Path(stall_list).write_text("waiting")
         time.sleep(90)
 if len(args) >= 3 and args[:2] == ["create", "--name"] and "-dump-" in args[2]:
     result = subprocess.run([real, *args])
@@ -238,6 +284,81 @@ def assert_helpers_removed(log, offset, image):
         for volume in volumes:
             docker("volume", "inspect", volume, success=False)
     return offset + len(records)
+
+
+def cleanup_process_group(source, temp, env, *, admitted, interrupted=None):
+    """A timed-out cleanup must not leave a plugin child that starts the API later."""
+    api = container_for(source, "api")
+    marker = temp / ("term-start" if interrupted == signal.SIGTERM else "interrupt-start" if interrupted else
+                     "admitted-start" if admitted else "delayed-start")
+    project("compose", source, "stop", "api")
+    assert docker("inspect", "--format", "{{.State.Running}}", api).stdout.strip() == "false"
+    code = '''import runpy,signal,sys,time
+m=runpy.run_path(sys.argv[1]); install=m["Installation"](sys.argv[2])
+previous=signal.getsignal(signal.SIGTERM)
+try:
+    with install.locked():
+        m["restart_original"](install, {}, [time.monotonic()+float(sys.argv[3])])
+except m["OperationError"] as error:
+    assert signal.getsignal(signal.SIGTERM) == previous, "SIGTERM handler was not restored"
+    print(error, file=sys.stderr)
+    sys.exit(1)
+raise SystemExit("cleanup unexpectedly succeeded")
+'''
+    wrapped = dict(env, OPS_TEST_START_MARKER=str(marker), OPS_TEST_START_DELAY="0" if admitted else "6")
+    try:
+        command = ["python3", "-c", code, str(ROOT / "scripts/self_host.py"), str(source), "30" if interrupted else "3"]
+        if interrupted:
+            process = subprocess.Popen(command, cwd=ROOT, env=wrapped, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True, start_new_session=True)
+            try:
+                for _ in range(200):
+                    if Path(str(marker) + ".pid").exists():
+                        break
+                    assert process.poll() is None, "Cleanup exited before the plugin descendant started"
+                    time.sleep(0.05)
+                else:
+                    raise AssertionError("The cleanup plugin descendant did not start")
+                process.send_signal(interrupted)
+                _stdout, stderr = process.communicate(timeout=15)
+                assert process.returncode != 0
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+        else:
+            stderr = run(command, success=False, env=wrapped, timeout=30).stderr
+        assert "daemon" in stderr.lower(), "Uncertain daemon state was not reported"
+        assert Path(str(marker) + ".pid").exists(), "The owned plugin descendant was not created"
+        time.sleep(7)
+        child_pid = int(Path(str(marker) + ".pid").read_text())
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            raise AssertionError("The timed-out plugin descendant was not reaped")
+        assert marker.exists() == admitted, "A timed-out child executed a delayed mutation"
+        running = docker("inspect", "--format", "{{.State.Running}}", api).stdout.strip() == "true"
+        assert running == admitted, "The actual Docker state did not match the fixture's admitted request"
+    finally:
+        project("compose", source, "start", "--wait", "--wait-timeout", "120", "api", timeout=150)
+
+
+def release_metadata_deadline(temp, env):
+    """A stalled empty-project listing must fail without deleting its reservation."""
+    name = f"beweft-ops-{RUN_ID}-release"
+    install = temp / "release-deadline"
+    marker = temp / "release-list-stall"
+    project("setup", install, name, str(free_port()), "--worker-held")
+    try:
+        started = time.monotonic()
+        result = project("release", install, success=False, env=dict(env, OPS_TEST_STALL_LIST=str(marker)), timeout=25)
+        assert marker.exists() and "deadline" in result.stderr.lower()
+        assert time.monotonic() - started < 23
+        assert docker("volume", "inspect", "beweft-reservation-" + name).returncode == 0
+    finally:
+        project("release", install)
 
 
 def metadata_stall(source, temp, env, *, interrupt, after_stop=False):
@@ -296,14 +417,19 @@ def ownership_cases(source, temp):
         copied = temp / "copied-installation"
         copied.mkdir()
         shutil.copy2(source / "installation.env", copied / "installation.env")
+        shutil.copy2(source / "installation-state.json", copied / "installation-state.json")
         project("compose", copied, "up", "-d", success=False)
         for override in (("-p", other_name), ("--project-name", other_name),
                          ("--project-name=" + other_name,), ("--env-file", str(other / "installation.env")),
                          ("-f", str(ROOT / "compose.yaml"))):
             project("compose", source, *override, "up", "-d", success=False)
+        for override in (("up", "--build"), ("up", "--pull=always"), ("up", "--env", "BEWEFT_WORKER_ACTIVE=true"),
+                         ("up", "--entrypoint", "sh"), ("down", "--rmi", "all")):
+            project("compose", source, *override, success=False)
         # Simulate a second pre-existing configuration targeting the same
         # project, both sequentially and at the same time as its real owner.
-        set_values(other, {"COMPOSE_PROJECT_NAME": name, "BEWEFT_IMAGE": settings(source)["BEWEFT_IMAGE"]})
+        project("image", other, settings(source)["BEWEFT_IMAGE"])
+        set_values(other, {"COMPOSE_PROJECT_NAME": name})
         project("compose", other, "up", "-d", "--no-build", "--pull", "never", success=False)
         command = ("up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never")
         jobs = [subprocess.Popen([str(ROOT / "project"), "compose", str(directory), *command], cwd=ROOT,
@@ -546,6 +672,7 @@ def main(temp):
     project("compose", source, "up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never")
     assert image_for(source) == original_image
     assert image_for(source, "db") == postgres_image
+    managed_state_refusal(source, upgraded_image)
     ownership_cases(source, temp)
     set_values(source, {"BEWEFT_POSTGRES_IMAGE": changed_postgres})
     try:
@@ -581,7 +708,7 @@ def main(temp):
     SENSITIVE.add(token)
     upload_token = client.call("/tokens", {"name": "Held upload fixture", "scopes": ["drafts:write"], "brand_ids": [brand["id"]]})["token"]
     SENSITIVE.add(upload_token)
-    cli = project("compose", source, "--profile", "tools", "run", "--rm", "-T", "cli", "brands",
+    cli = project("cli", source, "brands",
                   env=dict(CLEAN_ENV, BEWEFT_TOKEN=token))
     assert token not in cli.stdout + cli.stderr and brand["id"] in cli.stdout
     boundary = "beweft-rehearsal-boundary"
@@ -595,6 +722,11 @@ def main(temp):
     project("compose", source, "up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never")
     verify_content(Client(ports[0]), brand, post, publication, media)
     instrumented, helper_log = instrumented_docker(temp)
+    release_metadata_deadline(temp, instrumented)
+    cleanup_process_group(source, temp, instrumented, admitted=False)
+    cleanup_process_group(source, temp, instrumented, admitted=True)
+    cleanup_process_group(source, temp, instrumented, admitted=False, interrupted=signal.SIGINT)
+    cleanup_process_group(source, temp, instrumented, admitted=False, interrupted=signal.SIGTERM)
     metadata_stall(source, temp, instrumented, interrupt=False)
     metadata_stall(source, temp, instrumented, interrupt=True)
     metadata_stall(source, temp, instrumented, interrupt=False, after_stop=True)
@@ -629,7 +761,7 @@ def main(temp):
 
     # The original installation can advance after the backup; its restored
     # queued copy must be reconciled before any worker is enabled.
-    project("compose", source, "exec", "-T", "db", "psql", "-U", "beweft", "-d", "beweft", "-c",
+    docker("exec", container_for(source, "db"), "psql", "-U", "beweft", "-d", "beweft", "-c",
             f"UPDATE publications SET scheduled_at=now()-interval '1 minute' WHERE id='{publication['id']}'")
     for _ in range(100):
         state = next(item for item in client.call("/publications") if item["id"] == publication["id"])["state"]
@@ -653,11 +785,16 @@ def main(temp):
         no_resources(wrong_db_project)
     finally:
         project("release", wrong_db)
-    wrong_image = docker("image", "inspect", "--format", "{{.Id}}", "alpine:3.22").stdout.strip()
-    set_values(restored, {"BEWEFT_IMAGE": wrong_image})
-    project("restore", restored, source_backup, success=False)
-    no_resources(PROJECTS[1])
-    set_values(restored, {"BEWEFT_IMAGE": original_image})
+    wrong_image = temp / "wrong-app-image"
+    wrong_image_project = f"beweft-ops-{RUN_ID}-wrongapp"
+    project("setup", wrong_image, wrong_image_project, str(free_port()))
+    try:
+        project("image", wrong_image, "alpine:3.22")
+        set_values(wrong_image, {"BEWEFT_ENCRYPTION_KEY": settings(source)["BEWEFT_ENCRYPTION_KEY"]})
+        project("restore", wrong_image, source_backup, success=False)
+        no_resources(wrong_image_project)
+    finally:
+        project("release", wrong_image)
     sentinel = restored / "keep-me"
     sentinel.write_text("untouched")
     project("restore", restored, source_backup, success=False)
@@ -685,7 +822,7 @@ def main(temp):
     verify_content(Client(ports[1]), brand, post, publication, media)
     # Even an overdue publication must remain untouched until the operator
     # explicitly starts the restored worker.
-    project("compose", restored, "exec", "-T", "db", "psql", "-U", "beweft", "-d", "beweft", "-c",
+    docker("exec", container_for(restored, "db"), "psql", "-U", "beweft", "-d", "beweft", "-c",
             f"UPDATE publications SET scheduled_at=now()-interval '1 minute' WHERE id='{publication['id']}'")
     time.sleep(2)
     isolated = Client(ports[1])
@@ -698,6 +835,33 @@ def main(temp):
     docker("exec", held, "container-entrypoint", "beweft-worker", "--healthcheck", success=False)
     docker("restart", held)
     docker("exec", held, "container-entrypoint", "beweft-worker", "--healthcheck", success=False)
+    restored_db = container_for(restored, "db")
+    heartbeat_sql = "SELECT coalesce(string_agg(id || '|' || last_seen::text, ',' ORDER BY id), '') FROM worker_heartbeats"
+    before_heartbeat = docker("exec", restored_db, "psql", "-qAt", "-U", "beweft", "-d", "beweft", "-c", heartbeat_sql).stdout
+    for attack in (("run", "--rm", "-d", "--no-deps", "-e", "BEWEFT_WORKER_ACTIVE=true", "worker"),
+                   ("run", "--rm", "--entrypoint", "beweft-worker", "worker"),
+                   ("run", "--rm", "worker", "beweft-worker"),
+                   ("exec", "-T", "worker", "beweft-worker"),
+                   ("create", "worker")):
+        project("compose", restored, "--profile", "worker", *attack, success=False)
+    config = restored / "installation.env"
+    original_config = config.read_text()
+    try:
+        config.write_text(original_config + "BEWEFT_WORKER_ACTIVE=true\n")
+        config.chmod(0o600)
+        project("compose", restored, "--profile", "worker", "up", "-d", "worker", success=False)
+    finally:
+        config.write_text(original_config)
+        config.chmod(0o600)
+    assert docker("exec", restored_db, "psql", "-qAt", "-U", "beweft", "-d", "beweft", "-c", heartbeat_sql).stdout == before_heartbeat
+    commands = [line.split(None, 1)[1].split()[0] for line in
+                docker("top", held, "-eo", "pid,args").stdout.splitlines()[1:] if len(line.split(None, 1)) == 2]
+    assert all(Path(command).name != "beweft-worker" for command in commands)
+    project("cli", restored, "--entrypoint", "beweft-worker", success=False)
+    project("cli", restored, "-e", "BEWEFT_WORKER_ACTIVE=true", "worker", success=False)
+    cli = project("cli", restored, "brands", env=dict(CLEAN_ENV, BEWEFT_TOKEN=token))
+    assert brand["id"] in cli.stdout and token not in cli.stdout + cli.stderr
+    assert docker("exec", restored_db, "psql", "-qAt", "-U", "beweft", "-d", "beweft", "-c", heartbeat_sql).stdout == before_heartbeat
     time.sleep(2)
     assert next(item for item in isolated.call("/publications") if item["id"] == publication["id"])["state"] == "queued"
     assert isolated.call(f"/publications/{publication['id']}/attempts") == []

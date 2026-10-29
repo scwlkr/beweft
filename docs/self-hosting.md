@@ -38,13 +38,28 @@ PostgreSQL ID is also part of the reservation, so editing the installation file
 cannot silently change the database image.
 
 `build` uses a unique local image tag and records its immutable image ID in the
-installation file before any Compose resources are created. Alternatively,
+private `installation-state.json` before any Compose resources are created. Alternatively,
 `./project image <installation> <existing-local-image>` pins a previously built
 local image. Normal Compose startup cannot build or select a mutable tag. To
 change an existing installation's image, use the backup-first upgrade command.
 Use the `./project` wrapper for installation operations; direct Docker Compose
 commands bypass its ownership checks. The wrapper accepts `--profile` before a
-Compose command but rejects global project, file, and environment-file overrides.
+Compose command and allows managed `up`, `start`, `stop`, `restart`, `down`,
+`ps`, `logs`, and `config --quiet` with a limited set of options. It rejects
+`run`, `exec`, command and environment overrides, alternate project or Compose
+files, image removal and rebuild options. Use the dedicated scoped CLI command
+below. Docker administrators can bypass these safeguards directly; the wrapper
+does not protect against a person with direct Docker or host access.
+
+The application image and worker activation are managed state, not editable
+settings. Do not add `BEWEFT_IMAGE` or `BEWEFT_WORKER_ACTIVE` to
+`installation.env` or edit, replace or copy the state file. Missing or malformed
+state prevents operations. Only initial image selection and a backup-first
+upgrade change the application pin; only explicit activation releases a held
+worker. If a state update reports an error, inspect the installation and backup
+before retrying because the atomic update may already have completed. If state
+is lost, preserve the running installation and recover a verified backup into a
+new held installation rather than guessing or reconstructing the old pin.
 
 The reservation remains after `compose down` and across host restarts. To retire
 an installation, preserve anything needed, then run `./project compose
@@ -91,7 +106,7 @@ environment and run, for example:
 
 ```sh
 # Set BEWEFT_TOKEN privately first; do not put the token in command history.
-./project compose <installation> --profile tools run --rm -T cli brands
+./project cli <installation> brands
 ```
 
 For a future server, put a reverse proxy with HTTPS in front of the loopback
@@ -122,10 +137,13 @@ The default backup downtime budget is 1800 seconds; set a different budget with
 `--max-downtime SECONDS` (1–86400). If the budget expires, the command requests
 service recovery and leaves the incomplete backup directory for inspection and
 removal. SIGINT and SIGTERM also cancel the command's own dump client and DB
-session before recovery. Cleanup has a separate 150-second budget. If it cannot
+session before recovery. Cleanup has a separate 150-second Docker-response
+budget, with up to five additional seconds to terminate and reap a timed-out
+local client group. If it cannot
 confirm that the stop request and owned dump have finished, it withholds
 automatic restart and reports a failed recovery: inspect the named resources
-and finish recovery manually. The dump helper's own anonymous PostgreSQL
+and finish recovery manually. A timed-out Docker request may already have reached
+the daemon; inspect the actual service state before retrying. The dump helper's own anonymous PostgreSQL
 volumes are removed and their absence checked before services resume. SIGKILL,
 a stalled host, filesystem, or Docker
 daemon cannot guarantee cleanup or service availability. Plan enough space and
@@ -212,8 +230,8 @@ retain both old images and the key, and plan an isolated migration using the
 official [PostgreSQL upgrade procedures](https://www.postgresql.org/docs/current/upgrading.html)
 for the source and target versions. Check major
 version, extensions, collation and application compatibility; do not point a new
-major version at the old data volume. Provision a separate installation, set
-`BEWEFT_WORKER_ACTIVE=false` in its private file before starting any services,
+major version at the old data volume. Provision a separate installation using
+`./project setup <new-directory> <new-project> <port> --postgres-image <target-image-id> --worker-held`,
 perform and verify the migration and media recovery there, and keep the original
 worker stopped until the full publication handover is reconciled. This project
 does not automate or yet qualify that database migration. Restore the old
