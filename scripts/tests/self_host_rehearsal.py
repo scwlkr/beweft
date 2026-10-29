@@ -35,6 +35,9 @@ PROJECTS = [f"beweft-ops-{RUN_ID}-{letter}" for letter in ("a", "b", "c")]
 UPGRADE_IMAGE = f"beweft:ops-upgrade-{RUN_ID}"
 BUILDER = f"beweft-ops-image-{RUN_ID}"
 MUTABLE_IMAGE = f"beweft:ops-mutable-{RUN_ID}"
+POSTGRES_ALIAS = f"beweft:ops-postgres-{RUN_ID}"
+POSTGRES_DERIVED = f"beweft:ops-postgres-derived-{RUN_ID}"
+POSTGRES_BUILDER = f"beweft-ops-postgres-builder-{RUN_ID}"
 HOLD_CONTAINER = f"beweft-ops-hold-{RUN_ID}"
 BUILT_IMAGE = None
 PASSWORD = "Isolated-operations-owner-password!"
@@ -138,7 +141,7 @@ def verify_content(client, brand, post, publication, media):
 
 
 def checksum(backup):
-    names = ("database.dump", "media.tar", "key.sha256", "image-id", "manifest")
+    names = ("database.dump", "media.tar", "key.sha256", "image-id", "postgres-image-id", "manifest")
     (backup / "SHA256SUMS").write_text("".join(
         f"{hashlib.sha256((backup / name).read_bytes()).hexdigest()}  {name}\n" for name in names))
 
@@ -181,6 +184,168 @@ def container_for(directory, service):
 
 def started_at(container):
     return docker("inspect", "--format", "{{.State.StartedAt}}", container).stdout.strip()
+
+
+def instrumented_docker(temp):
+    """Observe only test-owned helper mounts, or stall one read-only client call."""
+    directory = temp / "docker-wrapper"
+    directory.mkdir()
+    script = directory / "docker"
+    real = shutil.which("docker")
+    assert real
+    script.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, subprocess, sys, time
+real = %r
+args = sys.argv[1:]
+stall = os.environ.get("OPS_TEST_STALL")
+if stall and not os.environ.get("OPS_TEST_STATE_TARGET") and "compose" in args and args[-3:] == ["ps", "-q", "worker"]:
+    pathlib.Path(stall).write_text("waiting")
+    time.sleep(90)
+state_target = os.environ.get("OPS_TEST_STATE_TARGET")
+if stall and state_target and args == ["inspect", "--format", "{{json .State}}", state_target]:
+    count_file = pathlib.Path(stall + ".count")
+    count = int(count_file.read_text()) + 1 if count_file.exists() else 1
+    count_file.write_text(str(count))
+    if count == 2:
+        pathlib.Path(stall).write_text("waiting after stop")
+        time.sleep(90)
+if len(args) >= 3 and args[:2] == ["create", "--name"] and "-dump-" in args[2]:
+    result = subprocess.run([real, *args])
+    if result.returncode == 0:
+        name = args[2]
+        mounts = json.loads(subprocess.check_output([real, "inspect", "--format", "{{json .Mounts}}", name]))
+        image = subprocess.check_output([real, "inspect", "--format", "{{.Image}}", name], text=True).strip()
+        with open(os.environ["OPS_TEST_DOCKER_LOG"], "a") as file:
+            file.write(json.dumps({"name": name, "image": image, "mounts": mounts}) + "\\n")
+    sys.exit(result.returncode)
+os.execv(real, [real, *args])
+''' % real)
+    script.chmod(0o755)
+    log = temp / "docker-helper-log.jsonl"
+    env = dict(CLEAN_ENV, PATH=str(directory) + os.pathsep + CLEAN_ENV.get("PATH", ""),
+               OPS_TEST_DOCKER_LOG=str(log))
+    return env, log
+
+
+def assert_helpers_removed(log, offset, image):
+    records = [json.loads(line) for line in log.read_text().splitlines()[offset:]]
+    assert records, "No owned dump helper was observed"
+    for record in records:
+        assert record["image"] == image, "Dump helper did not use the pinned PostgreSQL image"
+        volumes = [mount["Name"] for mount in record["mounts"] if mount.get("Type") == "volume"]
+        assert volumes and all(re.fullmatch(r"[a-f0-9]{64}", volume) for volume in volumes)
+        docker("container", "inspect", record["name"], success=False)
+        for volume in volumes:
+            docker("volume", "inspect", volume, success=False)
+    return offset + len(records)
+
+
+def metadata_stall(source, temp, env, *, interrupt, after_stop=False):
+    api = container_for(source, "api")
+    started = started_at(api)
+    stem = ("state-" if after_stop else "metadata-") + ("signal" if interrupt else "timeout")
+    marker = temp / stem
+    destination = temp / (stem + "-backup")
+    wrapped = dict(env, OPS_TEST_STALL=str(marker))
+    if after_stop:
+        wrapped["OPS_TEST_STATE_TARGET"] = api
+    process = subprocess.Popen([str(ROOT / "project"), "backup", str(source), str(destination), "--max-downtime", "5"],
+                               cwd=ROOT, env=wrapped, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        for _ in range(120):
+            if marker.exists():
+                break
+            assert process.poll() is None, "Backup exited before the selected metadata call stalled"
+            time.sleep(0.05)
+        else:
+            raise AssertionError("The intended Docker metadata call did not stall")
+        begin = time.monotonic()
+        if interrupt:
+            process.send_signal(signal.SIGTERM)
+        _, stderr = process.communicate(timeout=40 if after_stop else 8)
+        assert process.returncode != 0 and time.monotonic() - begin < (35 if after_stop else 7)
+        assert ("interrupted" if interrupt else "downtime limit expired") in stderr.lower()
+        assert (started_at(api) != started) == after_stop
+        assert docker("inspect", "--format", "{{.State.Running}}", api).stdout.strip() == "true"
+        Client(int(settings(source)["BEWEFT_PORT"])).call("/auth/status")
+        assert destination.exists() == after_stop
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def ownership_cases(source, temp):
+    """Competing directories must never reconfigure a reserved project."""
+    name = settings(source)["COMPOSE_PROJECT_NAME"]
+    other_name = f"beweft-ops-{RUN_ID}-other"
+    other = temp / "ownership-other"
+    project("setup", other, other_name, str(free_port()))
+    original_api = container_for(source, "api")
+    original_db = container_for(source, "db")
+    owner = settings(source)["BEWEFT_INSTALLATION_ID"]
+    try:
+        project("release", source, success=False)
+        for container in (original_api, original_db, container_for(source, "worker")):
+            assert docker("container", "inspect", "--format", '{{index .Config.Labels "org.beweft.installation"}}',
+                          container).stdout.strip() == owner
+        for kind, resource in (("network", name + "_default"), ("volume", name + "_database"), ("volume", name + "_media")):
+            assert docker(kind, "inspect", "--format", '{{index .Labels "org.beweft.installation"}}',
+                          resource).stdout.strip() == owner
+        copied = temp / "copied-installation"
+        copied.mkdir()
+        shutil.copy2(source / "installation.env", copied / "installation.env")
+        project("compose", copied, "up", "-d", success=False)
+        for override in (("-p", other_name), ("--project-name", other_name),
+                         ("--project-name=" + other_name,), ("--env-file", str(other / "installation.env")),
+                         ("-f", str(ROOT / "compose.yaml"))):
+            project("compose", source, *override, "up", "-d", success=False)
+        # Simulate a second pre-existing configuration targeting the same
+        # project, both sequentially and at the same time as its real owner.
+        set_values(other, {"COMPOSE_PROJECT_NAME": name, "BEWEFT_IMAGE": settings(source)["BEWEFT_IMAGE"]})
+        project("compose", other, "up", "-d", "--no-build", "--pull", "never", success=False)
+        command = ("up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never")
+        jobs = [subprocess.Popen([str(ROOT / "project"), "compose", str(directory), *command], cwd=ROOT,
+                                 env=CLEAN_ENV, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                for directory in (source, other)]
+        try:
+            results = [job.communicate(timeout=150) for job in jobs]
+            assert jobs[0].returncode == 0 and jobs[1].returncode != 0
+            assert "reservation" in results[1][1].lower()
+        finally:
+            for job in jobs:
+                if job.poll() is None:
+                    job.kill()
+                    job.wait(timeout=5)
+        assert container_for(source, "api") == original_api and container_for(source, "db") == original_db
+    finally:
+        set_values(other, {"COMPOSE_PROJECT_NAME": other_name})
+        project("release", other)
+    race_name = f"beweft-ops-{RUN_ID}-race"
+    contenders = [temp / "race-a", temp / "race-b"]
+    ports = [free_port(), free_port()]
+    jobs = [subprocess.Popen([str(ROOT / "project"), "setup", str(path), race_name, str(port)], cwd=ROOT,
+                             env=CLEAN_ENV, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            for path, port in zip(contenders, ports)]
+    try:
+        for job in jobs:
+            job.communicate(timeout=45)
+        assert sorted(job.returncode for job in jobs) == [0, 1], "Two simultaneous setups claimed the same project"
+        winner = contenders[next(index for index, job in enumerate(jobs) if job.returncode == 0)]
+        assert sum((path / "installation.env").exists() for path in contenders) == 1
+        project("release", winner)
+    finally:
+        for job in jobs:
+            if job.poll() is None:
+                job.kill()
+                job.wait(timeout=5)
+        # The name is unique to this rehearsal. Only remove a reservation
+        # if its owner is the configuration generated above.
+        for path in contenders:
+            if (path / "installation.env").exists():
+                subprocess.run([str(ROOT / "project"), "release", str(path)], cwd=ROOT, env=CLEAN_ENV,
+                               capture_output=True, timeout=20)
 
 
 def guard_fails_closed():
@@ -233,7 +398,7 @@ def held_upload_timeout(source, client, brand, token, destination):
     assert client.call("/media?brand_id=" + brand["id"]) == before
 
 
-def interrupted_dump(source, destination, stop_signal=signal.SIGTERM):
+def interrupted_dump(source, destination, stop_signal=signal.SIGTERM, env=None):
     """Interrupt a backup whose uniquely owned pg_dump is blocked on a DB lock."""
     db = container_for(source, "db")
     api = container_for(source, "api")
@@ -254,7 +419,7 @@ def interrupted_dump(source, destination, stop_signal=signal.SIGTERM):
         else:
             raise AssertionError("SIGTERM fixture did not acquire its own table lock")
         process = subprocess.Popen([str(ROOT / "project"), "backup", str(source), str(destination), "--max-downtime", "120"],
-                                   cwd=ROOT, env=CLEAN_ENV, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                   cwd=ROOT, env=CLEAN_ENV if env is None else env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                    start_new_session=True)
         waiting = "SELECT count(*) FROM pg_stat_activity WHERE application_name LIKE 'beweft-backup-%' AND wait_event_type='Lock'"
         for _ in range(200):
@@ -287,7 +452,7 @@ def interrupted_dump(source, destination, stop_signal=signal.SIGTERM):
     client.call("/auth/status")
 
 
-def backup_deadline(source, destination):
+def backup_deadline(source, destination, env=None):
     """Block pg_dump on this fixture's owners table and verify recovery."""
     container = project("compose", source, "ps", "-q", "db").stdout.strip()
     name = "beweft-ops-lock-" + RUN_ID
@@ -307,7 +472,7 @@ def backup_deadline(source, destination):
         else:
             raise AssertionError("Backup deadline fixture did not acquire its own table lock")
         started = time.monotonic()
-        result = project("backup", source, destination, "--max-downtime", "4", success=False, timeout=45)
+        result = project("backup", source, destination, "--max-downtime", "4", success=False, timeout=45, env=env)
         assert "downtime limit expired" in result.stderr
         assert time.monotonic() - started < 35
     finally:
@@ -331,13 +496,31 @@ def main(temp):
     ports = [free_port() for _ in PROJECTS]
     assert len(set(ports)) == len(ports)
     original_image = docker("image", "inspect", "--format", "{{.Id}}", IMAGE).stdout.strip()
+    postgres_image = docker("image", "inspect", "--format", "{{.Id}}", "postgres:17-alpine").stdout.strip()
+    docker("image", "tag", postgres_image, POSTGRES_ALIAS)
     assert "beweft <tool>" in docker("run", "--rm", "--network", "none", "--entrypoint", "beweft", IMAGE, "--help").stdout
     assert "ffprobe version" in docker("run", "--rm", "--network", "none", "--entrypoint", "ffprobe", IMAGE, "-version").stdout
     guard_fails_closed()
     # Re-tagging a local alias for another installation must not change the
     # immutable ID stored by the first one.
     docker("image", "tag", IMAGE, MUTABLE_IMAGE)
-    project("setup", source, PROJECTS[0], str(ports[0]))
+    project("setup", source, PROJECTS[0], str(ports[0]), "--postgres-image", POSTGRES_ALIAS)
+    project("setup", temp / "same-project", PROJECTS[0], str(free_port()), success=False)
+    assert settings(source)["BEWEFT_POSTGRES_IMAGE"] == postgres_image
+    # Change only a unique test alias; the first installation and its dump
+    # client must keep the original database image even after that retag.
+    docker("create", "--name", POSTGRES_BUILDER, "--network", "none", postgres_image)
+    pg_mounts = json.loads(docker("inspect", "--format", "{{json .Mounts}}", POSTGRES_BUILDER).stdout)
+    try:
+        docker("commit", "--change", "LABEL beweft.rehearsal=postgres", POSTGRES_BUILDER, POSTGRES_DERIVED)
+    finally:
+        docker("rm", "-fv", POSTGRES_BUILDER)
+    for mount in pg_mounts:
+        if mount.get("Type") == "volume":
+            docker("volume", "inspect", mount["Name"], success=False)
+    changed_postgres = docker("image", "inspect", "--format", "{{.Id}}", POSTGRES_DERIVED).stdout.strip()
+    assert changed_postgres != postgres_image
+    docker("image", "tag", POSTGRES_DERIVED, POSTGRES_ALIAS)
     project("compose", source, "up", "-d", success=False)
     no_resources(PROJECTS[0])
     project("image", source, MUTABLE_IMAGE)
@@ -362,6 +545,14 @@ def main(temp):
     print("Rehearsal: starting isolated installation", flush=True)
     project("compose", source, "up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never")
     assert image_for(source) == original_image
+    assert image_for(source, "db") == postgres_image
+    ownership_cases(source, temp)
+    set_values(source, {"BEWEFT_POSTGRES_IMAGE": changed_postgres})
+    try:
+        project("compose", source, "up", "-d", "--no-build", "--pull", "never", success=False)
+    finally:
+        set_values(source, {"BEWEFT_POSTGRES_IMAGE": postgres_image})
+    assert image_for(source, "db") == postgres_image
     original_container = container_for(source, "api")
     # A second installation's build uses a private tag and cannot retag the first.
     project("setup", build_fixture, f"beweft-ops-{RUN_ID}-build", str(free_port()))
@@ -376,6 +567,7 @@ def main(temp):
     assert settings(image_fixture)["BEWEFT_IMAGE"] == upgraded_image
     project("compose", source, "up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never")
     assert settings(source)["BEWEFT_IMAGE"] == original_image and image_for(source) == original_image
+    assert image_for(source, "db") == postgres_image
     assert container_for(source, "api") == original_container
     project("compose", source, "up", "-d", "--build", success=False)
     project("image", source, UPGRADE_IMAGE, success=False)
@@ -402,18 +594,37 @@ def main(temp):
     project("compose", source, "restart", "db", "api", "worker")
     project("compose", source, "up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never")
     verify_content(Client(ports[0]), brand, post, publication, media)
+    instrumented, helper_log = instrumented_docker(temp)
+    metadata_stall(source, temp, instrumented, interrupt=False)
+    metadata_stall(source, temp, instrumented, interrupt=True)
+    metadata_stall(source, temp, instrumented, interrupt=False, after_stop=True)
+    metadata_stall(source, temp, instrumented, interrupt=True, after_stop=True)
     held_upload_timeout(source, client, brand, upload_token, temp / "upload-timeout-backup")
-    interrupted_dump(source, temp / "interrupted-backup")
-    interrupted_dump(source, temp / "interrupt-group-backup", signal.SIGINT)
+    interrupted_dump(source, temp / "interrupted-backup", env=instrumented)
+    helper_offset = assert_helpers_removed(helper_log, 0, postgres_image)
+    interrupted_dump(source, temp / "interrupt-group-backup", signal.SIGINT, env=instrumented)
+    helper_offset = assert_helpers_removed(helper_log, helper_offset, postgres_image)
 
     hostile = dict(CLEAN_ENV, COMPOSE_PROJECT_NAME=PROJECTS[1], BEWEFT_IMAGE="wrong:wrong",
                    BEWEFT_DB_PASSWORD="wrong", BEWEFT_ENCRYPTION_KEY="wrong")
     print("Rehearsal: backup and refusal cases", flush=True)
-    project("backup", source, source_backup, env=hostile, timeout=480)
+    project("backup", source, source_backup, env=dict(instrumented, **{key: value for key, value in hostile.items()
+                                                   if key.startswith(("COMPOSE_", "BEWEFT_"))}), timeout=480)
+    helper_offset = assert_helpers_removed(helper_log, helper_offset, postgres_image)
+    assert (source_backup / "postgres-image-id").read_text().strip() == postgres_image
     assert image_for(source) == original_image
     verify_content(Client(ports[0]), brand, post, publication, media)
     project("backup", source, source_backup, success=False)
-    backup_deadline(source, temp / "timed-out-backup")
+    backup_deadline(source, temp / "timed-out-backup", env=instrumented)
+    helper_offset = assert_helpers_removed(helper_log, helper_offset, postgres_image)
+    real_password = settings(source)["BEWEFT_DB_PASSWORD"]
+    set_values(source, {"BEWEFT_DB_PASSWORD": "a" * 64})
+    try:
+        project("backup", source, temp / "failed-dump-backup", success=False, env=instrumented, timeout=90)
+    finally:
+        set_values(source, {"BEWEFT_DB_PASSWORD": real_password})
+    helper_offset = assert_helpers_removed(helper_log, helper_offset, postgres_image)
+    verify_content(Client(ports[0]), brand, post, publication, media)
     verify_content(Client(ports[0]), brand, post, publication, media)
 
     # The original installation can advance after the backup; its restored
@@ -432,6 +643,16 @@ def main(temp):
     project("restore", restored, source_backup, success=False, env=hostile)
     no_resources(PROJECTS[1])
     set_values(restored, {"BEWEFT_ENCRYPTION_KEY": settings(source)["BEWEFT_ENCRYPTION_KEY"]})
+    wrong_db = temp / "wrong-database-image"
+    wrong_db_project = f"beweft-ops-{RUN_ID}-wrongdb"
+    project("setup", wrong_db, wrong_db_project, str(free_port()), "--postgres-image", changed_postgres)
+    try:
+        project("image", wrong_db, IMAGE)
+        set_values(wrong_db, {"BEWEFT_ENCRYPTION_KEY": settings(source)["BEWEFT_ENCRYPTION_KEY"]})
+        project("restore", wrong_db, source_backup, success=False)
+        no_resources(wrong_db_project)
+    finally:
+        project("release", wrong_db)
     wrong_image = docker("image", "inspect", "--format", "{{.Id}}", "alpine:3.22").stdout.strip()
     set_values(restored, {"BEWEFT_IMAGE": wrong_image})
     project("restore", restored, source_backup, success=False)
@@ -523,17 +744,24 @@ if __name__ == "__main__":
                     try:
                         project("compose", directory, "down", "--volumes", "--remove-orphans", timeout=120)
                         no_resources(name)
+                        project("release", directory, timeout=30)
                     except Exception:
                         failures.append(name)
+            for directory in (temp / "image-fixture", temp / "build-fixture"):
+                if (directory / "installation.env").exists():
+                    try:
+                        project("release", directory, timeout=30)
+                    except Exception:
+                        failures.append(directory.name)
             try:
-                for name in (BUILDER, HOLD_CONTAINER):
-                    subprocess.run(["docker", "rm", "-f", name], env=CLEAN_ENV, capture_output=True, timeout=15)
+                for name in (BUILDER, HOLD_CONTAINER, POSTGRES_BUILDER):
+                    subprocess.run(["docker", "rm", "-fv", name], env=CLEAN_ENV, capture_output=True, timeout=15)
                     if subprocess.run(["docker", "container", "inspect", name], env=CLEAN_ENV, capture_output=True, timeout=10).returncode == 0:
                         failures.append(name)
                 listing = subprocess.run(["docker", "image", "ls", "--filter", f"reference=beweft:beweft-ops-{RUN_ID}-build-*",
                                           "--format", "{{.Repository}}:{{.Tag}}"], env=CLEAN_ENV, capture_output=True, text=True, timeout=20)
                 assert listing.returncode == 0
-                owned_images = set(listing.stdout.splitlines()) | {image for image in (UPGRADE_IMAGE, MUTABLE_IMAGE, BUILT_IMAGE) if image}
+                owned_images = set(listing.stdout.splitlines()) | {image for image in (UPGRADE_IMAGE, MUTABLE_IMAGE, POSTGRES_ALIAS, POSTGRES_DERIVED, BUILT_IMAGE) if image}
                 for image in owned_images:
                     if image:
                         subprocess.run(["docker", "image", "rm", image], env=CLEAN_ENV, capture_output=True, timeout=30)

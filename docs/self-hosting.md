@@ -17,19 +17,51 @@ From the repository checkout:
 ```
 
 The destination must not already exist and must be outside the checkout (or
-under its ignored `.local` directory). The project name must be unique on the
-selected Docker daemon; setup refuses existing project resources. Setup creates
-`installation.env` with unique secrets and mode 600 inside a private directory.
+under its ignored `.local` directory). Setup reserves the project name on the
+selected Docker daemon with a unique installation identity. Every wrapper
+operation checks that reservation and the ownership labels on containers,
+networks and volumes before touching the project. A second installation cannot
+claim the same name even before either starts. The reservation binds the
+configuration to its resolved directory: do not move or copy the installation
+directory to operate it elsewhere. Setup refuses existing project resources and
+creates `installation.env` with unique secrets and mode 600 in a private directory.
 Store a separate protected copy of that file, especially
 `BEWEFT_ENCRYPTION_KEY`, in a password manager or offline secret store. Do not
 commit it or include it in a shareable backup. Changing the encryption key makes
 stored provider credentials unreadable.
+
+Setup also pins the local `postgres:17-alpine` image by its immutable ID. The
+database and backup client use that exact image even if the tag changes. It must
+already exist locally; setup does not pull it. Pass `--postgres-image
+<local-image-or-id>` at setup to select a retained image for a restore. The
+PostgreSQL ID is also part of the reservation, so editing the installation file
+cannot silently change the database image.
 
 `build` uses a unique local image tag and records its immutable image ID in the
 installation file before any Compose resources are created. Alternatively,
 `./project image <installation> <existing-local-image>` pins a previously built
 local image. Normal Compose startup cannot build or select a mutable tag. To
 change an existing installation's image, use the backup-first upgrade command.
+Use the `./project` wrapper for installation operations; direct Docker Compose
+commands bypass its ownership checks. The wrapper accepts `--profile` before a
+Compose command but rejects global project, file, and environment-file overrides.
+
+The reservation remains after `compose down` and across host restarts. To retire
+an installation, preserve anything needed, then run `./project compose
+<installation> down --volumes --remove-orphans` and `./project release
+<installation>`. Release refuses while project resources or expected
+volume/network names remain. It removes only the matching control reservation;
+the private installation files remain and can no longer start. If the
+configuration or directory was lost, do not recreate or adopt it. Inspect
+`beweft-reservation-<project>` with `docker volume inspect`, verify its identity
+against your protected installation record, and inspect containers, networks
+and volumes with the project's `com.docker.compose.project` label and the
+expected `<project>_database`, `<project>_media`, `<project>_default`, and
+`<project>-db-1`, `<project>-api-1`, `<project>-worker-1` names.
+Only after independently establishing that the reservation belongs to the
+retired installation and no project resources remain should a Docker
+administrator remove that exact reservation volume manually. If ownership is
+uncertain, leave it in place and choose a different project name.
 
 Open `http://127.0.0.1:3000`, create the owner with the setup secret from the
 private file, and choose an owner password. Use a unique loopback port if 3000
@@ -76,7 +108,7 @@ is supplied by this project. Preserve the encryption key during these changes.
 
 The database, API and worker must be running, and the backup directory must not
 exist. The command stops the API first and then the worker, writes a PostgreSQL
-custom dump and a media archive, records the running image ID and encryption-key
+custom dump and a media archive, records both image IDs and the encryption-key
 fingerprint, and restarts both services. Clients cannot write during this
 boundary; do not mutate the database or media directly. Worker shutdown allows
 up to six minutes for an in-flight attempt, subject to the chosen downtime
@@ -93,7 +125,9 @@ removal. SIGINT and SIGTERM also cancel the command's own dump client and DB
 session before recovery. Cleanup has a separate 150-second budget. If it cannot
 confirm that the stop request and owned dump have finished, it withholds
 automatic restart and reports a failed recovery: inspect the named resources
-and finish recovery manually. SIGKILL, a stalled host, filesystem, or Docker
+and finish recovery manually. The dump helper's own anonymous PostgreSQL
+volumes are removed and their absence checked before services resume. SIGKILL,
+a stalled host, filesystem, or Docker
 daemon cannot guarantee cleanup or service availability. Plan enough space and
 downtime, and monitor service recovery. A successful backup is not proof of
 recovery until you restore and exercise it.
@@ -103,20 +137,20 @@ recovery until you restore and exercise it.
 Restore never replaces an existing project or volume. Create a **new** empty
 installation with a unique project name and port, then privately set its
 `BEWEFT_ENCRYPTION_KEY` to the value from the original installation file and
-pin the original local image ID recorded in the backup’s
-`image-id` file. Retain the original image before upgrading; if it is no longer
-in Docker, obtain that exact image from your own trusted archive first. The new
+pin the original application image ID recorded in `image-id` and PostgreSQL image
+ID in `postgres-image-id`. Retain both images before upgrading; if either is no
+longer in Docker, obtain the exact image from your own trusted archive first. The new
 installation may have its own database password and setup secret.
 
 ```sh
-./project setup <new-empty-installation> <new-project-name> <new-port>
+./project setup <new-empty-installation> <new-project-name> <new-port> --postgres-image <recorded-postgres-image-id>
 ./project image <new-empty-installation> <recorded-old-image-id>
 # Privately set the matching encryption key in installation.env.
 ./project restore <new-empty-installation> <backup-directory>
 ```
 
 Before creating target resources, restore checks the backup file list and
-checksums, the encryption-key fingerprint, the local image identity, the target
+checksums, the encryption-key fingerprint, both local image identities, the target
 project and volume names, and every media archive header. Media may contain only
 ordinary files and directories with safe relative paths; links, special files,
 parent paths, duplicate paths and tar extensions are rejected. The validated
@@ -145,6 +179,11 @@ Only restore a backup from a trusted source. A PostgreSQL dump can contain SQL
 that executes with the database role’s privileges, so media validation does not
 make an arbitrary dump safe to run.
 
+Format 2 backups include both image IDs. Earlier format 1 backups do not record
+the PostgreSQL image and cannot be restored by this wrapper; do not guess that
+identity from a current mutable tag. Preserve the original database, image and
+backup while planning a separately verified recovery.
+
 ## Upgrade
 
 Load or build the new application image locally under a **different tag** from
@@ -165,6 +204,20 @@ the pre-upgrade backup, old image and matching key into a **new empty project**
 as described above, verify it, then switch traffic deliberately. This loses any
 writes made after the backup boundary. Database migrations are not automatically
 reversed, and an old image may not understand a newer database.
+
+The application upgrade command does not upgrade PostgreSQL. The pinned database
+image cannot be changed in an existing installation with these commands. For a
+database image or major-version change, first take and verify a format 2 backup,
+retain both old images and the key, and plan an isolated migration using the
+official [PostgreSQL upgrade procedures](https://www.postgresql.org/docs/current/upgrading.html)
+for the source and target versions. Check major
+version, extensions, collation and application compatibility; do not point a new
+major version at the old data volume. Provision a separate installation, set
+`BEWEFT_WORKER_ACTIVE=false` in its private file before starting any services,
+perform and verify the migration and media recovery there, and keep the original
+worker stopped until the full publication handover is reconciled. This project
+does not automate or yet qualify that database migration. Restore the old
+version and backup into another empty project if rollback is needed.
 
 ## Image licenses and source
 

@@ -6,6 +6,7 @@ from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+import json
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -24,7 +25,7 @@ PROJECT_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,50}\Z")
 IMAGE_PATTERN = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._:/@-]{0,511}\Z")
 HEX64 = re.compile(r"[a-fA-F0-9]{64}\Z")
 IMAGE_ID = re.compile(r"sha256:[a-f0-9]{64}\Z")
-BACKUP_FILES = ("database.dump", "media.tar", "key.sha256", "image-id", "manifest")
+BACKUP_FILES = ("database.dump", "media.tar", "key.sha256", "image-id", "postgres-image-id", "manifest")
 CLEANUP_SECONDS = 150
 
 
@@ -37,6 +38,10 @@ class StopUncertain(OperationError):
 
 
 class Cancelled(OperationError):
+    pass
+
+
+class BackupDeadline(OperationError):
     pass
 
 
@@ -76,12 +81,47 @@ def environment():
             (not key.startswith(("BEWEFT_", "COMPOSE_")) and key != "DATABASE_URL")}
 
 
-def call(args, *, capture=True, stdin=None, stdout=None, ok=True, timeout=None):
+def kill_owned(process):
+    # All callers start these local Docker clients in their own session; a
+    # Compose plugin child must not survive a canceled metadata request.
     try:
-        result = subprocess.run(args, env=environment(), stdin=stdin,
-                                stdout=subprocess.PIPE if capture and stdout is None else stdout,
-                                stderr=subprocess.PIPE if capture else None, check=False, timeout=timeout,
-                                start_new_session=capture)
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def call(args, *, capture=True, stdin=None, stdout=None, ok=True, timeout=None, deadline=None, cancellation=None):
+    try:
+        if deadline is not None:
+            # Only use this path for read-only metadata calls: killing the client
+            # must never leave a mutating daemon request whose outcome is unknown.
+            require(capture and stdin is None and stdout is None and cancellation is not None,
+                    "Invalid supervised Docker metadata request.")
+            cancellation.check()
+            process = subprocess.Popen(args, env=environment(), stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, start_new_session=True)
+            try:
+                while True:
+                    cancellation.check()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise BackupDeadline("The backup downtime limit expired; recovering the original services.")
+                    try:
+                        out, err = process.communicate(timeout=min(0.1, remaining))
+                        result = subprocess.CompletedProcess(args, process.returncode, out, err)
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+                cancellation.check()
+            except BaseException:
+                kill_owned(process)
+                process.communicate(timeout=5)
+                raise
+        else:
+            result = subprocess.run(args, env=environment(), stdin=stdin,
+                                    stdout=subprocess.PIPE if capture and stdout is None else stdout,
+                                    stderr=subprocess.PIPE if capture else None, check=False, timeout=timeout,
+                                    start_new_session=capture)
     except FileNotFoundError as error:
         raise OperationError("Docker with Compose is required.") from error
     except subprocess.TimeoutExpired as error:
@@ -98,8 +138,8 @@ def docker(*args, **kwargs):
     return call(["docker", *args], **kwargs)
 
 
-def output(*args):
-    return docker(*args).stdout.decode("utf-8").strip()
+def output(*args, **kwargs):
+    return docker(*args, **kwargs).stdout.decode("utf-8").strip()
 
 
 def check_prerequisites():
@@ -118,6 +158,14 @@ def private_destination(path):
             "Place installations and backups outside the checkout or under its ignored .local directory.")
 
 
+def named_resource_exists(kind, name):
+    # A failed inspect is not proof of absence; require a successful listing.
+    field = "{{.Names}}" if kind == "container" else "{{.Name}}"
+    args = [kind, "ls"] + (["-a"] if kind == "container" else [])
+    names = output(*args, "--format", field, "--filter", "name=" + name, timeout=15).splitlines()
+    return name in names
+
+
 def empty_project(project):
     """Check only the explicitly selected project's labels and volume names."""
     validate_project(project)
@@ -127,24 +175,95 @@ def empty_project(project):
         require(not output(*args, "--filter", f"label=com.docker.compose.project={project}"),
                 f"The destination Compose project already has {resource} resources; choose an empty project.")
     for suffix in ("database", "media"):
-        found = docker("volume", "inspect", f"{project}_{suffix}", ok=False)
-        require(found.returncode != 0, "A destination volume name already exists; choose an empty project.")
-    found = docker("network", "inspect", f"{project}_default", ok=False)
-    require(found.returncode != 0, "A destination network name already exists; choose an empty project.")
+        require(not named_resource_exists("volume", f"{project}_{suffix}"),
+                "A destination volume name already exists; choose an empty project.")
+    require(not named_resource_exists("network", f"{project}_default"),
+            "A destination network name already exists; choose an empty project.")
+    for service in ("db", "api", "worker"):
+        require(not named_resource_exists("container", f"{project}-{service}-1"),
+                "A destination container name already exists; choose an empty project.")
 
 
-def setup(destination, project, port):
+def reservation_name(project):
+    return "beweft-reservation-" + project
+
+
+def path_fingerprint(path):
+    return hashlib.sha256(os.fsencode(str(path))).hexdigest()
+
+
+def reservation_labels(project, owner, path, postgres):
+    return {"org.beweft.project": project, "org.beweft.installation": owner,
+            "org.beweft.path-sha256": path_fingerprint(path), "org.beweft.postgres-image": postgres}
+
+
+def inspect_labels(kind, name):
+    field = ".Config.Labels" if kind == "container" else ".Labels"
+    result = docker(kind, "inspect", "--format", "{{json " + field + "}}", name, ok=False, timeout=15)
+    if result.returncode:
+        return None
+    return json.loads(result.stdout.decode()) or {}
+
+
+def reserve(project, owner, path, postgres):
+    labels = reservation_labels(project, owner, path, postgres)
+    args = [item for key, value in labels.items() for item in ("--label", f"{key}={value}")]
+    # Docker creates a named volume atomically. If it already exists, Docker
+    # returns the existing volume; its immutable labels decide the winner.
+    docker("volume", "create", *args, reservation_name(project), timeout=15)
+    require(inspect_labels("volume", reservation_name(project)) == labels,
+            "The Compose project is reserved by another installation or has an invalid reservation.")
+
+
+def assert_reservation(project, owner, path, postgres):
+    require(inspect_labels("volume", reservation_name(project)) == reservation_labels(project, owner, path, postgres),
+            "The Compose project reservation is missing or belongs to another installation; no operation was attempted.")
+
+
+def assert_project_ownership(project, owner):
+    # Compose adds these labels to all of its containers, networks and volumes.
+    # Do not adopt a project resource created by another or older installation.
+    for kind in ("container", "volume", "network"):
+        command = {"container": ("ps", "-aq"), "volume": ("volume", "ls", "-q"),
+                   "network": ("network", "ls", "-q")}[kind]
+        resources = output(*command, "--filter", f"label=com.docker.compose.project={project}", timeout=15).splitlines()
+        for resource in resources:
+            labels = inspect_labels(kind, resource)
+            require(labels is not None and labels.get("org.beweft.installation") == owner,
+                    f"The project has an unowned {kind}; refusing to adopt or modify it.")
+    # An unlabeled resource can still collide with a Compose-generated name.
+    for kind, name in (("volume", f"{project}_database"), ("volume", f"{project}_media"),
+                       ("network", f"{project}_default"),
+                       *(("container", f"{project}-{service}-1") for service in ("db", "api", "worker"))):
+        if named_resource_exists(kind, name):
+            labels = inspect_labels(kind, name)
+            require(labels is not None and labels.get("org.beweft.installation") == owner and
+                    labels.get("com.docker.compose.project") == project,
+                    f"The project has an unowned {kind} name; refusing to adopt or modify it.")
+
+
+def setup(destination, project, port, postgres_image):
     check_prerequisites()
     validate_project(project)
     require(1024 <= port <= 65535, "Port must be between 1024 and 65535.")
-    path = Path(destination).expanduser().absolute()
+    requested = Path(destination).expanduser().absolute()
+    require(not os.path.lexists(requested), "Installation already exists; its files and secrets were preserved.")
+    path = requested.resolve()
     private_destination(path)
     require(not os.path.lexists(path), "Installation already exists; its files and secrets were preserved.")
     empty_project(project)
+    # Resolve the local PostgreSQL image before reserving anything. The same ID
+    # will be used for the database and dump client, even if the tag changes.
+    require(IMAGE_PATTERN.fullmatch(postgres_image) is not None, "Invalid PostgreSQL image reference.")
+    postgres = output("image", "inspect", "--format", "{{.Id}}", postgres_image, timeout=15)
+    require(IMAGE_ID.fullmatch(postgres) is not None, "A local PostgreSQL image is required for setup.")
+    owner = secrets.token_hex(32)
     path.mkdir(mode=0o700)
     values = {
         "COMPOSE_PROJECT_NAME": project,
+        "BEWEFT_INSTALLATION_ID": owner,
         "BEWEFT_IMAGE": "unconfigured",
+        "BEWEFT_POSTGRES_IMAGE": postgres,
         "BEWEFT_WORKER_ACTIVE": "true",
         "BEWEFT_PORT": str(port),
         "BEWEFT_BIND_IP": "127.0.0.1",
@@ -155,9 +274,22 @@ def setup(destination, project, port):
         "BEWEFT_SETUP_SECRET": secrets.token_hex(32),
         "BEWEFT_ENCRYPTION_KEY": secrets.token_hex(32),
     }
-    fd = os.open(path / "installation.env", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as file:
-        file.writelines(f"{key}={value}\n" for key, value in values.items())
+    acquired = False
+    try:
+        reserve(project, owner, path, postgres)
+        acquired = True
+        empty_project(project)
+        fd = os.open(path / "installation.env", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            file.writelines(f"{key}={value}\n" for key, value in values.items())
+    except BaseException:
+        if acquired:
+            assert_reservation(project, owner, path, postgres)
+            docker("volume", "rm", reservation_name(project), timeout=15)
+        if (path / "installation.env").exists():
+            (path / "installation.env").unlink()
+        path.rmdir()
+        raise
     print(f"Installation configuration created: {path / 'installation.env'}")
     print("Store installation.env privately and separately from backups; it contains the encryption key.")
     print(f"Next: ./project build '{path}' (or ./project image '{path}' <local-image>)")
@@ -170,6 +302,10 @@ class Installation:
         self.path = Path(directory).expanduser().resolve(strict=True)
         require(self.path.is_dir(), "Specify an existing installation directory.")
         self.envfile = self.path / "installation.env"
+        self.read_settings()
+        check_prerequisites()
+
+    def read_settings(self):
         info = self.envfile.lstat()
         require(stat.S_ISREG(info.st_mode) and info.st_mode & 0o077 == 0,
                 "installation.env must be a private regular file (chmod 600).")
@@ -182,24 +318,28 @@ class Installation:
                     "installation.env contains a malformed or duplicate setting.")
             require(not any(ch in value for ch in "\r\n$'\"\\"), "installation.env values must be unquoted literals without interpolation.")
             self.values[key] = value
-        required = ("COMPOSE_PROJECT_NAME", "BEWEFT_IMAGE", "BEWEFT_WORKER_ACTIVE", "BEWEFT_PORT", "BEWEFT_BIND_IP", "BEWEFT_PUBLIC_URL",
+        required = ("COMPOSE_PROJECT_NAME", "BEWEFT_INSTALLATION_ID", "BEWEFT_IMAGE", "BEWEFT_POSTGRES_IMAGE", "BEWEFT_WORKER_ACTIVE", "BEWEFT_PORT", "BEWEFT_BIND_IP", "BEWEFT_PUBLIC_URL",
                     "BEWEFT_DB_PASSWORD", "BEWEFT_SETUP_SECRET", "BEWEFT_ENCRYPTION_KEY")
         require(all(self.values.get(key) for key in required), "installation.env is missing a required setting.")
         self.project = self.values["COMPOSE_PROJECT_NAME"]
         validate_project(self.project)
+        require(HEX64.fullmatch(self.values["BEWEFT_INSTALLATION_ID"]) is not None,
+                "Installation identity is missing or invalid.")
         require(self.values["BEWEFT_IMAGE"] == "unconfigured" or IMAGE_ID.fullmatch(self.values["BEWEFT_IMAGE"]) is not None,
                 "Installation image must be an immutable ID selected with ./project image or build.")
+        require(IMAGE_ID.fullmatch(self.values["BEWEFT_POSTGRES_IMAGE"]) is not None,
+                "PostgreSQL image must be an immutable local image ID.")
         require(self.values["BEWEFT_WORKER_ACTIVE"] in ("true", "false"), "Worker activation state is missing or invalid; the worker is held.")
         require(HEX64.fullmatch(self.values["BEWEFT_DB_PASSWORD"]) is not None and
                 HEX64.fullmatch(self.values["BEWEFT_SETUP_SECRET"]) is not None and
                 HEX64.fullmatch(self.values["BEWEFT_ENCRYPTION_KEY"]) is not None,
                 "The three generated installation secrets must each be 64 hexadecimal characters.")
-        check_prerequisites()
 
-    def compose(self, *args, capture=True, stdin=None, stdout=None, ok=True, timeout=None):
+    def compose(self, *args, capture=True, stdin=None, stdout=None, ok=True, timeout=None, deadline=None, cancellation=None):
         profile = ["--profile", "worker"] if self.values["BEWEFT_WORKER_ACTIVE"] == "true" else []
         return docker("compose", "--env-file", str(self.envfile), "--project-name", self.project,
-                      "-f", str(COMPOSE), *profile, *args, capture=capture, stdin=stdin, stdout=stdout, ok=ok, timeout=timeout)
+                      "-f", str(COMPOSE), *profile, *args, capture=capture, stdin=stdin, stdout=stdout, ok=ok, timeout=timeout,
+                      deadline=deadline, cancellation=cancellation)
 
     @contextmanager
     def locked(self):
@@ -209,6 +349,11 @@ class Installation:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as error:
                 raise OperationError("Another operation is using this installation.") from error
+            # Another process might have updated the file before we acquired
+            # this lock; verify the current settings and ownership under it.
+            self.read_settings()
+            assert_reservation(self.project, self.values["BEWEFT_INSTALLATION_ID"], self.path, self.values["BEWEFT_POSTGRES_IMAGE"])
+            assert_project_ownership(self.project, self.values["BEWEFT_INSTALLATION_ID"])
             yield
         finally:
             os.close(fd)
@@ -281,22 +426,27 @@ def wait_cleanup(process, cleanup):
     try:
         return process.wait(timeout=cleanup_remaining(cleanup))
     except subprocess.TimeoutExpired as error:
-        process.kill()
-        process.wait()
+        kill_owned(process)
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
         raise StopUncertain("A Docker request did not complete; automatic restart was withheld; inspect the actual Docker state before recovery.") from error
 
 
-def container_state(container, cleanup=None):
+def container_state(container, cleanup=None, deadline=None, cancellation=None):
     try:
         result = docker("inspect", "--format", "{{json .State}}", container,
-                        timeout=cleanup_remaining(cleanup) if cleanup is not None else 10).stdout.decode()
-        import json
+                        timeout=cleanup_remaining(cleanup) if cleanup is not None else 10,
+                        deadline=deadline, cancellation=cancellation).stdout.decode()
         return json.loads(result)
+    except (Cancelled, BackupDeadline):
+        raise
     except (OperationError, ValueError, UnicodeError) as error:
         raise StopUncertain("Could not verify container state; automatic restart was withheld; inspect the actual Docker state before recovery.") from error
 
 
-def finish_stop(process, container, cleanup, force):
+def finish_stop(process, container, cleanup, force, deadline=None, cancellation=None):
     try:
         if force:
             docker("kill", "--signal", "KILL", container, ok=False, timeout=cleanup_remaining(cleanup))
@@ -305,27 +455,32 @@ def finish_stop(process, container, cleanup, force):
             result = process.wait()
         if result != 0:
             raise StopUncertain("The original Docker stop request did not complete successfully; automatic restart was withheld.")
-        state = container_state(container, cleanup if force else None)
+        state = container_state(container, cleanup if force else None,
+                                deadline=None if force else deadline,
+                                cancellation=None if force else cancellation)
         if state.get("Running") or state.get("Restarting") or state.get("Status") not in ("exited", "dead"):
             raise StopUncertain("The original stop request did not reach a terminal state; automatic restart was withheld; inspect the actual Docker state before recovery.")
+    except (Cancelled, BackupDeadline):
+        raise
     except StopUncertain:
         if process.poll() is None:
-            process.kill()
-            process.wait()
+            kill_owned(process)
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
         raise
     except OperationError as error:
         if process.poll() is None:
-            process.kill()
-            process.wait()
+            kill_owned(process)
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
         raise StopUncertain("Could not complete the original stop request; automatic restart was withheld; inspect the actual Docker state before recovery.") from error
 
 
-def stop_service(install, service, deadline, cancellation, cleanup, stops):
-    cancellation.check()
-    container = install.compose("ps", "-q", service).stdout.decode().strip()
-    require(container, f"The running {service} container was not found.")
-    state = container_state(container)
-    require(state.get("Running") and not state.get("Restarting"), f"The {service} container is not running normally.")
+def stop_service(service, container, state, deadline, cancellation, cleanup, stops):
     cancellation.check()
     record = {"container": container, "started": state.get("StartedAt"), "confirmed": False}
     stops[service] = record
@@ -333,15 +488,13 @@ def stop_service(install, service, deadline, cancellation, cleanup, stops):
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     try:
         result = wait_owned(process, deadline, cancellation)
+        if result != 0:
+            raise OperationError(f"Could not stop {service}; original services will be recovered.")
+        finish_stop(process, container, cleanup, force=False, deadline=deadline, cancellation=cancellation)
     except (Cancelled, OperationError):
         finish_stop(process, container, cleanup, force=True)
         record["confirmed"] = True
         raise
-    if result != 0:
-        finish_stop(process, container, cleanup, force=True)
-        record["confirmed"] = True
-        raise OperationError(f"Could not stop {service}; original services will be recovered.")
-    finish_stop(process, container, cleanup, force=False)
     record["confirmed"] = True
     cancellation.check()
     require(time.monotonic() < deadline, "The backup downtime limit expired; recovering the original services.")
@@ -365,13 +518,36 @@ def cancel_dump_backend(install, app_name, cleanup):
         raise StopUncertain(f"Could not confirm cancellation of dump session {app_name}; automatic restart was withheld; inspect the database and Docker state before recovery.") from error
 
 
+def dump_volumes(name, *, deadline=None, cancellation=None, cleanup=None):
+    result = docker("inspect", "--format", "{{json .Mounts}}", name,
+                    timeout=cleanup_remaining(cleanup) if cleanup is not None else None,
+                    deadline=deadline, cancellation=cancellation)
+    mounts = json.loads(result.stdout.decode())
+    volumes = []
+    for mount in mounts:
+        if mount.get("Type") == "volume":
+            volume = mount.get("Name", "")
+            require(re.fullmatch(r"[a-f0-9]{64}", volume) is not None,
+                    "Dump helper has an unexpected named volume; refusing automatic removal.")
+            volumes.append(volume)
+    return volumes
+
+
+def verify_removed_volumes(volumes, *, deadline=None, cancellation=None, cleanup=None):
+    for volume in volumes:
+        result = docker("volume", "ls", "-q", "--filter", "name=" + volume,
+                        timeout=cleanup_remaining(cleanup) if cleanup is not None else None,
+                        deadline=deadline, cancellation=cancellation)
+        require(volume not in result.stdout.decode().splitlines(),
+                "A dump helper's anonymous volume remains; inspect that helper before recovery.")
+
+
 def stream_helper(install, name, create_args, output_file, deadline, cancellation, cleanup, app_name=None, extra_env=None):
     cancellation.check()
     env = dict(environment(), **(extra_env or {}))
     create = subprocess.Popen(["docker", "create", "--name", name, *create_args], env=env,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    created = False
-    started = None
+    created, started, volumes, failure = False, None, None, None
     try:
         try:
             result = wait_owned(create, deadline, cancellation)
@@ -390,38 +566,56 @@ def stream_helper(install, name, create_args, output_file, deadline, cancellatio
             raise StopUncertain(f"Could not confirm the outcome of backup helper {name} creation; automatic restart was withheld.")
         created = True
         cancellation.check()
+        if app_name:
+            volumes = dump_volumes(name, deadline=deadline, cancellation=cancellation)
         started = subprocess.Popen(["docker", "start", "--attach", name], env=environment(),
                                    stdout=output_file, stderr=subprocess.DEVNULL, start_new_session=True)
-        try:
-            result = wait_owned(started, deadline, cancellation)
-        except (Cancelled, OperationError):
-            try:
-                docker("rm", "-f", name, timeout=cleanup_remaining(cleanup))
-                created = False
-                wait_cleanup(started, cleanup)
-                if app_name:
-                    cancel_dump_backend(install, app_name, cleanup)
-                    app_name = None
-            except StopUncertain:
-                raise
-            except OperationError as error:
-                raise StopUncertain(f"Could not cancel backup helper {name}; automatic restart was withheld; inspect the named helper and Docker state before recovery.") from error
-            raise
+        result = wait_owned(started, deadline, cancellation)
         require(result == 0, "The backup helper failed; original services will be recovered.")
         cancellation.check()
-    finally:
-        failed = sys.exc_info()[0] is not None
+    except Exception as error:
+        failure = error
+
+    try:
         if created:
-            try:
-                timeout = cleanup_remaining(cleanup) if failed else max(0.1, deadline - time.monotonic())
-                docker("rm", "-f", name, timeout=timeout)
-            except OperationError as error:
-                if started is not None and started.poll() is None:
-                    started.kill()
-                    started.wait()
-                raise StopUncertain(f"Could not remove backup helper {name}; automatic restart was withheld; inspect the named helper and Docker state before recovery.") from error
-        if failed and app_name and started is not None:
+            if app_name and volumes is None:
+                volumes = dump_volumes(name, cleanup=cleanup)
+            # Removal is a daemon mutation. Keep its request owned until it
+            # finishes; if interrupted, finish it within cleanup's budget.
+            removal = subprocess.Popen(["docker", "rm", "-fv", name], env=environment(),
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            if failure:
+                result = wait_cleanup(removal, cleanup)
+            else:
+                try:
+                    result = wait_owned(removal, deadline, cancellation)
+                except (Cancelled, OperationError) as error:
+                    failure = error
+                    result = wait_cleanup(removal, cleanup)
+            require(result == 0, "Could not remove the backup helper.")
+            if started is not None and started.poll() is None:
+                wait_cleanup(started, cleanup)
+            if volumes:
+                if failure:
+                    verify_removed_volumes(volumes, cleanup=cleanup)
+                else:
+                    try:
+                        verify_removed_volumes(volumes, deadline=deadline, cancellation=cancellation)
+                    except (Cancelled, OperationError) as error:
+                        failure = error
+                        verify_removed_volumes(volumes, cleanup=cleanup)
+        if failure and app_name and started is not None:
             cancel_dump_backend(install, app_name, cleanup)
+    except (OperationError, OSError, ValueError, UnicodeError) as error:
+        if started is not None and started.poll() is None:
+            kill_owned(started)
+            try:
+                started.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+        raise StopUncertain(f"Could not remove backup helper {name} and its anonymous volumes; automatic restart was withheld; inspect the named helper and Docker state before recovery.") from error
+    if failure:
+        raise failure
     cancellation.check()
 
 
@@ -449,15 +643,29 @@ def snapshot_guarded(install, destination, *, resume, max_downtime, cancellation
     destination = Path(destination).expanduser().absolute()
     private_destination(destination)
     require(not os.path.lexists(destination), "Backup destination already exists; refusing overwrite.")
-    running = set(install.compose("ps", "--status", "running", "--services").stdout.decode().splitlines())
+    # Capture all service identities before stopping anything. These read-only
+    # queries are themselves cancellable and bounded, including on preflight.
+    preflight = time.monotonic() + max_downtime
+    opts = {"deadline": preflight, "cancellation": cancellation}
+    running = set(install.compose("ps", "--status", "running", "--services", **opts).stdout.decode().splitlines())
     require({"db", "api", "worker"} <= running, "Database, API and worker must be running before backup.")
-    install.image_id("postgres:17-alpine")  # The dump helper must be available before stopping services.
-    api = install.compose("ps", "-q", "api").stdout.decode().strip()
-    require(api, "Running API container was not found.")
-    media = output("inspect", api, "--format", '{{range .Mounts}}{{if eq .Destination "/app/media"}}{{.Name}}{{end}}{{end}}')
+    postgres = install.values["BEWEFT_POSTGRES_IMAGE"]
+    require(output("image", "inspect", "--format", "{{.Id}}", postgres, **opts) == postgres,
+            "The pinned PostgreSQL image must be available before backup.")
+    services = {}
+    for service in ("api", "worker", "db"):
+        container = install.compose("ps", "-q", service, **opts).stdout.decode().strip()
+        require(container, f"The running {service} container was not found.")
+        state = container_state(container, deadline=preflight, cancellation=cancellation)
+        require(state.get("Running") and not state.get("Restarting"), f"The {service} container is not running normally.")
+        services[service] = (container, state)
+    api = services["api"][0]
+    media = output("inspect", api, "--format", '{{range .Mounts}}{{if eq .Destination "/app/media"}}{{.Name}}{{end}}{{end}}', **opts)
     require(media == f"{install.project}_media", "The selected API does not use its expected named media volume.")
-    image = output("inspect", api, "--format", "{{.Image}}")
-    require(IMAGE_ID.fullmatch(image) is not None, "The running API image ID is invalid.")
+    image = output("inspect", api, "--format", "{{.Image}}", **opts)
+    require(image == install.values["BEWEFT_IMAGE"], "The running API image does not match its installation pin.")
+    require(output("inspect", services["db"][0], "--format", "{{.Image}}", **opts) == postgres,
+            "The running database image does not match its installation pin.")
     destination.mkdir(mode=0o700)
     succeeded = False
     safe_restart = True
@@ -466,14 +674,14 @@ def snapshot_guarded(install, destination, *, resume, max_downtime, cancellation
     deadline = time.monotonic() + max_downtime
     try:
         print("Stopping API, then worker, to capture a consistent database and media boundary.", flush=True)
-        stop_service(install, "api", deadline, cancellation, cleanup, stops)
-        stop_service(install, "worker", deadline, cancellation, cleanup, stops)
+        stop_service("api", *services["api"], deadline, cancellation, cleanup, stops)
+        stop_service("worker", *services["worker"], deadline, cancellation, cleanup, stops)
         nonce = secrets.token_hex(12)
         helper = install.project + "-dump-" + nonce
         app_name = "beweft-backup-" + nonce
         with (destination / "database.dump").open("xb") as file:
             stream_helper(install, helper, ["--pull=never", "--network", f"{install.project}_default", "--env", "PGPASSWORD", "--env", "PGAPPNAME",
-                                           "postgres:17-alpine", "pg_dump", "-h", "db", "-U", "beweft", "-d", "beweft", "-Fc"],
+                                           postgres, "pg_dump", "-h", "db", "-U", "beweft", "-d", "beweft", "-Fc"],
                           file, deadline, cancellation, cleanup, app_name=app_name,
                           extra_env={"PGPASSWORD": install.values["BEWEFT_DB_PASSWORD"], "PGAPPNAME": app_name})
         helper = install.project + "-media-" + secrets.token_hex(12)
@@ -484,7 +692,8 @@ def snapshot_guarded(install, destination, *, resume, max_downtime, cancellation
                           file, deadline, cancellation, cleanup)
         (destination / "key.sha256").write_text(install.key_digest() + "\n", encoding="ascii")
         (destination / "image-id").write_text(image + "\n", encoding="ascii")
-        (destination / "manifest").write_text("format=1\ncreated_utc=" + datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n", encoding="ascii")
+        (destination / "postgres-image-id").write_text(postgres + "\n", encoding="ascii")
+        (destination / "manifest").write_text("format=2\ncreated_utc=" + datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n", encoding="ascii")
         with (destination / "SHA256SUMS").open("x", encoding="ascii") as sums:
             for name in BACKUP_FILES:
                 cancellation.check()
@@ -497,7 +706,7 @@ def snapshot_guarded(install, destination, *, resume, max_downtime, cancellation
         safe_restart = False
         raise
     finally:
-        if (resume or not succeeded or cancellation.signal) and safe_restart:
+        if stops and (resume or not succeeded or cancellation.signal) and safe_restart:
             restart_original(install, stops, cleanup)
         if not safe_restart:
             print("Automatic restart was withheld because cleanup could not be proven complete.", file=sys.stderr)
@@ -564,7 +773,7 @@ def verified_backup(directory, install):
     directory = Path(directory).expanduser().resolve(strict=True)
     require(directory.is_dir(), "Backup must be a directory.")
     require({item.name for item in directory.iterdir()} == set(BACKUP_FILES) | {"SHA256SUMS"},
-            "Backup must contain exactly the expected format 1 files.")
+            "Backup must contain exactly the expected format 2 files, including its PostgreSQL image ID.")
     with ExitStack() as stack:
         files = {}
         for name in (*BACKUP_FILES, "SHA256SUMS"):
@@ -572,7 +781,7 @@ def verified_backup(directory, install):
             require(stat.S_ISREG(os.fstat(fd).st_mode), "Backup entries must be regular files.")
             files[name] = stack.enter_context(os.fdopen(fd, "rb"))
         require(os.fstat(files["SHA256SUMS"].fileno()).st_size < 4096, "Invalid checksum file.")
-        for name in ("manifest", "key.sha256", "image-id"):
+        for name in ("manifest", "key.sha256", "image-id", "postgres-image-id"):
             require(os.fstat(files[name].fileno()).st_size <= 1024, "Invalid backup metadata size.")
         checks = files["SHA256SUMS"].read().decode("ascii").splitlines()
         expected = {}
@@ -584,13 +793,17 @@ def verified_backup(directory, install):
         for name in BACKUP_FILES:
             require(sha256(files[name]) == expected[name], "Backup checksum verification failed.")
         manifest = files["manifest"].read(1024).decode("ascii").splitlines()
-        require(manifest and manifest[0] == "format=1", "Unsupported backup format.")
+        require(manifest and manifest[0] == "format=2", "Unsupported backup format.")
         fingerprint = files["key.sha256"].read(128).decode("ascii").strip()
         require(fingerprint == install.key_digest(), "Encryption key does not match the backup; no resources were changed.")
         image = files["image-id"].read(128).decode("ascii").strip()
         require(IMAGE_ID.fullmatch(image) is not None, "Backup image ID is invalid.")
         require(install.image_id(install.values["BEWEFT_IMAGE"]) == image,
                 "Configure the original backup image before restoring; no resources were changed.")
+        postgres = files["postgres-image-id"].read(128).decode("ascii").strip()
+        require(IMAGE_ID.fullmatch(postgres) is not None, "Backup PostgreSQL image ID is invalid.")
+        require(install.values["BEWEFT_POSTGRES_IMAGE"] == postgres and install.image_id(postgres) == postgres,
+                "Configure the exact backup PostgreSQL image at setup before restoring; no resources were changed.")
         members = safe_media_members(files["media.tar"])
         yield files, members
 
@@ -600,7 +813,8 @@ def extract_media(install, media, members):
     exists = docker("volume", "inspect", volume, ok=False)
     if exists.returncode:
         docker("volume", "create", "--label", f"com.docker.compose.project={install.project}",
-               "--label", "com.docker.compose.volume=media", volume)
+               "--label", "com.docker.compose.volume=media",
+               "--label", f"org.beweft.installation={install.values['BEWEFT_INSTALLATION_ID']}", volume)
     # Alpine's own /media contains placeholder directories; do not copy them
     # into a new application volume on its first mount.
     mount = f"type=volume,src={volume},dst=/media,volume-nocopy"
@@ -699,6 +913,37 @@ def activate(install, reviewed):
     install.compose("up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never", "--force-recreate", "worker")
 
 
+def release(install):
+    # The installation lock is still held: a wrapper using this path cannot
+    # start between the empty-project check and removing its reservation.
+    empty_project(install.project)
+    assert_reservation(install.project, install.values["BEWEFT_INSTALLATION_ID"], install.path,
+                       install.values["BEWEFT_POSTGRES_IMAGE"])
+    docker("volume", "rm", reservation_name(install.project), timeout=15)
+    print("Empty project reservation released. This installation can no longer start; preserve or remove its files deliberately.")
+
+
+def validate_compose_options(args):
+    # Compose global flags occur before the subcommand. Permit profiles but not
+    # alternate project names, files, env files, or project directories, which
+    # would redirect a command after this installation's ownership check.
+    index = 0
+    while index < len(args) and args[index].startswith("-"):
+        token = args[index]
+        if token == "--profile":
+            index += 1
+            require(index < len(args), "A Compose profile name is required.")
+            profile = args[index]
+        elif token.startswith("--profile="):
+            profile = token.partition("=")[2]
+        else:
+            raise OperationError("Only --profile may precede the Compose command; project and configuration overrides are not allowed.")
+        require(re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}", profile) is not None,
+                "Invalid Compose profile name.")
+        index += 1
+    require(index < len(args), "Supply a Compose command.")
+
+
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
@@ -707,6 +952,7 @@ def main():
     p.add_argument("directory")
     p.add_argument("project", nargs="?", default="beweft")
     p.add_argument("port", nargs="?", type=int, default=3000)
+    p.add_argument("--postgres-image", default="postgres:17-alpine", metavar="LOCAL_IMAGE")
     p = commands.add_parser("compose")
     p.add_argument("directory")
     p.add_argument("args", nargs=argparse.REMAINDER)
@@ -719,6 +965,8 @@ def main():
     p = commands.add_parser("activate")
     p.add_argument("directory")
     p.add_argument("--handover-reviewed", action="store_true")
+    p = commands.add_parser("release")
+    p.add_argument("directory")
     p = commands.add_parser("backup")
     p.add_argument("directory")
     p.add_argument("destination")
@@ -733,12 +981,13 @@ def main():
     p.add_argument("--max-downtime", type=int, default=1800, metavar="SECONDS")
     args = parser.parse_args()
     if args.command == "setup":
-        setup(args.directory, args.project, args.port)
+        setup(args.directory, args.project, args.port, args.postgres_image)
         return
     install = Installation(args.directory)
     with install.locked():
         if args.command == "compose":
             require(args.args, "Supply Compose arguments.")
+            validate_compose_options(args.args)
             require("config" not in args.args or args.args == ["config", "--quiet"],
                     "Expanded Compose config exposes secrets. Use config --quiet.")
             require("build" not in args.args and "--build" not in args.args,
@@ -761,6 +1010,8 @@ def main():
             build_image(install, args.node_image)
         elif args.command == "activate":
             activate(install, args.handover_reviewed)
+        elif args.command == "release":
+            release(install)
 
 
 if __name__ == "__main__":

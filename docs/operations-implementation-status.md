@@ -16,13 +16,16 @@ percent-encoded values while retaining same-origin and token protections.
 The application image contains the built web UI, API, worker, CLI and ffprobe;
 it runs the application as UID 10001. Compose provides persistent PostgreSQL
 and media volumes, a loopback API port and distinct API/worker health checks.
-`./project setup`, `build`, `image`, `compose`, `backup`, `restore`, `activate`
-and `upgrade` are documented
+`./project setup`, `build`, `image`, `compose`, `backup`, `restore`, `activate`,
+`upgrade` and `release` are documented
 in the [self-hosting guide](self-hosting.md). The commands use an explicit
 private installation directory and isolate Compose from ambient `BEWEFT_*` and
 `COMPOSE_*` overrides, except the optional CLI's `BEWEFT_TOKEN`. Normal startup
-uses an immutable image ID selected before creating a project; only the
-backup-first upgrade changes it. Restore validates a matching key and local image, an
+uses immutable application and PostgreSQL image IDs. A Docker reservation binds
+each project to its installation identity and directory, and its PostgreSQL pin
+cannot change through ordinary startup or application upgrade. Only the
+backup-first upgrade changes the application pin. Restore validates a matching key
+and both local images, an
 empty target project, checksums and a bounded, ordinary-file-only media archive
 before creating resources. The restored API starts for verification; its worker
 is persistently held until an operator stops the old worker, reconciles all
@@ -41,11 +44,13 @@ worker sharing a database.
 
 The isolated rehearsal is `scripts/tests/self_host_rehearsal.py`; it uses unique
 Compose projects, ports, volumes, owner and manual-channel fixtures. It exercises
-installation, restart, backup, archive/key/destination rejection, restore,
+installation, competing project reservations, restart, backup, helper volume
+cleanup and archive/key/image/destination rejection, restore,
 byte-identical media and queued data, worker-off recovery, image upgrade and
 rollback. The synthetic upgrade image differs by a label, so this rehearsal
 validates deployment and rollback mechanics rather than a schema-changing
-application release. Test resources are removed afterward.
+application release. A PostgreSQL migration and a physical host reboot remain
+unqualified. Test resources are removed afterward.
 
 The app source is MIT, but the image includes separately licensed Alpine and
 FFmpeg software. The tested FFmpeg reports GPL version 3 or later. Per-image
