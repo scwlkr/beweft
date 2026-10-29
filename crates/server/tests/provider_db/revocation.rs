@@ -279,6 +279,32 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
         h.provider.revoke_requests.load(Ordering::SeqCst),
         revoke_count
     );
+    // Repeats while manual removal is still pending must leave the same
+    // durable boundary in place, even when they arrive concurrently.
+    let pending_before: (i64, Option<Uuid>) = sqlx::query_as(
+        "SELECT oauth_generation,revocation_id FROM provider_oauth_fences WHERE provider='youtube'",
+    )
+    .fetch_one(&h.state.db)
+    .await
+    .unwrap();
+    assert!(pending_before.1.is_some());
+    let repeat = || {
+        client
+            .post(format!("{base}/disconnect/{channel}"))
+            .header(header::COOKIE, &session)
+            .header("x-beweft-request", "1")
+            .send()
+    };
+    let (first_repeat, second_repeat) = tokio::join!(repeat(), repeat());
+    assert_eq!(first_repeat.unwrap().status(), StatusCode::CONFLICT);
+    assert_eq!(second_repeat.unwrap().status(), StatusCode::CONFLICT);
+    let pending_after: (i64, Option<Uuid>) = sqlx::query_as(
+        "SELECT oauth_generation,revocation_id FROM provider_oauth_fences WHERE provider='youtube'",
+    )
+    .fetch_one(&h.state.db)
+    .await
+    .unwrap();
+    assert_eq!(pending_after, pending_before);
     assert_eq!(
         complete(&stale).send().await.unwrap().status(),
         StatusCode::CONFLICT
@@ -383,19 +409,8 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
         complete(&stale_new_channel).send().await.unwrap().status(),
         StatusCode::CONFLICT
     );
-    let fresh = authorize(&client, &base, start(request.clone()).send().await.unwrap()).await;
-    assert_eq!(
-        complete(&fresh).send().await.unwrap().status(),
-        StatusCode::OK
-    );
-    assert_eq!(
-        connections::load_channel(&h.state, channel)
-            .await
-            .unwrap()
-            .tokens
-            .access_token,
-        "rotated"
-    );
+    // A was disconnected and removal was confirmed. Connect B again, then
+    // repeat A's disconnect: B's fresh grant and queued work must survive.
     let other_request = json!({"brand_id":other_brand,"reconnect_channel_id":other_channel});
     let other_fresh = authorize(&client, &base, start(other_request).send().await.unwrap()).await;
     assert_eq!(
@@ -409,6 +424,74 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
             .await
             .unwrap();
     assert_eq!(restored, ("connected".into(), false));
+    let before_sibling: (String, String, bool) = sqlx::query_as(
+        "SELECT connection_status,encrypted_credentials,paused FROM channels WHERE id=$1",
+    )
+    .bind(other_channel)
+    .fetch_one(&h.state.db)
+    .await
+    .unwrap();
+    let before_fence: (i64, Option<Uuid>) = sqlx::query_as(
+        "SELECT oauth_generation,revocation_id FROM provider_oauth_fences WHERE provider='youtube'",
+    )
+    .fetch_one(&h.state.db)
+    .await
+    .unwrap();
+    assert!(before_fence.1.is_none());
+    let repeated = client
+        .post(format!("{base}/disconnect/{channel}"))
+        .header(header::COOKIE, &session)
+        .header("x-beweft-request", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(repeated.status(), StatusCode::OK);
+    let repeated: Value = repeated.json().await.unwrap();
+    assert_eq!(repeated["data"]["disconnected"], true);
+    assert_eq!(repeated["data"]["provider_revoked"], false);
+    assert_eq!(repeated["data"]["channels_requiring_reconnection"], 0);
+    let message = repeated["data"]["next_action"].as_str().unwrap();
+    assert!(message.contains("already disconnected") && message.contains("No new"));
+    assert!(!message.contains("confirm") && !message.contains("connected-app"));
+    let after_sibling: (String, String, bool) = sqlx::query_as(
+        "SELECT connection_status,encrypted_credentials,paused FROM channels WHERE id=$1",
+    )
+    .bind(other_channel)
+    .fetch_one(&h.state.db)
+    .await
+    .unwrap();
+    let after_fence: (i64, Option<Uuid>) = sqlx::query_as(
+        "SELECT oauth_generation,revocation_id FROM provider_oauth_fences WHERE provider='youtube'",
+    )
+    .fetch_one(&h.state.db)
+    .await
+    .unwrap();
+    assert_eq!(after_sibling, before_sibling);
+    assert_eq!(after_fence, before_fence);
+    let queued: String = sqlx::query_scalar("SELECT state FROM publications WHERE id=$1")
+        .bind(publication)
+        .fetch_one(&h.state.db)
+        .await
+        .unwrap();
+    assert_eq!(queued, "queued");
+    assert_eq!(
+        h.provider.revoke_requests.load(Ordering::SeqCst),
+        revoke_count
+    );
+
+    let fresh = authorize(&client, &base, start(request.clone()).send().await.unwrap()).await;
+    assert_eq!(
+        complete(&fresh).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        connections::load_channel(&h.state, channel)
+            .await
+            .unwrap()
+            .tokens
+            .access_token,
+        "rotated"
+    );
 
     let legacy = authorize(&client, &base, start(request.clone()).send().await.unwrap()).await;
     sqlx::query("UPDATE connection_flows SET oauth_generation=NULL WHERE id=$1")

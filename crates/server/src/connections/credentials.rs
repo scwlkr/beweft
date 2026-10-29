@@ -256,11 +256,27 @@ pub async fn disconnect(
     // Provider grant sharing is not reliably known. A stored grant (and every
     // Google disconnect) may affect any channel for that provider. Read the
     // hint without a row lock, then acquire channel locks in stable order.
-    let has_grant_hint: bool =
-        sqlx::query_scalar("SELECT encrypted_credentials IS NOT NULL FROM channels WHERE id=$1")
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let target = sqlx::query(
+        "SELECT encrypted_credentials IS NOT NULL AS has_grant,connection_status FROM channels WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let has_grant_hint: bool = target.get("has_grant");
+    if provider == "youtube"
+        && !has_grant_hint
+        && target.get::<String, _>("connection_status") == "disconnected"
+    {
+        // A prior completed disconnect already crossed the removal boundary.
+        // Do not revoke a fresh sibling's grant when this request is repeated.
+        tx.commit().await?;
+        return Ok(data(json!({
+            "disconnected":true,
+            "provider_revoked":false,
+            "channels_requiring_reconnection":0,
+            "next_action":"This channel is already disconnected. No new provider access removal was started."
+        })));
+    }
     let provider_wide = provider == "youtube" || has_grant_hint;
     let affected: Vec<Uuid> = if provider_wide {
         sqlx::query_scalar("SELECT id FROM channels WHERE provider=$1 ORDER BY id")
