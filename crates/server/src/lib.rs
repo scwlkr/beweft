@@ -158,6 +158,10 @@ pub fn router(state: AppState) -> Router {
             "/publications/{id}/reset-expired-session",
             post(provider_bridge::reset_expired_session),
         )
+        .route(
+            "/publications/{id}/reset-x-upload",
+            post(provider_bridge::reset_x_upload),
+        )
         .route("/publications/{id}/cancel", post(publications::cancel))
         .route("/publications/{id}/retry", post(publications::retry))
         .route(

@@ -16,7 +16,7 @@ pub async fn tick(state: &AppState, worker_id: &str) -> anyhow::Result<bool> {
     sqlx::query("INSERT INTO worker_heartbeats(id,last_seen) VALUES($1,now()) ON CONFLICT(id) DO UPDATE SET last_seen=now()").bind(worker_id).execute(&state.db).await?;
     recover_stale(state).await?;
     let mut tx = state.db.begin().await?;
-    let candidate: Option<Uuid> = sqlx::query_scalar("SELECT p.channel_id FROM publications p JOIN channels c ON c.id=p.channel_id JOIN brands b ON b.id=c.brand_id WHERE b.archived_at IS NULL AND p.state='queued' AND p.scheduled_at<=now() AND NOT c.paused AND (c.provider IN ('manual','fixture') OR c.connection_status='connected') ORDER BY p.scheduled_at LIMIT 1").fetch_optional(&mut *tx).await?;
+    let candidate: Option<Uuid> = sqlx::query_scalar("SELECT p.channel_id FROM publications p JOIN channels c ON c.id=p.channel_id JOIN brands b ON b.id=c.brand_id LEFT JOIN provider_delivery_checkpoints cp ON cp.publication_id=p.id WHERE b.archived_at IS NULL AND p.state='queued' AND p.scheduled_at<=now() AND (cp.not_before IS NULL OR cp.not_before<=clock_timestamp() OR cp.expires_at<=clock_timestamp()) AND NOT c.paused AND (c.provider IN ('manual','fixture') OR c.connection_status='connected') ORDER BY p.scheduled_at LIMIT 1").fetch_optional(&mut *tx).await?;
     let Some(channel) = candidate else {
         tx.commit().await?;
         return Ok(false);
@@ -32,7 +32,7 @@ pub async fn tick(state: &AppState, worker_id: &str) -> anyhow::Result<bool> {
         .await
         .map_err(|e| anyhow::anyhow!("{}", e.2))?;
     // Re-read after the shared channel lock. A concurrent disconnect/pause may have changed eligibility.
-    let Some(row)=sqlx::query("SELECT p.id,p.channel_id,c.provider FROM publications p JOIN channels c ON c.id=p.channel_id JOIN brands b ON b.id=c.brand_id WHERE b.archived_at IS NULL AND p.channel_id=$1 AND p.state='queued' AND p.scheduled_at<=now() AND NOT c.paused AND (c.provider IN ('manual','fixture') OR c.connection_status='connected') ORDER BY p.scheduled_at FOR UPDATE OF p SKIP LOCKED LIMIT 1").bind(channel).fetch_optional(&mut *tx).await? else {tx.commit().await?;return Ok(false);};
+    let Some(row)=sqlx::query("SELECT p.id,p.channel_id,c.provider FROM publications p JOIN channels c ON c.id=p.channel_id JOIN brands b ON b.id=c.brand_id LEFT JOIN provider_delivery_checkpoints cp ON cp.publication_id=p.id WHERE b.archived_at IS NULL AND p.channel_id=$1 AND p.state='queued' AND p.scheduled_at<=now() AND (cp.not_before IS NULL OR cp.not_before<=clock_timestamp() OR cp.expires_at<=clock_timestamp()) AND NOT c.paused AND (c.provider IN ('manual','fixture') OR c.connection_status='connected') ORDER BY p.scheduled_at FOR UPDATE OF p SKIP LOCKED LIMIT 1").bind(channel).fetch_optional(&mut *tx).await? else {tx.commit().await?;return Ok(false);};
     let id: Uuid = row.get("id");
     let provider: String = row.get("provider");
     let attempt = Uuid::new_v4();
@@ -73,6 +73,13 @@ pub async fn tick(state: &AppState, worker_id: &str) -> anyhow::Result<bool> {
             )
             .await
             {
+                crate::provider_bridge::BridgeOutcome::Continue => (
+                    "queued",
+                    None,
+                    json!({"execution":"direct","verification":"checkpoint_continuation"}),
+                    None,
+                    None,
+                ),
                 crate::provider_bridge::BridgeOutcome::Published {
                     external_id,
                     external_url,
@@ -143,7 +150,12 @@ pub async fn finish_attempt(
         tracing::warn!(publication_id=%id,attempt_id=%attempt,"ignored completion outside its active lease");
         return Ok(false);
     }
-    let changed=sqlx::query("UPDATE publication_attempts a SET state=$3,error=$4,receipt=$5,finished_at=clock_timestamp() FROM publications p WHERE a.id=$1 AND a.publication_id=$2 AND a.state='sending' AND p.id=a.publication_id AND p.state='sending' AND p.lease_until>clock_timestamp()").bind(attempt).bind(id).bind(outcome).bind(error).bind(receipt).execute(&mut *tx).await?;
+    let attempt_outcome = if outcome == "queued" {
+        "continued"
+    } else {
+        outcome
+    };
+    let changed=sqlx::query("UPDATE publication_attempts a SET state=$3,error=$4,receipt=$5,finished_at=clock_timestamp() FROM publications p WHERE a.id=$1 AND a.publication_id=$2 AND a.state='sending' AND p.id=a.publication_id AND p.state='sending' AND p.lease_until>clock_timestamp()").bind(attempt).bind(id).bind(attempt_outcome).bind(error).bind(receipt).execute(&mut *tx).await?;
     if changed.rows_affected() != 1 {
         tx.commit().await?;
         tracing::warn!(publication_id=%id,attempt_id=%attempt,"ignored completion from an obsolete attempt");

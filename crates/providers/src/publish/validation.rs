@@ -42,9 +42,27 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
     match provider {
         "x" => {
             post_limit(p, 280)?;
-            if p.media.len() > 4 || p.media.iter().any(|m| !image(m)) {
+            if p.media.len() > 4
+                || p.media.iter().any(|m| !image(m) && m.mime != "video/mp4")
+                || p.options
+                    .get("alt_text")
+                    .is_some_and(|value| !value.is_string())
+                || p.media
+                    .iter()
+                    .any(|m| x_alt_text(p, m).chars().count() > 1000)
+            {
                 return Err(invalid(
-                    "X adapter supports up to four images. Use manual handoff for video.",
+                    "X supports up to four images or one MP4 video; image descriptions must be at most 1,000 characters",
+                ));
+            }
+            // X's documented alt-text support is for image media; do not
+            // silently drop a video description where support is unverified.
+            if p.media
+                .iter()
+                .any(|m| video(m) && !x_alt_text(p, m).trim().is_empty())
+            {
+                return Err(invalid(
+                    "X video descriptions are not supported by this adapter",
                 ));
             }
         }

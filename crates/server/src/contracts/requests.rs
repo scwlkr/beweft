@@ -362,6 +362,24 @@ pub struct ReconcileRequest {
     pub external_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_url: Option<String>,
+    /// Required for an X public-start checkpoint when resolving not published.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_attempt_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_checkpoint_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_stopped: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_inspected: Option<bool>,
+}
+#[derive(Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResetXUploadRequest {
+    pub observed_attempt_id: Uuid,
+    pub observed_checkpoint_id: Uuid,
+    pub sender_stopped: bool,
+    pub confirm_restart: bool,
+    pub provider_inspected: Option<bool>,
 }
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]

@@ -271,6 +271,7 @@ pub enum PublicationAttemptState {
     Failed,
     Uncertain,
     Reconciled,
+    Continued,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct JobHealth {
@@ -403,6 +404,23 @@ pub struct ProviderStatus {
     pub reset_allowed: bool,
     #[schema(required = true)]
     pub reason: Option<String>,
+    #[schema(required = true)]
+    pub x_upload: Option<XUploadStatus>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct XUploadStatus {
+    /// `post_started` is the public delivery boundary, including text-only posts.
+    pub phase: XUploadPhase,
+    pub attempt_id: Uuid,
+    pub checkpoint_id: Uuid,
+    pub reset_allowed: bool,
+    pub reason: String,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum XUploadPhase {
+    Upload,
+    PostStarted,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct ProviderReconcilePending {

@@ -93,9 +93,9 @@ async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
                 }
                 2 => {
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    Json(json!({"data":{"id":"late-post"}})).into_response()
+                    Json(json!({"data":{"id":"987654321"}})).into_response()
                 }
-                _ => Json(json!({"data":{"id":"fixture-post"}})).into_response(),
+                _ => Json(json!({"data":{"id":"987654321"}})).into_response(),
             }
         }
         "/2/media/upload" => {
@@ -104,7 +104,7 @@ async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
                 s.media_started.notify_one();
                 s.media_release.notified().await;
             }
-            Json(json!({"data":{"id":"media-fixture"}})).into_response()
+            Json(json!({"data":{"id":"123456789","expires_after_secs":86400}})).into_response()
         }
         "/fastsession" => {
             let mut r = StatusCode::PERMANENT_REDIRECT.into_response();

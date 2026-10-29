@@ -69,6 +69,13 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     x_exchange_scope = "tweet.read tweet.write users.read offline.access media.write"
     x_refresh_scope = "tweet.read tweet.write users.read offline.access media.write"
     x_refresh_expires = 7200
+    x_video_chunks = []
+    x_video_poll_times = []
+    x_video_finalize_time = 0
+    x_video_status = "success"
+    x_video_wait = 2
+    x_video_fail = ""
+    x_tweet_fail = False
 
     def log_message(self, *_):
         pass
@@ -93,6 +100,14 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
         self.record("GET " + path)
+        if path == "/2/media/upload":
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            assert query == {"command":["STATUS"], "media_id":["123456789"]}, query
+            with self.lock:
+                self.x_video_poll_times.append(time.monotonic())
+                polls = len(self.x_video_poll_times)
+            status = "failed" if self.x_video_status == "failed" else "in_progress" if polls == 1 else "succeeded"
+            return self.respond({"data":{"id":"123456789", "processing_info":{"state":status,"check_after_secs":self.x_video_wait}}})
         if path == "/v23.0/oauth/access_token":
             return self.respond({"access_token":"facebook-long-fixture", "expires_in":7200,
                                  "scope":"pages_manage_posts pages_read_engagement pages_manage_engagement"})
@@ -137,12 +152,43 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         if path == "/2/tweets":
             if self.headers.get("Authorization") == "Bearer x-refresh-fixture":
                 self.record("x_rotated_authorization")
-            return self.respond({"data":{"id":"x-post"}})
+            return self.respond({} if self.x_tweet_fail else {"data":{"id":"987654321"}}, 502 if self.x_tweet_fail else 200)
+        if path == "/2/media/upload/initialize":
+            value = json.loads(body)
+            assert value["media_type"] == "video/mp4" and value["media_category"] == "tweet_video"
+            assert value["total_bytes"] > 0
+            if self.x_video_fail == "initialize":
+                return self.respond({}, 502)
+            return self.respond({"data":{"id":"123456789", "expires_after_secs":86400}})
+        if path == "/2/media/upload/123456789/append":
+            boundary = self.headers["Content-Type"].split("boundary=", 1)[1].encode()
+            parts = body.split(b"--" + boundary)
+            index = media = None
+            for part in parts:
+                if b'name="segment_index"' in part:
+                    index = int(part.split(b"\r\n\r\n", 1)[1].strip())
+                if b'name="media"' in part:
+                    media = part.split(b"\r\n\r\n", 1)[1][:-2]
+            assert index is not None and media is not None and len(media) <= 4 * 1024 * 1024
+            with self.lock:
+                self.x_video_chunks.append((index, len(media)))
+            if self.x_video_fail == "append":
+                return self.respond({}, 502)
+            return self.respond({"data":{"expires_at":123}})
+        if path == "/2/media/upload/123456789/finalize":
+            type(self).x_video_finalize_time = time.monotonic()
+            if self.x_video_fail == "finalize":
+                return self.respond({}, 502)
+            return self.respond({"data":{"id":"123456789", "processing_info":{"state":"pending","check_after_secs":self.x_video_wait}}})
+        if path == "/2/media/metadata":
+            value = json.loads(body)
+            assert value["id"] == "123456789" and value["metadata"]["alt_text"]["text"]
+            return self.respond({"data":{"id":value["id"]}})
         if path == "/2/media/upload":
             if self.x_media_block:
                 self.x_media_started.set()
                 self.x_media_release.wait(20)
-            self.respond({"data":{"id":"x-media-fixture"}})
+            self.respond({"data":{"id":"123456789", "expires_after_secs":86400}})
             self.x_media_returned.set()
             return
         if path == "/upload/youtube/v3/videos":
@@ -457,8 +503,10 @@ def run():
             assert request(f"/posts/{variant_invalid['id']}/schedule", deleted_intent, expected=400) == deleted_result
             request(f"/schedule-requests/{deleted_intent['request_id']}", token=other_token, expected=404)
             request(f"/posts/{variant_invalid['id']}/schedule", deleted_intent, token=other_token, expected=404)
-            unsupported = request("/posts", {"brand_id":brand,"text":"video","media_ids":[video_asset["id"]]})
+            unsupported = request("/posts", {"brand_id":brand,"text":"video description","media_ids":[video_asset["id"]],"options":{"alt_text":"unsupported video description"}})
             rejected_schedule(unsupported, [x["id"]])
+            unsupported_mixed = request("/posts", {"brand_id":brand,"text":"mixed video","media_ids":[video_asset["id"],asset["id"]]})
+            rejected_schedule(unsupported_mixed, [x["id"]])
             malformed = request("/posts", {"brand_id":brand,"text":"bad image","media_ids":[corrupt["id"]]})
             rejected_schedule(malformed, [x["id"]])
             empty = request("/posts", {"brand_id":brand,"text":""})
@@ -529,9 +577,9 @@ def run():
             assert Fixture.counts == before_validation, "scheduling validation must make zero provider calls"
 
             # X metered reads are refused without an explicit acknowledgement.
-            before_x_reads = Fixture.counts.get("GET /2/tweets/x-post", 0)
+            before_x_reads = Fixture.counts.get("GET /2/tweets/987654321", 0)
             request(f"/channels/{x['id']}/sync", {}, expected=400)
-            assert Fixture.counts.get("GET /2/tweets/x-post", 0) == before_x_reads
+            assert Fixture.counts.get("GET /2/tweets/987654321", 0) == before_x_reads
 
             # Paused channels do not claim; once resumed, a real worker performs
             # refresh, provider POST and an attempt-fenced receipt commit.
@@ -552,7 +600,7 @@ def run():
             request(f"/channels/{x['id']}", {"paused":False}, "PATCH")
             published = wait_for(lambda: state_is(x_post["id"], "published"), "X worker receipt")
             assert sql(f"SELECT remaining BETWEEN 295 AND 300 FROM fixture_lease_deltas WHERE publication_id='{x_post['id']}'") == "t"
-            assert published["external_id"] == "x-post" and Fixture.counts.get("x_refresh", 0) == 1
+            assert published["external_id"] == "987654321" and Fixture.counts.get("x_refresh", 0) == 1
             assert Fixture.counts.get("x_rotated_authorization", 0) == 1
             attempt = request(f"/publications/{x_post['id']}/attempts")[0]
             assert attempt["state"] == "published" and attempt["receipt"]["verification"] == "unverified_live"
@@ -671,6 +719,91 @@ def run():
             Fixture.x_exchange_scope = "tweet.read tweet.write users.read offline.access media.write"
             Fixture.x_refresh_scope = Fixture.x_exchange_scope
 
+            # A video larger than one bounded claim crosses durable attempts;
+            # processing delay survives the claim boundary and the originally
+            # scheduled time remains unchanged. All X calls are loopback-only.
+            Fixture.x_video_chunks.clear()
+            Fixture.x_video_poll_times.clear()
+            big_bytes = video.read_bytes()
+            big_bytes += bytes(52 * 1024 * 1024 + 7 - len(big_bytes))
+            big_asset = upload(brand, big_bytes, "large-fixture.mp4", "video/mp4")
+            del big_bytes
+            before_create = Fixture.counts.get("POST /2/tweets", 0)
+            video_post = schedule(brand, x["id"], "Fixture long upload", [big_asset["id"]])
+            completed_video = wait_for(lambda: state_is(video_post["id"], "published"), "multi-claim X video", seconds=90)
+            assert completed_video["scheduled_at"] == video_post["scheduled_at"]
+            assert completed_video["external_id"] == "987654321"
+            assert Fixture.x_video_chunks == [(n, 4 * 1024 * 1024) for n in range(13)] + [(13, 7)]
+            assert int(sql(f"SELECT count(*) FROM publication_attempts WHERE publication_id='{video_post['id']}' AND state='continued'")) >= 1
+            assert len(Fixture.x_video_poll_times) == 2
+            assert Fixture.x_video_poll_times[0] - Fixture.x_video_finalize_time >= 1.8
+            assert Fixture.x_video_poll_times[1] - Fixture.x_video_poll_times[0] >= 1.8
+            assert Fixture.counts.get("POST /2/tweets", 0) == before_create + 1
+
+            # Expiry wins over a longer processing delay, so the worker
+            # quarantines promptly and sends neither a status poll nor post.
+            Fixture.x_video_wait = 30
+            Fixture.x_video_poll_times.clear()
+            expires_waiting = schedule(brand, x["id"], "Expired while processing", [video_asset["id"]])
+            wait_for(lambda: sql(f"SELECT EXISTS(SELECT 1 FROM publications p JOIN provider_delivery_checkpoints cp ON cp.publication_id=p.id WHERE p.id='{expires_waiting['id']}' AND p.state='queued' AND cp.not_before>clock_timestamp())") == "t", "durable processing delay")
+            before_poll = Fixture.counts.get("GET /2/media/upload", 0)
+            before_post = Fixture.counts.get("POST /2/tweets", 0)
+            sql(f"UPDATE provider_delivery_checkpoints SET expires_at=clock_timestamp()-interval '1 second' WHERE publication_id='{expires_waiting['id']}'")
+            wait_for(lambda: state_is(expires_waiting["id"], "uncertain"), "expired X session", seconds=15)
+            assert request(f"/publications/{expires_waiting['id']}/provider-status")["session_expired"]
+            assert Fixture.counts.get("GET /2/media/upload", 0) == before_poll
+            assert Fixture.counts.get("POST /2/tweets", 0) == before_post
+            Fixture.x_video_wait = 2
+
+            # A lost append response leaves upload-stage recovery explicit;
+            # neither an old observation nor a bearer token may reset it.
+            Fixture.x_video_fail = "append"
+            failed_upload = schedule(brand, x["id"], "Lost append", [video_asset["id"]])
+            wait_for(lambda: state_is(failed_upload["id"], "uncertain"), "lost X append")
+            upload_status = request(f"/publications/{failed_upload['id']}/provider-status")["x_upload"]
+            assert upload_status["phase"] == "upload" and upload_status["reset_allowed"]
+            upload_reset = {"observed_attempt_id":upload_status["attempt_id"], "observed_checkpoint_id":upload_status["checkpoint_id"],
+                            "sender_stopped":True, "confirm_restart":True}
+            request(f"/publications/{failed_upload['id']}/reset-x-upload", upload_reset, token=token, expected=403)
+            request(f"/publications/{failed_upload['id']}/reset-x-upload", {**upload_reset,"observed_checkpoint_id":str(uuid.uuid4())}, expected=409)
+            request(f"/publications/{failed_upload['id']}/reset-x-upload", {**upload_reset,"sender_stopped":False}, expected=400)
+            assert request(f"/publications/{failed_upload['id']}/reset-x-upload", upload_reset)["state"] == "failed"
+            assert publication(failed_upload["id"])["state"] == "failed"
+            Fixture.x_video_fail = ""
+            Fixture.x_video_poll_times.clear()
+            request(f"/publications/{failed_upload['id']}/retry", {})
+            wait_for(lambda: state_is(failed_upload["id"], "published"), "explicit reset and retry", seconds=35)
+
+            # The public-write checkpoint covers text-only posts too. A lost
+            # response cannot be reset or retried until the owner records a
+            # current not-published observation with both attestations.
+            Fixture.x_tweet_fail = True
+            unknown_post = schedule(brand, x["id"], "Lost public response")
+            wait_for(lambda: state_is(unknown_post["id"], "uncertain"), "lost X post response")
+            observed = request(f"/publications/{unknown_post['id']}/provider-status")["x_upload"]
+            assert observed["phase"] == "post_started" and not observed["reset_allowed"]
+            reset = {"observed_attempt_id":observed["attempt_id"], "observed_checkpoint_id":observed["checkpoint_id"],
+                     "sender_stopped":True,"confirm_restart":True,"provider_inspected":True}
+            request(f"/publications/{unknown_post['id']}/reset-x-upload", reset, expected=409)
+            request(f"/publications/{unknown_post['id']}/reconcile", {"resolution":"not_published","note":"Fixture inspected"}, expected=409)
+            reconcile = {"resolution":"not_published","note":"Fixture inspected", "observed_attempt_id":observed["attempt_id"],
+                         "observed_checkpoint_id":observed["checkpoint_id"],"sender_stopped":True,"provider_inspected":True}
+            request(f"/publications/{unknown_post['id']}/reconcile", {**reconcile,"observed_attempt_id":str(uuid.uuid4())}, expected=409)
+            request(f"/publications/{unknown_post['id']}/reconcile", reconcile)
+            assert request(f"/publications/{unknown_post['id']}/provider-status")["x_upload"]["reset_allowed"]
+            request(f"/publications/{unknown_post['id']}/retry", {}, expected=409)
+            request(f"/publications/{unknown_post['id']}/reset-x-upload", {**reset,"provider_inspected":False}, expected=409)
+            request(f"/publications/{unknown_post['id']}/reset-x-upload", reset)
+            assert request(f"/publications/{unknown_post['id']}/provider-status")["x_upload"] is None
+            Fixture.x_tweet_fail = False
+            request(f"/publications/{unknown_post['id']}/retry", {})
+            wait_for(lambda: state_is(unknown_post["id"], "published"), "attested X retry")
+
+            before_metadata = Fixture.counts.get("POST /2/media/metadata", 0)
+            x_photo = schedule(brand, x["id"], "Fixture X image", [asset["id"]], options={"alt_text":"A blue fixture image"})
+            wait_for(lambda: state_is(x_photo["id"], "published"), "X image description and receipt")
+            assert Fixture.counts.get("POST /2/media/metadata", 0) == before_metadata + 1
+
             # The provider fetches the committed media capability while its
             # publish POST is in progress, through the actual public router.
             photo = schedule(brand, fb["id"], "Fixture photo", [asset["id"]])
@@ -696,7 +829,10 @@ def run():
             time.sleep(5)
             worker.send_signal(signal.SIGCONT)
             wait_for(lambda: state_is(expiring["id"], "uncertain"), "expired network stage quarantine")
-            assert sql(f"SELECT count(*) FROM provider_delivery_checkpoints WHERE publication_id='{expiring['id']}'") == "0"
+            # Its initial empty upload checkpoint was committed before the
+            # network request; the expired response must not advance it.
+            assert sql(f"SELECT count(*) FROM provider_delivery_checkpoints WHERE publication_id='{expiring['id']}'") == "1"
+            assert request(f"/publications/{expiring['id']}/provider-status")["x_upload"]["phase"] == "upload"
             assert sql(f"SELECT COALESCE(external_id,'none') FROM publications WHERE id='{expiring['id']}'") == "none"
             assert sql(f"SELECT count(*) FROM publication_attempts WHERE publication_id='{expiring['id']}' AND receipt IS NOT NULL") == "0"
             assert Fixture.counts.get("POST /2/tweets", 0) == before_expiring_tweets

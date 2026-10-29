@@ -101,6 +101,13 @@ fn image(m: &Media) -> bool {
 fn video(m: &Media) -> bool {
     m.mime.starts_with("video/")
 }
+fn x_alt_text<'a>(p: &'a Publication, m: &'a Media) -> &'a str {
+    if m.alt_text.trim().is_empty() {
+        p.options["alt_text"].as_str().unwrap_or("")
+    } else {
+        &m.alt_text
+    }
+}
 async fn multipart(m: &Media, field_name: &str) -> Result<Form> {
     Ok(Form::new().part(
         field_name.to_owned(),
