@@ -11,8 +11,14 @@ impl ApiError {
     pub fn bad(message: impl Into<String>) -> Self {
         Self(StatusCode::BAD_REQUEST, "invalid_request", message.into())
     }
+    pub fn bad_code(code: &'static str, message: impl Into<String>) -> Self {
+        Self(StatusCode::BAD_REQUEST, code, message.into())
+    }
     pub fn conflict(message: impl Into<String>) -> Self {
         Self(StatusCode::CONFLICT, "conflict", message.into())
+    }
+    pub fn conflict_code(code: &'static str, message: impl Into<String>) -> Self {
+        Self(StatusCode::CONFLICT, code, message.into())
     }
     pub fn forbidden() -> Self {
         Self(

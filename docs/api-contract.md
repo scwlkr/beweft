@@ -4,6 +4,57 @@ Additional implemented content and account workflows are specified in [workflows
 
 Base `/api/v1`. Success `{ "data": ... }`; failure `{ "error": { "code": "...", "message": "..." } }`. Lists return arrays in `data`. IDs are UUID strings; timestamps RFC3339 UTC. JSON requests set `Content-Type: application/json` and `X-Beweft-Request: 1`. Browser calls use cookie credentials. State-changing browser requests must have matching Origin when present; authenticated cookie mutations require the custom header. All endpoints except auth/status, auth/bootstrap and auth/login need authentication. API tokens use `Authorization: Bearer ...`. Read APIs accept valid tokens except token management; writes need the listed scope. Token listing/creation/revocation and logout require an owner cookie session and reject bearer tokens, including admin tokens. Tokens may restrict `brand_ids`; UI sessions have all owner access.
 
+The following stable codes identify correctable rejections. They leave no
+committed post, media record or publication from the rejected request. An
+upload's temporary reservation and partial file are cleaned up asynchronously:
+
+| HTTP | Code | Meaning |
+| --- | --- | --- |
+| 400 | `post_text_too_long` | Post or channel-variant text exceeds 100,000 bytes. |
+| 400 | `unsupported_media_type` | The file signature is not JPEG, PNG, GIF, WebP, MP4 or WebM. |
+| 400 | `missing_posting_schedule` | A queued channel has no posting rules. |
+| 409 | `posting_slots_unavailable` | No posting-rule slot is free in the next 60 days. |
+| 409 | `post_version_conflict` | The submitted post version is stale. |
+| 400 | `invalid_cursor` | A list cursor is malformed or incompatible with its filters or scope. |
+| 400 | `invalid_page_limit` | A parsed unsigned 32-bit list limit is outside 1–10. |
+
+Existing `unauthorized` (401) and `forbidden` (403) codes indicate authentication
+or access denial. A 401 after a write does not always establish its outcome:
+bootstrap can create the owner before session creation fails. Other failures
+retain their existing codes. A transport failure, interrupted response or unknown
+error after a write likewise does not establish its outcome.
+
+## Bounded list inspection
+
+GET `/posts`, `/media`, and `/publications` accept optional `limit` (an integer
+from 1 to 10) and `cursor`. Parsed unsigned 32-bit limits outside that range
+return `invalid_page_limit`; malformed, negative, or greater-than-4294967295
+query values return `invalid_request` instead. Use an integer from 1 to 10 for
+either error. A request with `limit` returns `{data:[...],next_cursor:string|null}`;
+the cursor is null on the last page. Supply the returned cursor with a limit and
+the same route, filters, view, and authorized brand scope. Malformed or
+incompatible cursors return 400. A cursor is opaque and limited to 2048
+characters; it does not grant access. Every page applies authorization and
+brand filters before pagination. Pages use `created_at DESC, id DESC`, with
+the UUID breaking timestamp ties. They are live views rather than snapshots;
+refresh from the beginning after concurrent changes. Without `limit`, existing
+list order and response shape remain unchanged for the web application.
+
+- `/posts` additionally accepts `status=draft` and `view=summary`. The summary
+  is `{id,brand_id,title,text,media_ids,version,status,created_at,updated_at}`;
+  variants and options are omitted. GET `/posts/:id` returns the full post.
+- `/media` returns the normal media record on each page.
+- `/publications` additionally accepts `group=queue|history`, `view=summary`,
+  and `id=UUID`. Queue means queued/sending; history means every other state.
+  The summary is `{id,post_id,brand_id,channel_id,channel_name,provider,post_version,scheduled_at,scheduling_mode,state,created_at,updated_at}`;
+  payload and external/error fields are omitted. GET
+  `/publications?id=UUID&limit=1` without `view=summary` reads one full,
+  authorized record in the usual `data` array.
+
+The generated OpenAPI and TypeScript query annotations for these additions
+will be refreshed with the core integration; this prose and the running routes
+describe the current change.
+
 ## Authentication
 - GET `/auth/status` → `{initialized:boolean}`.
 - POST `/auth/bootstrap` `{setup_secret,email,password}` → `{id,email}` + session cookie. Password minimum 12 characters. Setup secret is `BEWEFT_SETUP_SECRET` on server. Only available before first owner.
@@ -35,7 +86,7 @@ Base `/api/v1`. Success `{ "data": ... }`; failure `{ "error": { "code": "...", 
 ## Media
 - GET `/media?brand_id=UUID` → media array.
 - GET `/media/limits` → `{max_upload_bytes,quota_bytes,used_bytes,reserved_bytes,available_bytes}`. Storage quota defaults to 10 GiB (`BEWEFT_MEDIA_QUOTA_BYTES`); active uploads reserve capacity atomically. Uploads have a 15-minute deadline.
-- POST `/media?brand_id=UUID` multipart field `file` → media. Maximum `BEWEFT_MAX_UPLOAD_BYTES` (default 256 MiB), streamed to persistent storage; JPEG/PNG/WebP/GIF/MP4/WebM only. Authentication plus custom header applies to multipart too.
+- POST `/media?brand_id=UUID` multipart field `file` → media. Exactly one field named `file` is accepted; extra or duplicate fields are rejected. The complete multipart request, including any epilogue, is consumed within the request body limit (the configured file limit plus 1 MiB) and the 15-minute deadline before a media record is committed or a signature rejection is returned. Maximum file size is `BEWEFT_MAX_UPLOAD_BYTES` (default 256 MiB), streamed to persistent storage; JPEG/PNG/WebP/GIF/MP4/WebM only. Authentication plus custom header applies to multipart too.
 - GET `/media/:id/file` → authenticated file bytes.
 - DELETE `/media/:id` → `{ok:true}`; media referenced by draft or publication cannot be removed.
 - Media `{id,brand_id,name,mime,size,url,alt_text,created_at}`; `url` is the authenticated file endpoint.
@@ -43,7 +94,7 @@ Base `/api/v1`. Success `{ "data": ... }`; failure `{ "error": { "code": "...", 
 ## Scheduling and outcomes
 - GET `/schedules?channel_id=UUID` → posting rules array.
 - POST `/schedules` `{channel_id,days:[1,2,3,4,5],time:"09:00",timezone:"America/Chicago"}` → rule. Monday=1, Sunday=7. DELETE `/schedules/:id`. Each rule `{id,channel_id,days,time,timezone,created_at}`.
-- POST `/posts/:id/schedule` `{version:number,channel_ids:[UUID],scheduled_at?:RFC3339}` → publication array. Version must match the locked draft; a stale version returns 409 without scheduling. Omit scheduled_at to reserve each channel's next available posting-rule slot. Requires `publishing:write`. Exact dates must be future (up to five seconds grace); all variants snapshot atomically.
+- POST `/posts/:id/schedule` `{version:number,channel_ids:[UUID],scheduled_at?:RFC3339}` → publication array. Version must match the locked draft; a stale version returns 409 without scheduling. Omit scheduled_at to reserve each channel's next available posting-rule slot. Requires `publishing:write`. Exact dates must be future (up to five seconds grace); all variants snapshot atomically. Optional query `view=summary` returns the same publication summary fields described under bounded list inspection, omitting payload and external/error fields; the default response retains full publications. An unsupported view is rejected before scheduling. The view selects response representation and is not part of scheduling intent.
 - GET `/publications?brand_id=UUID&channel_id=UUID` → publication array, earliest first. Optional filters.
 - Publication `{id,post_id,brand_id,channel_id,channel_name,provider,post_version,scheduled_at,scheduling_mode,state,payload,external_id,external_url,last_error,created_at,updated_at}`. `payload` contains immutable `{text,media_ids,title,options}`. States: queued, sending, manual_required, published, failed, uncertain, canceled. Fixture success uses `fixture_complete`, never published.
 - GET `/publications/:id/attempts` → durable attempts array with state and errors.
