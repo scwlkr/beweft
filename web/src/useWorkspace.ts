@@ -83,6 +83,23 @@ export function useWorkspace() {
     const t = setTimeout(() => setToast(""), 5000);
     return () => clearTimeout(t);
   }, [toast]);
+  const chooseBrand = useCallback((id: string) => {
+    ++generation.current;
+    context.current = id;
+    setError("");
+    setToast("");
+    setChannels([]);
+    setPosts([]);
+    setIdeas([]);
+    setMedia([]);
+    setPublications([]);
+    setComposer(undefined);
+    setBrandId(id);
+    localStorage.setItem("beweft.brand", id);
+    setSidebar(false);
+    setSearch("");
+    setLoading(true);
+  }, []);
   const load = useCallback(async () => {
     if (!ready || context.current !== brandId) return;
     const current = ++generation.current;
@@ -101,7 +118,7 @@ export function useWorkspace() {
         ? brandId
         : (bs[0]?.id ?? "");
       if (next !== brandId) {
-        setBrandId(next);
+        chooseBrand(next);
         return;
       }
       if (next) {
@@ -135,7 +152,7 @@ export function useWorkspace() {
     } finally {
       if (current === generation.current) setLoading(false);
     }
-  }, [ready, brandId]);
+  }, [ready, brandId, chooseBrand]);
   useEffect(() => {
     void load();
   }, [load]);
@@ -167,21 +184,6 @@ export function useWorkspace() {
     setRoute(r);
     setSidebar(false);
     setSearch("");
-  };
-  const chooseBrand = (id: string) => {
-    ++generation.current;
-    context.current = id;
-    setError("");
-    setToast("");
-    setChannels([]);
-    setPosts([]);
-    setIdeas([]);
-    setMedia([]);
-    setPublications([]);
-    setComposer(undefined);
-    setBrandId(id);
-    localStorage.setItem("beweft.brand", id);
-    setSidebar(false);
   };
   return {
     ready,
