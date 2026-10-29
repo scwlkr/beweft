@@ -61,6 +61,7 @@ export function Composer({
     setMode,
     date,
     setDate,
+    preservedExact,
     busy,
     error,
     intent,
@@ -336,8 +337,12 @@ export function Composer({
                   type="datetime-local"
                   value={date}
                   onChange={(e) => setDate(e.target.value)}
+                  step="0.001"
                   required
                 />
+                {preservedExact && (
+                  <small>Exact saved time: {preservedExact}</small>
+                )}
               </Field>
             )}
             {mode === "queue" && (

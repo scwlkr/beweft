@@ -132,7 +132,12 @@ export function useComposer({
   const [mode, setMode] = useState<"draft" | "queue" | "exact">(
     initialDate ? "exact" : "draft",
   );
-  const [date, setDate] = useState(initialDate ?? localDateTime());
+  const [date, setDateValue] = useState(initialDate ?? localDateTime());
+  const [preservedExact, setPreservedExact] = useState<string | null>(null);
+  const setDate = (value: string) => {
+    setDateValue(value);
+    setPreservedExact(null);
+  };
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [recovery, setRecovery] = useState<
@@ -189,7 +194,10 @@ export function useComposer({
       ),
     );
     setMode(intent.mode);
-    if (intent.scheduled_at) setDate(localDateTime(intent.scheduled_at));
+    if (intent.scheduled_at) {
+      setDateValue(localDateTime(intent.scheduled_at, true));
+      setPreservedExact(intent.scheduled_at);
+    } else setPreservedExact(null);
     if (intent.rejection_code === "schedule_request_conflict") {
       setRecovery("mismatch");
       setRecoveryMessage(
@@ -410,7 +418,7 @@ export function useComposer({
             await clearScheduleIntent(
               pendingSchedule.key,
               saved,
-              { kind: "accepted", publicationIds: rows.map((row) => row.id) },
+              { kind: "accepted", publications: rows },
               lockedSession,
               signal,
             );
@@ -421,6 +429,7 @@ export function useComposer({
             return;
           }
           const state = await inspectScheduleIntent(
+            pendingSchedule.key,
             saved,
             lockedSession,
             signal,
@@ -432,7 +441,7 @@ export function useComposer({
               saved,
               {
                 kind: "accepted",
-                publicationIds: state.publications.map((row) => row.id),
+                publications: state.publications,
               },
               lockedSession,
               signal,
@@ -544,6 +553,7 @@ export function useComposer({
               "This original schedule cannot be stopped safely here.",
             );
           const state = await retireScheduleIntent(
+            pendingSchedule.key,
             saved,
             lockedSession,
             signal,
@@ -555,7 +565,7 @@ export function useComposer({
               saved,
               {
                 kind: "accepted",
-                publicationIds: state.publications.map((row) => row.id),
+                publications: state.publications,
               },
               lockedSession,
               signal,
@@ -673,7 +683,10 @@ export function useComposer({
       setError("Choose at least one channel to schedule this post.");
       return;
     }
-    if (mode === "exact" && (!date || new Date(date).getTime() < Date.now())) {
+    if (
+      mode === "exact" &&
+      (!date || new Date(preservedExact ?? date).getTime() < Date.now())
+    ) {
       setError("Choose a future date and time.");
       return;
     }
@@ -783,6 +796,7 @@ export function useComposer({
               mode,
               date,
               mediaVersions,
+              preservedExact,
             );
             const rows = await sendScheduleIntent(
               pendingSchedule.key,
@@ -795,7 +809,7 @@ export function useComposer({
             await clearScheduleIntent(
               pendingSchedule.key,
               schedule,
-              { kind: "accepted", publicationIds: rows.map((row) => row.id) },
+              { kind: "accepted", publications: rows },
               lockedSession,
               signal,
             );
@@ -865,6 +879,7 @@ export function useComposer({
     setMode,
     date,
     setDate,
+    preservedExact,
     busy,
     error,
     intent,

@@ -1135,3 +1135,426 @@ test("retirement cannot replace a different schedule already bound to the same I
     );
   });
 });
+
+async function twoChannelSetup(
+  page: Page,
+  context: BrowserContext,
+  write: (path: string, body: unknown) => Promise<any>,
+) {
+  const f = await setup(page, context, write);
+  const second = await write("/channels", {
+    brand_id: f.brand.id,
+    provider: "manual",
+    name: "Second recovery channel",
+    timezone: "UTC",
+  });
+  await patch(context, `/posts/${f.post.id}`, {
+    version: f.post.version,
+    variants: [{ channel_id: f.channel.id }, { channel_id: second.id }],
+  });
+  return { ...f, second };
+}
+
+test("a partial successful POST preserves acceptance before a contradictory rejected receipt", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await twoChannelSetup(page, context, write);
+    let originals: any[] = [];
+    await page.route(routeFor(f.post.id), async (route) => {
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBe(true);
+      originals = (await response.json()).data;
+      expect(originals).toHaveLength(2);
+      await route.fulfill({ json: { data: [originals[0]] } });
+    });
+    await page.route("**/api/v1/schedule-requests/*", async (route) => {
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBe(true);
+      const data = (await response.json()).data;
+      data.outcome = "rejected";
+      data.error = { code: "schedule_request_retired", message: "Stopped" };
+      data.publications = [];
+      await route.fulfill({ json: { data } });
+    });
+    await start(page);
+    await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+      "incomplete",
+    );
+    const before = await pending(page, f.key);
+    expect(before.observed_publications).toEqual([
+      { channel_id: originals[0].channel_id, publication_id: originals[0].id },
+    ]);
+    await page
+      .getByRole("button", { name: "Check scheduling outcome" })
+      .click();
+    await expect(
+      page.getByRole("status").getByText(/server record does not match/),
+    ).toBeVisible();
+    const saved = await pending(page, f.key);
+    expect(saved.observed_publications).toEqual(before.observed_publications);
+    expect(saved.rejection_code).toBe("schedule_request_conflict");
+    await page.reload();
+    await page.getByRole("button", { name: "Review pending schedule" }).click();
+    await expect(page.getByLabel("Post text", { exact: true })).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: "Stop original schedule" }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Schedule post" }),
+    ).toHaveCount(0);
+    const actual = await read(
+      context,
+      `/publications?brand_id=${f.brand.id}&view=summary`,
+    );
+    expect(actual.map((row: any) => row.id).sort()).toEqual(
+      originals.map((row: any) => row.id).sort(),
+    );
+    expect((await read(context, `/posts/${f.post.id}`)).version).toBe(
+      saved.post.version,
+    );
+    expect(f.patches()).toBe(1);
+  });
+});
+
+test("a receipt cannot swap observed publication IDs between channels", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await twoChannelSetup(page, context, write);
+    let originals: any[] = [];
+    await page.route(routeFor(f.post.id), async (route) => {
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBe(true);
+      originals = (await response.json()).data;
+      await route.fulfill({ response });
+    });
+    await page.route("**/api/v1/schedule-requests/*", async (route) => {
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBe(true);
+      const data = (await response.json()).data;
+      const [first, second] = data.publications;
+      [first.channel_id, second.channel_id] = [
+        second.channel_id,
+        first.channel_id,
+      ];
+      await route.fulfill({ json: { data } });
+    });
+    await start(page);
+    await expect(
+      page.getByRole("status").getByText(/server record does not match/),
+    ).toBeVisible();
+    const saved = await pending(page, f.key);
+    expect(saved.rejection_code).toBe("schedule_request_conflict");
+    expect(saved.observed_publication_ids.sort()).toEqual(
+      originals.map((row) => row.id).sort(),
+    );
+    expect(saved.observed_publications).toEqual(
+      expect.arrayContaining(
+        originals.map((row) => ({
+          channel_id: row.channel_id,
+          publication_id: row.id,
+        })),
+      ),
+    );
+    expect(saved.observed_publications).toHaveLength(4);
+    await page.reload();
+    await page.getByRole("button", { name: "Review pending schedule" }).click();
+    await expect(
+      page.getByRole("button", { name: "Stop original schedule" }),
+    ).toHaveCount(0);
+    expect(
+      await read(context, `/publications?brand_id=${f.brand.id}&view=summary`),
+    ).toHaveLength(2);
+  });
+});
+
+test("partial GET receipts accumulate bindings and cannot later become a rejection", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await twoChannelSetup(page, context, write);
+    let originals: any[] = [],
+      reads = 0;
+    await page.route(routeFor(f.post.id), async (route) => {
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBe(true);
+      originals = (await response.json()).data;
+      await route.abort("failed");
+    });
+    await page.route("**/api/v1/schedule-requests/*", async (route) => {
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBe(true);
+      const data = (await response.json()).data;
+      reads++;
+      if (reads <= 2) data.publications = [data.publications[reads - 1]];
+      else {
+        data.outcome = "rejected";
+        data.error = { code: "schedule_request_retired", message: "Stopped" };
+        data.publications = [];
+      }
+      await route.fulfill({ json: { data } });
+    });
+    await start(page);
+    await expect(
+      page.getByRole("button", { name: "Check scheduling outcome" }),
+    ).toBeEnabled();
+    await page
+      .getByRole("button", { name: "Check scheduling outcome" })
+      .click();
+    await expect(page.getByText(/only part of this request/)).toBeVisible();
+    const first = await pending(page, f.key);
+    expect(first.observed_publications).toHaveLength(1);
+    await page
+      .getByRole("button", { name: "Check scheduling outcome" })
+      .click();
+    await expect
+      .poll(
+        async () => (await pending(page, f.key)).observed_publications?.length,
+      )
+      .toBe(2);
+    const second = await pending(page, f.key);
+    expect(second.observed_publications).toEqual(
+      expect.arrayContaining(first.observed_publications),
+    );
+    expect(second.observed_publications).toEqual(
+      expect.arrayContaining(
+        originals.map((row) => ({
+          channel_id: row.channel_id,
+          publication_id: row.id,
+        })),
+      ),
+    );
+    await page
+      .getByRole("button", { name: "Check scheduling outcome" })
+      .click();
+    await expect(
+      page.getByRole("status").getByText(/server record does not match/),
+    ).toBeVisible();
+    expect((await pending(page, f.key)).observed_publications).toEqual(
+      second.observed_publications,
+    );
+    expect(
+      await read(context, `/publications?brand_id=${f.brand.id}&view=summary`),
+    ).toHaveLength(2);
+  });
+});
+
+test("an exact saved timestamp retains seconds, microseconds and offset after retirement", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write, true);
+    const base = new Date(Date.now() + 7 * 86400_000);
+    base.setUTCSeconds(37, 0);
+    const shifted = new Date(base.getTime() + 330 * 60000)
+      .toISOString()
+      .slice(0, 19);
+    const exact = `${shifted}.123456+05:30`;
+    const expectedUtc = `${base.toISOString().slice(0, 19)}.123456Z`;
+    const requests: any[] = [];
+    const firstDone = deferred();
+    await page.route(routeFor(f.post.id), async (route) => {
+      requests.push(route.request().postDataJSON());
+      if (requests.length !== 1) return route.continue();
+      await page.evaluate(
+        ({ key, exact }) => {
+          const saved = JSON.parse(localStorage.getItem(key)!);
+          saved.scheduled_at = exact;
+          localStorage.setItem(key, JSON.stringify(saved));
+        },
+        { key: f.key, exact },
+      );
+      const changed = await patch(context, `/media/${f.media!.id}`, {
+        metadata_version: 1,
+        alt_text: "Changed before the original scheduling attempt",
+      });
+      expect(changed.metadata_version).toBe(2);
+      const response = await route.fetch({
+        postData: JSON.stringify({ ...requests[0], scheduled_at: exact }),
+      });
+      expect(response.status()).toBe(409);
+      expect((await response.json()).error.code).toBe("media_version_conflict");
+      await route.fulfill({ response });
+      firstDone.resolve();
+    });
+    const localBase = new Date(
+      base.getTime() - base.getTimezoneOffset() * 60000,
+    )
+      .toISOString()
+      .slice(0, 19);
+    await start(page, localBase);
+    await expect.poll(() => requests.length).toBe(1);
+    expect(requests[0].scheduled_at).toMatch(/:37\.000Z$/);
+    await firstDone.promise;
+    await expect
+      .poll(async () => (await pending(page, f.key))?.scheduled_at)
+      .toBe(exact);
+    await page.reload();
+    await page.getByRole("button", { name: "Review pending schedule" }).click();
+    await expect(page.getByText(`Exact saved time: ${exact}`)).toBeVisible();
+    const shown = await page.getByLabel(/Date and time/).inputValue();
+    expect(shown).toMatch(/:37\.123$/);
+    await page.getByRole("button", { name: "Stop original schedule" }).click();
+    await expect(page.getByText(/original schedule was stopped/)).toBeVisible();
+    await expect(page.getByText(`Exact saved time: ${exact}`)).toBeVisible();
+    await page
+      .getByLabel("Working title")
+      .fill("Corrected without changing the time");
+    await page.getByRole("button", { name: "Schedule post" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(requests).toHaveLength(2);
+    expect(requests[1].scheduled_at).toBe(exact);
+    expect(requests[1].media_versions).toEqual({ [f.media!.id]: 2 });
+    const receipt = await read(
+      context,
+      `/schedule-requests/${requests[1].request_id}`,
+    );
+    expect(receipt.request.scheduled_at).toBe(expectedUtc);
+    expect(
+      await read(context, `/publications?brand_id=${f.brand.id}&view=summary`),
+    ).toHaveLength(1);
+  });
+});
+
+test("a malformed sibling cannot discard a validated publication binding", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await twoChannelSetup(page, context, write);
+    let originals: any[] = [];
+    await page.route(routeFor(f.post.id), async (route) => {
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBe(true);
+      originals = (await response.json()).data;
+      await route.fulfill({
+        json: { data: [originals[0], { ...originals[1], channel_name: null }] },
+      });
+    });
+    await start(page);
+    await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+      "incomplete",
+    );
+    const saved = await pending(page, f.key);
+    expect(saved.observed_publications).toEqual(
+      expect.arrayContaining(
+        originals.map((row) => ({
+          channel_id: row.channel_id,
+          publication_id: row.id,
+        })),
+      ),
+    );
+    await page
+      .getByRole("button", { name: "Check scheduling outcome" })
+      .click();
+    await expect(page.getByText(/original request is confirmed/)).toBeVisible();
+    expect(await pending(page, f.key)).toBeNull();
+    expect(
+      await read(context, `/publications?brand_id=${f.brand.id}&view=summary`),
+    ).toHaveLength(2);
+  });
+});
+
+test("an incomplete receipt envelope cannot discard a validated GET observation", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await twoChannelSetup(page, context, write);
+    let originals: any[] = [],
+      reads = 0;
+    await page.route(routeFor(f.post.id), async (route) => {
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBe(true);
+      originals = (await response.json()).data;
+      await route.abort("failed");
+    });
+    await page.route("**/api/v1/schedule-requests/*", async (route) => {
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBe(true);
+      const data = (await response.json()).data;
+      if (++reads === 1) {
+        data.publications = [data.publications[0]];
+        data.request = null;
+      } else {
+        data.outcome = "rejected";
+        data.error = { code: "schedule_request_retired", message: "Stopped" };
+        data.publications = [];
+      }
+      await route.fulfill({ json: { data } });
+    });
+    await start(page);
+    await expect(
+      page.getByRole("button", { name: "Check scheduling outcome" }),
+    ).toBeEnabled();
+    await page
+      .getByRole("button", { name: "Check scheduling outcome" })
+      .click();
+    await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+      "receipt was incomplete",
+    );
+    const saved = await pending(page, f.key);
+    expect(saved.observed_publications).toEqual([
+      { channel_id: originals[0].channel_id, publication_id: originals[0].id },
+    ]);
+    await page
+      .getByRole("button", { name: "Check scheduling outcome" })
+      .click();
+    await expect(
+      page.getByRole("status").getByText(/server record does not match/),
+    ).toBeVisible();
+    expect((await pending(page, f.key)).observed_publications).toEqual(
+      saved.observed_publications,
+    );
+    expect(
+      await read(context, `/publications?brand_id=${f.brand.id}&view=summary`),
+    ).toHaveLength(2);
+  });
+});
+
+test("a partial successful POST is recorded after the composer closes", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await twoChannelSetup(page, context, write);
+    const committed = deferred(),
+      release = deferred();
+    let originals: any[] = [];
+    await page.route(routeFor(f.post.id), async (route) => {
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBe(true);
+      originals = (await response.json()).data;
+      committed.resolve();
+      await release.promise;
+      await route.fulfill({ json: { data: [originals[0]] } }).catch(() => {});
+    });
+    await page.route("**/api/v1/schedule-requests/*", async (route) => {
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBe(true);
+      const data = (await response.json()).data;
+      data.outcome = "rejected";
+      data.error = { code: "schedule_request_retired", message: "Stopped" };
+      data.publications = [];
+      await route.fulfill({ json: { data } });
+    });
+    try {
+      await start(page);
+      await committed.promise;
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      release.resolve();
+      await expect
+        .poll(async () => (await pending(page, f.key))?.observed_publications)
+        .toEqual([
+          {
+            channel_id: originals[0].channel_id,
+            publication_id: originals[0].id,
+          },
+        ]);
+      await page
+        .getByRole("button", { name: "Review pending schedule" })
+        .click();
+      await page
+        .getByRole("button", { name: "Check scheduling outcome" })
+        .click();
+      await expect(
+        page.getByRole("status").getByText(/server record does not match/),
+      ).toBeVisible();
+      expect((await pending(page, f.key)).rejection_code).toBe(
+        "schedule_request_conflict",
+      );
+      expect(
+        await read(
+          context,
+          `/publications?brand_id=${f.brand.id}&view=summary`,
+        ),
+      ).toHaveLength(2);
+    } finally {
+      release.resolve();
+    }
+  });
+});

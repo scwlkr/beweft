@@ -377,7 +377,7 @@ test("a queued schedule claim rejects a superseded session before writing", asyn
           );
           state.scheduleOutcome = api
             .scheduleLock(lockKey, (session: unknown) =>
-              api.writeScheduleIntent(lockKey, intent, session),
+              api.sendScheduleIntent(lockKey, intent, session),
             )
             .then(
               () => "saved",
@@ -518,7 +518,8 @@ test("a schedule with an unknown response keeps its intent across sign-out", asy
           try {
             await state.scheduleFixture.clearScheduleIntent(
               lockKey,
-              state.intent.id,
+              state.intent,
+              { kind: "rejected" },
               state.session,
             );
             return "cleared";

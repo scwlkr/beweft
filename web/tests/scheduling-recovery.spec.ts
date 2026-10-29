@@ -972,6 +972,7 @@ test("a receipt with different original IDs cannot replace already observed publ
     const f = await setup(page, context, write);
     let sent: any;
     let original: any[] = [];
+    let alteredId = "";
     await page.route(
       /\/api\/v1\/posts\/[^/]+\/schedule\?view=summary$/,
       async (route) => {
@@ -984,6 +985,7 @@ test("a receipt with different original IDs cannot replace already observed publ
     );
     await page.route("**/api/v1/schedule-requests/*", (route) => {
       const altered = [{ ...original[0], id: crypto.randomUUID() }];
+      alteredId = altered[0].id;
       return route.fulfill({ json: { data: receipt(f, sent, altered) } });
     });
     await startSchedule(page);
@@ -998,7 +1000,13 @@ test("a receipt with different original IDs cannot replace already observed publ
     });
     expect(stored.uncertain).toBe(true);
     expect(stored.observed_publication_ids).toEqual(
-      original.map((row) => row.id),
+      [...original.map((row) => row.id), alteredId].sort(),
+    );
+    expect(stored.observed_publications).toEqual(
+      expect.arrayContaining([
+        { channel_id: original[0].channel_id, publication_id: original[0].id },
+        { channel_id: original[0].channel_id, publication_id: alteredId },
+      ]),
     );
     await page
       .getByRole("button", { name: "Check scheduling outcome" })
