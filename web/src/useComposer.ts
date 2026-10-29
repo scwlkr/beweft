@@ -8,6 +8,7 @@ import {
   type Channel,
   type Media,
   type Post,
+  type ApiSession,
 } from "./api";
 import type {
   CreatePostRequest,
@@ -15,6 +16,8 @@ import type {
   SchedulePostRequest,
 } from "./lib/api-contract.generated";
 import { localDateTime } from "./components/shared";
+import { withMediaScheduleGuard } from "./mediaIntent";
+import type { PendingMedia } from "./usePendingMedia";
 export function useComposer({
   brand,
   channels,
@@ -23,6 +26,8 @@ export function useComposer({
   initialDate,
   onSaved,
   onClose,
+  pendingMedia,
+  reconcileMedia,
 }: {
   brand: Brand;
   channels: Channel[];
@@ -31,12 +36,17 @@ export function useComposer({
   initialDate?: string;
   onSaved: () => Promise<void>;
   onClose: () => void;
+  pendingMedia: PendingMedia;
+  reconcileMedia: (media: Media, session: ApiSession) => void;
 }) {
   const mounted = useRef(true);
+  const lifetime = useRef<AbortController | null>(null);
   useEffect(() => {
     mounted.current = true;
+    lifetime.current = new AbortController();
     return () => {
       mounted.current = false;
+      lifetime.current?.abort();
     };
   }, []);
   const [post, setPost] = useState(initial);
@@ -81,6 +91,7 @@ export function useComposer({
   );
   const [date, setDate] = useState(initialDate ?? localDateTime());
   const [busy, setBusy] = useState(false);
+  const submitting = useRef(false);
   const [error, setError] = useState("");
   const active = channels.find((c) => c.id === tab);
   const currentText = tab === "all" ? text : (variants[tab] ?? text);
@@ -92,8 +103,27 @@ export function useComposer({
       ? setMediaIds(ids)
       : setVariantMedia({ ...variantMedia, [tab]: ids });
   const selectedMedia = media.filter((m) => activeMedia.includes(m.id));
+  const scheduledMediaIds = [
+    ...new Set(selected.flatMap((id) => variantMedia[id] ?? mediaIds)),
+  ];
+  const affectedMedia = scheduledMediaIds.filter(
+    (id) => !!pendingMedia.intents[id],
+  );
+  const missingMedia = scheduledMediaIds.filter(
+    (id) => !media.some((item) => item.id === id),
+  );
+  const scheduleBlocked =
+    mode !== "draft" &&
+    (!pendingMedia.ready ||
+      affectedMedia.length > 0 ||
+      missingMedia.length > 0);
   const submit = async () => {
     setError("");
+    if (submitting.current) return;
+    if (scheduleBlocked) {
+      setError("Check the affected media descriptions before scheduling.");
+      return;
+    }
     const hasContent = (id: string) =>
       (variants[id] ?? text).trim().length > 0 ||
       (variantMedia[id] ?? mediaIds).length > 0;
@@ -133,8 +163,30 @@ export function useComposer({
         return;
       }
     }
+    submitting.current = true;
     setBusy(true);
     try {
+      const snapshots = scheduledMediaIds.map(
+        (id) => media.find((item) => item.id === id)!,
+      );
+      const signal = lifetime.current?.signal;
+      const session = pendingMedia.session;
+      if (mode !== "draft") {
+        if (!signal || !session || !pendingMedia.owner)
+          throw new Error(
+            "Media descriptions must be checked before scheduling.",
+          );
+        await withMediaScheduleGuard(
+          pendingMedia.owner,
+          brand.id,
+          snapshots,
+          session,
+          signal,
+          reconcileMedia,
+          async () => undefined,
+        );
+      }
+      if (!mounted.current) return;
       const body = {
         title,
         text,
@@ -160,19 +212,33 @@ export function useComposer({
           : ({ ...body, brand_id: brand.id } satisfies CreatePostRequest),
       );
       if (mounted.current) setPost(saved);
-      if (mode !== "draft")
-        await api(
-          `/posts/${saved.id}/schedule`,
-          z.array(PublicationSchema),
-          "POST",
-          {
-            channel_ids: selected,
-            version: saved.version,
-            ...(mode === "exact"
-              ? { scheduled_at: new Date(date).toISOString() }
-              : {}),
-          } satisfies SchedulePostRequest,
+      if (mode !== "draft" && mounted.current) {
+        if (!signal || !session)
+          throw new Error(
+            "Media descriptions must be checked before scheduling.",
+          );
+        await withMediaScheduleGuard(
+          pendingMedia.owner,
+          brand.id,
+          snapshots,
+          session,
+          signal,
+          reconcileMedia,
+          () =>
+            api(
+              `/posts/${saved.id}/schedule`,
+              z.array(PublicationSchema),
+              "POST",
+              {
+                channel_ids: selected,
+                version: saved.version,
+                ...(mode === "exact"
+                  ? { scheduled_at: new Date(date).toISOString() }
+                  : {}),
+              } satisfies SchedulePostRequest,
+            ),
         );
+      }
       if (mounted.current) {
         await onSaved();
         if (mounted.current) onClose();
@@ -181,6 +247,7 @@ export function useComposer({
       if (mounted.current)
         setError(e instanceof Error ? e.message : "Unable to save your post.");
     } finally {
+      submitting.current = false;
       if (mounted.current) setBusy(false);
     }
   };
@@ -216,6 +283,9 @@ export function useComposer({
     activeMedia,
     setActiveMedia,
     selectedMedia,
+    affectedMedia,
+    missingMedia,
+    scheduleBlocked,
     submit,
   };
 }

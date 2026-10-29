@@ -51,7 +51,10 @@ test("media descriptions remain distinct and scheduled snapshots keep their save
         patches++;
     });
     await page.goto("/#media");
-    await page.getByRole("button", { name: /alpha\.png/ }).click();
+    await page
+      .locator(".media-grid")
+      .getByRole("button", { name: /alpha\.png/ })
+      .click();
     const description = page.getByLabel("Description", { exact: true });
     await expect(description).toHaveValue("");
     await description.fill("🌟".repeat(2001));
@@ -76,7 +79,10 @@ test("media descriptions remain distinct and scheduled snapshots keep their save
         .getByRole("img", { name: "A bright star over a blue field." }),
     ).toBeVisible();
     await page.getByRole("button", { name: "Close dialog" }).click();
-    await page.getByRole("button", { name: /beta\.png/ }).click();
+    await page
+      .locator(".media-grid")
+      .getByRole("button", { name: /beta\.png/ })
+      .click();
     await page
       .getByLabel("Description", { exact: true })
       .fill("A small white pixel.");
@@ -88,7 +94,10 @@ test("media descriptions remain distinct and scheduled snapshots keep their save
       page.getByRole("button", { name: "Save description" }),
     ).toBeDisabled();
     await page.getByRole("button", { name: "Close dialog" }).click();
-    await page.getByRole("button", { name: /alpha\.png/ }).click();
+    await page
+      .locator(".media-grid")
+      .getByRole("button", { name: /alpha\.png/ })
+      .click();
     await expect(page.getByLabel("Description", { exact: true })).toHaveValue(
       "A bright star over a blue field.",
     );
@@ -128,7 +137,10 @@ test("media descriptions remain distinct and scheduled snapshots keep their save
     await page
       .getByRole("button", { name: "Media library", exact: true })
       .click();
-    await page.getByRole("button", { name: /alpha\.png/ }).click();
+    await page
+      .locator(".media-grid")
+      .getByRole("button", { name: /alpha\.png/ })
+      .click();
     await page
       .getByLabel("Description", { exact: true })
       .fill("A later edit to the description.");
@@ -175,7 +187,10 @@ test("a completed description save cannot reopen another brand's media dialog", 
     });
     try {
       await page.goto("/#media");
-      await page.getByRole("button", { name: /alpha-switch\.png/ }).click();
+      await page
+        .locator(".media-grid")
+        .getByRole("button", { name: /alpha-switch\.png/ })
+        .click();
       await page
         .getByLabel("Description", { exact: true })
         .fill("Alpha's saved description");
@@ -184,13 +199,18 @@ test("a completed description save cannot reopen another brand's media dialog", 
       await page.getByRole("button", { name: "Close dialog" }).click();
       await page.getByLabel("Current brand").selectOption(beta.id);
       await expect(
-        page.getByRole("button", { name: /beta-switch\.png/ }),
+        page
+          .locator(".media-grid")
+          .getByRole("button", { name: /beta-switch\.png/ }),
       ).toBeVisible();
       release();
       await expect(page.getByRole("dialog")).toHaveCount(0);
       await expect(page.getByText("Description saved")).toHaveCount(0);
       await page.setViewportSize({ width: 390, height: 844 });
-      await page.getByRole("button", { name: /beta-switch\.png/ }).click();
+      await page
+        .locator(".media-grid")
+        .getByRole("button", { name: /beta-switch\.png/ })
+        .click();
       await expect(
         page.getByLabel("Description", { exact: true }),
       ).toBeVisible();
@@ -225,14 +245,20 @@ test("reopening the same media during a save shows the confirmed description", a
     });
     try {
       await page.goto("/#media");
-      await page.getByRole("button", { name: /reopen\.png/ }).click();
+      await page
+        .locator(".media-grid")
+        .getByRole("button", { name: /reopen\.png/ })
+        .click();
       await page
         .getByLabel("Description", { exact: true })
         .fill("A confirmed description");
       await page.getByRole("button", { name: "Save description" }).click();
       await saved;
       await page.getByRole("button", { name: "Close dialog" }).click();
-      await page.getByRole("button", { name: /reopen\.png/ }).click();
+      await page
+        .locator(".media-grid")
+        .getByRole("button", { name: /reopen\.png/ })
+        .click();
       // The authoritative later version fences the response still held above.
       await expect(page.getByLabel("Description", { exact: true })).toHaveValue(
         "A confirmed description",

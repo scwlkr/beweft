@@ -176,7 +176,7 @@ export function MediaLibrary({
   );
 }
 
-function MediaDetails({
+export function MediaDetails({
   selected,
   pending,
   action,
@@ -243,6 +243,7 @@ function MediaDetails({
             disabled={
               locked ||
               description.text === record.alt_text ||
+              description.text.includes("\0") ||
               Array.from(description.text).length > 2000
             }
             onClick={() => void description.send()}
@@ -272,15 +273,29 @@ function MediaDetails({
                 ? "Use latest description"
                 : "Check description"}
             </Button>
-            {description.phase === "pending" && description.intent && (
-              <Button
-                variant="secondary"
-                disabled={description.claiming}
-                onClick={() => void description.send(description.intent!)}
-              >
-                Retry this description
-              </Button>
-            )}
+            {description.phase === "pending" &&
+              description.intent &&
+              !description.intent.alt_text.includes("\0") && (
+                <Button
+                  variant="secondary"
+                  disabled={description.claiming}
+                  onClick={() => void description.send(description.intent!)}
+                >
+                  Retry this description
+                </Button>
+              )}
+            {description.phase === "pending" &&
+              description.intent?.alt_text.includes("\0") && (
+                <Button
+                  variant="secondary"
+                  disabled={description.claiming}
+                  onClick={() =>
+                    void description.checkInvalid(description.intent!)
+                  }
+                >
+                  Check invalid description
+                </Button>
+              )}
           </div>
         )}
         {description.phase === "pending" && description.intent && (
@@ -295,6 +310,9 @@ function MediaDetails({
         )}
         {Array.from(description.text).length > 2000 && (
           <ErrorNotice message="Descriptions must be 2,000 characters or fewer." />
+        )}
+        {description.text.includes("\0") && (
+          <ErrorNotice message="Descriptions cannot contain NUL characters. Remove them before saving." />
         )}
         <a
           className="button button-secondary"

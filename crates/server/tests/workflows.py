@@ -58,6 +58,8 @@ def exercise(call, client, origin, sql):
     assert media['metadata_version'] == 1
     assert call(f"/media/{media['id']}")['metadata_version'] == 1
     call(f"/media/{media['id']}", {'alt_text': 'No version'}, 'PATCH', expected=422)
+    call(f"/media/{media['id']}", {'alt_text': 'Before\x00After', 'metadata_version': 1}, 'PATCH', expected=400)
+    assert call(f"/media/{media['id']}")['metadata_version'] == 1
     media = call(f"/media/{media['id']}", {'alt_text': 'A small white test pixel', 'metadata_version': 1}, 'PATCH')
     assert media['metadata_version'] == 2
     call(f"/media/{media['id']}", {'alt_text': 'Stale overwrite', 'metadata_version': 1}, 'PATCH', expected=409)

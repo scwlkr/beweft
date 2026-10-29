@@ -7,47 +7,18 @@ import {
   isCurrentWorkspaceSession,
   MediaSchema,
   requireWorkspaceSession,
-  withWorkspaceSession,
   type ApiSession,
   type Media,
 } from "../api";
 import type { UpdateMediaRequest } from "../lib/api-contract.generated";
-
-const Intent = z.object({
-  id: z.string().uuid(),
-  brand_id: z.string(),
-  media_id: z.string(),
-  metadata_version: z.number().int().positive(),
-  alt_text: z.string(),
-});
-type Intent = z.infer<typeof Intent>;
+import {
+  announceMediaIntent,
+  lockMediaIntent,
+  mediaIntentKey,
+  readMediaIntent,
+  type MediaIntent as Intent,
+} from "../mediaIntent";
 type Phase = "checking" | "ready" | "pending" | "blocked" | "stale";
-const read = (key: string) => {
-  const raw = localStorage.getItem(key);
-  return raw ? Intent.parse(JSON.parse(raw)) : null;
-};
-
-// The intent lock only protects storage transitions. No network request holds it
-// or the authentication lock, so an explicit retry can fence a stalled write.
-async function locked<T>(
-  key: string,
-  session: ApiSession,
-  signal: AbortSignal,
-  work: () => T,
-) {
-  if (!navigator.locks)
-    throw new Error("Description recovery requires HTTPS or localhost.");
-  return navigator.locks.request(key, { signal }, () =>
-    withWorkspaceSession(
-      session,
-      () => {
-        signal.throwIfAborted();
-        return work();
-      },
-      signal,
-    ),
-  );
-}
 
 export function useMediaDescription(
   initial: Media,
@@ -104,7 +75,10 @@ export function useMediaDescription(
     }
     if (completed) {
       try {
-        if (!key.current || read(key.current)?.id !== completed.intent.id)
+        if (
+          !key.current ||
+          readMediaIntent(key.current)?.id !== completed.intent.id
+        )
           return;
       } catch {
         // The normal check will surface the storage error and block editing.
@@ -131,7 +105,7 @@ export function useMediaDescription(
           controller.signal,
         );
         if (!current()) return;
-        key.current = `beweft.media-description:${owner.id}:${scope}`;
+        key.current = mediaIntentKey(owner.id, initial.brand_id, initial.id);
       }
       const fetched = await api(
         `/media/${initial.id}`,
@@ -149,13 +123,13 @@ export function useMediaDescription(
         mediaRef.current.metadata_version > fetched.metadata_version
           ? mediaRef.current
           : fetched;
-      const result = await locked(
+      const result = await lockMediaIntent(
         key.current,
         session,
         controller.signal,
         () => {
           if (!current()) throw new DOMException("Abandoned", "AbortError");
-          const remembered = read(key.current);
+          const remembered = readMediaIntent(key.current);
           if (
             remembered &&
             (remembered.brand_id !== initial.brand_id ||
@@ -171,7 +145,7 @@ export function useMediaDescription(
             latest.metadata_version > remembered.metadata_version
           ) {
             localStorage.removeItem(key.current);
-            if (read(key.current))
+            if (readMediaIntent(key.current))
               throw new Error(
                 "The resolved description intent could not be cleared from browser storage.",
               );
@@ -193,6 +167,7 @@ export function useMediaDescription(
       mediaRef.current = latest;
       setMedia(latest);
       reconcile(latest, session);
+      if (result.resolved) announceMediaIntent(key.current);
       if (result.remembered && !result.resolved) {
         setIntent(result.remembered);
         if (!unsaved.current || resetUnsaved)
@@ -288,6 +263,11 @@ export function useMediaDescription(
       initial.metadata_version <= mediaRef.current.metadata_version
     )
       return;
+    if (phaseRef.current === "pending" && !unsaved.current) {
+      mediaRef.current = initial;
+      setMedia(initial);
+      return;
+    }
     if (unsaved.current) {
       needsReview.current = true;
       mediaRef.current = initial;
@@ -318,7 +298,9 @@ export function useMediaDescription(
     const editsAtClaim = editSerial.current;
     if (
       !retry &&
-      (requested === original.alt_text || Array.from(requested).length > 2000)
+      (requested === original.alt_text ||
+        requested.includes("\0") ||
+        Array.from(requested).length > 2000)
     )
       return;
     claimingRef.current = true;
@@ -327,14 +309,14 @@ export function useMediaDescription(
     const controller = new AbortController();
     claim.current = controller;
     try {
-      const outgoing = await locked(
+      const outgoing = await lockMediaIntent(
         key.current,
         session,
         controller.signal,
         () => {
           if (!active(session))
             throw new DOMException("Abandoned", "AbortError");
-          const stored = read(key.current);
+          const stored = readMediaIntent(key.current);
           if (
             stored &&
             (stored.brand_id !== initial.brand_id ||
@@ -358,10 +340,11 @@ export function useMediaDescription(
             alt_text: requested,
           };
           localStorage.setItem(key.current, JSON.stringify(next));
-          if (read(key.current)?.id !== next.id)
+          if (readMediaIntent(key.current)?.id !== next.id)
             throw new Error(
               "The description intent could not be saved in browser storage.",
             );
+          announceMediaIntent(key.current);
           return { intent: next, claimed: true };
         },
       );
@@ -389,7 +372,7 @@ export function useMediaDescription(
       } satisfies UpdateMediaRequest & { metadata_version: number };
       void api(`/media/${initial.id}`, MediaSchema, "PATCH", input)
         .then((response) => {
-          if (!active(session)) return;
+          if (!isCurrentWorkspaceSession(session)) return;
           if (
             response.id !== initial.id ||
             response.brand_id !== initial.brand_id ||
@@ -399,13 +382,17 @@ export function useMediaDescription(
             throw new Error(
               "The save response did not match the original description.",
             );
+          if (!alive.current) {
+            announceMediaIntent(key.current);
+            return;
+          }
           void check({ intent: savedIntent, response });
         })
         .catch((failure: unknown) => {
           if (!active(session)) return;
           let stored: Intent | null;
           try {
-            stored = read(key.current);
+            stored = readMediaIntent(key.current);
           } catch {
             stored = null;
           }
@@ -435,6 +422,131 @@ export function useMediaDescription(
     }
   };
 
+  // Old clients could persist a NUL-containing request which PostgreSQL cannot
+  // store. Release only after this exact payload receives the server's specific
+  // validation rejection; a generic error or an unchanged GET proves nothing.
+  const checkInvalid = async (original: Intent) => {
+    if (
+      claimingRef.current ||
+      phaseRef.current !== "pending" ||
+      !original.alt_text.includes("\0")
+    )
+      return;
+    let session: ApiSession;
+    try {
+      session = captureWorkspaceSession();
+    } catch {
+      return;
+    }
+    const controller = new AbortController();
+    claim.current = controller;
+    claimingRef.current = true;
+    setClaiming(true);
+    setError("");
+    try {
+      try {
+        await api(
+          `/media/${initial.id}`,
+          MediaSchema,
+          "PATCH",
+          {
+            alt_text: original.alt_text,
+            metadata_version: original.metadata_version,
+          } satisfies UpdateMediaRequest & { metadata_version: number },
+          controller.signal,
+        );
+        throw new Error("The server did not reject the invalid description.");
+      } catch (failure) {
+        if (
+          !(
+            failure instanceof ApiError &&
+            failure.status === 400 &&
+            failure.code === "media_description_contains_nul"
+          )
+        )
+          throw failure;
+      }
+      if (!active(session) || controller.signal.aborted) return;
+      const fetched = await api(
+        `/media/${initial.id}`,
+        MediaSchema,
+        "GET",
+        undefined,
+        controller.signal,
+      );
+      if (!active(session) || controller.signal.aborted) return;
+      if (
+        fetched.id !== original.media_id ||
+        fetched.brand_id !== original.brand_id
+      )
+        throw new Error("The server returned a different media asset.");
+      const removed = await lockMediaIntent(
+        key.current,
+        session,
+        controller.signal,
+        () => {
+          if (!active(session))
+            throw new DOMException("Abandoned", "AbortError");
+          const stored = readMediaIntent(key.current);
+          if (
+            !stored ||
+            stored.id !== original.id ||
+            stored.media_id !== original.media_id ||
+            stored.brand_id !== original.brand_id ||
+            stored.metadata_version !== original.metadata_version ||
+            stored.alt_text !== original.alt_text
+          )
+            return false;
+          localStorage.removeItem(key.current);
+          if (readMediaIntent(key.current))
+            throw new Error(
+              "The rejected description could not be cleared from browser storage.",
+            );
+          return true;
+        },
+      );
+      if (!active(session) || controller.signal.aborted) return;
+      if (!removed) {
+        void check();
+        return;
+      }
+      const latest =
+        mediaRef.current.metadata_version > fetched.metadata_version
+          ? mediaRef.current
+          : fetched;
+      mediaRef.current = latest;
+      setMedia(latest);
+      reconcile(latest, session);
+      announceMediaIntent(key.current);
+      setIntent(null);
+      textRef.current = original.alt_text;
+      setTextState(original.alt_text);
+      unsaved.current = true;
+      needsReview.current =
+        latest.metadata_version !== original.metadata_version;
+      if (needsReview.current) {
+        phaseTo("stale");
+        setStatus(
+          "The invalid description was rejected, and the saved version changed. Your text is kept for review.",
+        );
+      } else {
+        phaseTo("ready");
+        setStatus(
+          "The invalid description was not saved. Remove its NUL character and save again.",
+        );
+      }
+    } catch (failure) {
+      if (active(session) && !controller.signal.aborted)
+        setError(
+          `${(failure as Error).message} The previous description remains unconfirmed.`,
+        );
+    } finally {
+      if (claim.current === controller) claim.current = null;
+      claimingRef.current = false;
+      if (active(session)) setClaiming(false);
+    }
+  };
+
   return {
     media,
     text,
@@ -446,5 +558,6 @@ export function useMediaDescription(
     claiming,
     check,
     send,
+    checkInvalid,
   };
 }
