@@ -259,6 +259,7 @@ export function useComposer({
       lockedSession,
       signal,
     );
+    if (!active(lockedSession, signal)) return;
     const mediaChanged = current.rejection_code === "media_version_conflict";
     for (const id of Object.keys(saved.media_versions ?? {})) {
       try {
@@ -548,6 +549,13 @@ export function useComposer({
             intent,
             session,
           ).catch(() => {});
+          if (
+            !mounted.current ||
+            lifetime.current?.signal !== signal ||
+            signal?.aborted ||
+            !isCurrentWorkspaceSession(session)
+          )
+            return;
           setRecovery("mismatch");
           setRecoveryMessage(
             "The server record does not match this saved request. The original remains locked for review.",
