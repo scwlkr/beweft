@@ -1072,3 +1072,66 @@ test("retirement of an unverifiable deleted draft leaves the outcome unresolved"
     expect((await pending(page, f.key)).id).toBe(saved.id);
   });
 });
+
+test("retirement cannot replace a different schedule already bound to the same ID", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    const other = await write("/posts", {
+      brand_id: f.brand.id,
+      title: "Other draft",
+      text: "Different schedule",
+      media_ids: [],
+      variants: [{ channel_id: f.channel.id }],
+    });
+    let body: any;
+    await page.route(routeFor(f.post.id), (route) => {
+      body = route.request().postDataJSON();
+      return route.abort("failed");
+    });
+    await start(page);
+    await expect(
+      page.getByRole("button", { name: "Stop original schedule" }),
+    ).toBeEnabled();
+    const saved = await pending(page, f.key);
+    const otherResponse = await context.request.post(
+      `/api/v1/posts/${other.id}/schedule?view=summary`,
+      {
+        data: { ...body, version: other.version },
+        headers: {
+          "X-Beweft-Request": "1",
+          Origin: process.env.BEWEFT_TEST_URL!,
+        },
+      },
+    );
+    expect(otherResponse.ok(), await otherResponse.text()).toBe(true);
+    const otherRows = (await otherResponse.json()).data;
+    await page.getByRole("button", { name: "Stop original schedule" }).click();
+    await expect(
+      page.getByRole("status").getByText(/server record does not match/),
+    ).toBeVisible();
+    expect((await pending(page, f.key)).rejection_code).toBe(
+      "schedule_request_conflict",
+    );
+    await page.reload();
+    await page.getByRole("button", { name: "Review pending schedule" }).click();
+    await expect(
+      page.getByRole("status").getByText(/server record does not match/),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Retry original schedule" }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Stop original schedule" }),
+    ).toHaveCount(0);
+    const rows = await read(
+      context,
+      `/publications?brand_id=${f.brand.id}&view=summary`,
+    );
+    expect(rows.map((row: any) => row.id)).toEqual(
+      otherRows.map((row: any) => row.id),
+    );
+    expect((await read(context, `/posts/${f.post.id}`)).version).toBe(
+      saved.post.version,
+    );
+  });
+});
