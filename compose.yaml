@@ -55,9 +55,7 @@ services:
       <<: *environment
       BEWEFT_WORKER_ID: compose-primary
     healthcheck:
-      # WIP: fail closed until per-instance worker healthcheck is implemented.
-      # Never invoke an unsupported flag: it would start another scheduler.
-      test: [CMD-SHELL, "exit 1"]
+      test: [CMD, container-entrypoint, beweft-worker, --healthcheck]
       interval: 10s
       timeout: 5s
       start_period: 30s
