@@ -1606,6 +1606,13 @@ code {
   color: var(--muted);
   margin-top: 3px;
 }
+.manual-destination {
+  display: grid;
+  gap: 4px;
+  max-width: 300px;
+  margin-top: 10px;
+  font-size: 11px;
+}
 .provider-section {
   margin-top: 35px;
 }

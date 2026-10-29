@@ -53,6 +53,7 @@ function guardedServer(itemId: string) {
     const row = {
       id: body.request_id,
       inbox_id: itemId,
+      revision: 1,
       text: body.text,
       state: "published",
       error: null,
@@ -143,12 +144,10 @@ test("independent tabs reject stale history and require review before explicit o
     const item = replyFixture(crypto.randomUUID(), crypto.randomUUID());
     const server = guardedServer(item.id);
     await install(context, item, server);
-    const isolated = await context
-      .browser()!
-      .newContext({
-        baseURL: process.env.BEWEFT_TEST_URL,
-        storageState: await context.storageState(),
-      });
+    const isolated = await context.browser()!.newContext({
+      baseURL: process.env.BEWEFT_TEST_URL,
+      storageState: await context.storageState(),
+    });
     await isolated.addInitScript(
       (id) => localStorage.setItem("beweft.brand", id),
       brand.id,
