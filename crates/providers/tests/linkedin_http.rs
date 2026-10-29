@@ -256,5 +256,31 @@ async fn linkedin_images_and_video_checkpoint_through_processing_and_one_post() 
             .iter()
             .any(|(path, _)| path.starts_with("POST /rest/posts"))
     );
+    // A provider that never finishes cannot be polled indefinitely.
+    *state.lock().unwrap() = Fixture::default();
+    let mut cp = None;
+    for _ in 0..3 {
+        let Step::Checkpoint(next) = adapter.publish_step(&c, &p, cp.as_ref()).await.unwrap()
+        else {
+            panic!("image upload must advance through private checkpoints")
+        };
+        cp = Some(next);
+    }
+    let mut cp = cp.unwrap();
+    assert_eq!(cp["stage"], "linkedin_image_processing");
+    cp["poll_count"] = json!(1200);
+    let error = match adapter.publish_step(&c, &p, Some(&cp)).await {
+        Err(error) => error,
+        Ok(_) => panic!("exhausted processing must be quarantined"),
+    };
+    assert_eq!(error.kind, FailureKind::Uncertain);
+    assert!(
+        !state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .any(|(path, _)| path.starts_with("POST /rest/posts"))
+    );
     server.abort();
 }

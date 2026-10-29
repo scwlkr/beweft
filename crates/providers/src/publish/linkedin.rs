@@ -77,6 +77,18 @@ fn uploaded_ids(cp: &Value, p: &Publication) -> Result<Vec<Value>> {
     Ok(ids)
 }
 
+fn pending(cp: &Value) -> Result<Step> {
+    let count = cp["poll_count"].as_u64().unwrap_or(0).saturating_add(1);
+    if count > 1200 {
+        return Err(uncertain(
+            "LinkedIn media processing did not finish; inspect the delivery before recovery",
+        ));
+    }
+    let mut next = cp.clone();
+    next["poll_count"] = json!(count);
+    Ok(Step::Wait(next))
+}
+
 fn headers(b: RequestBuilder) -> RequestBuilder {
     b.header("Linkedin-Version", VERSION)
         .header("X-Restli-Protocol-Version", "2.0.0")
@@ -119,6 +131,7 @@ impl Adapter {
                 let value = &value["value"];
                 let mut next = cp.clone();
                 next["stage"] = json!("linkedin_image_upload");
+                next["poll_count"] = json!(0);
                 next["upload_id"] = json!(urn(value, "image", "image")?);
                 next["upload_url"] = json!(upload_url(value, "uploadUrl")?);
                 next["upload_expires_ms"] = json!(expires(value, "uploadUrlExpiresAt")?);
@@ -178,7 +191,7 @@ impl Adapter {
                         next["stage"] = json!("linkedin_image_init");
                         return Ok(Step::Checkpoint(next));
                     }
-                    Some("PROCESSING" | "WAITING_UPLOAD") => return Ok(Step::Wait(cp.clone())),
+                    Some("PROCESSING" | "WAITING_UPLOAD") => return pending(cp),
                     Some("PROCESSING_FAILED") => {
                         return Err(invalid(
                             "LinkedIn could not process the image; no post was created",
@@ -223,6 +236,7 @@ impl Adapter {
                 }
                 let mut next = cp.clone();
                 next["stage"] = json!("linkedin_video_upload");
+                next["poll_count"] = json!(0);
                 next["upload_id"] = json!(id);
                 next["upload_expires_ms"] = json!(expires(value, "uploadUrlsExpireAt")?);
                 next["instructions"] = json!(instructions);
@@ -339,7 +353,7 @@ impl Adapter {
                         next["media_ids"] = json!([id]);
                         return Ok(Step::Checkpoint(next));
                     }
-                    Some("PROCESSING" | "WAITING_UPLOAD") => return Ok(Step::Wait(cp.clone())),
+                    Some("PROCESSING" | "WAITING_UPLOAD") => return pending(cp),
                     Some("PROCESSING_FAILED") => {
                         return Err(invalid(
                             "LinkedIn could not process the video; no post was created",
