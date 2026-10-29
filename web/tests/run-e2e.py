@@ -40,7 +40,7 @@ def main():
     origin = f"http://127.0.0.1:{port}"
     setup = secrets.token_urlsafe(32)
     password = secrets.token_urlsafe(32)
-    env = dict(os.environ, DATABASE_URL=f"postgres://{USER}:{PASSWORD}@localhost:{PORT}/{DB}", BEWEFT_PUBLIC_URL=origin, BEWEFT_BIND=f"127.0.0.1:{port}", BEWEFT_MEDIA_DIR=directory + "/media", BEWEFT_WEB_DIR=str(ROOT / "web/dist"), BEWEFT_SETUP_SECRET=setup, BEWEFT_ENCRYPTION_KEY=secrets.token_hex(32), BEWEFT_ENABLE_FIXTURES="true", BEWEFT_TEST_URL=origin, BEWEFT_TEST_ISOLATED="1", BEWEFT_TEST_EMAIL="browser@example.test", BEWEFT_TEST_PASSWORD=password, BEWEFT_TEST_OUTPUT=directory + "/playwright")
+    env = dict(os.environ, DATABASE_URL=f"postgres://{USER}:{PASSWORD}@localhost:{PORT}/{DB}", BEWEFT_PUBLIC_URL=origin, BEWEFT_BIND=f"127.0.0.1:{port}", BEWEFT_MEDIA_DIR=directory + "/media", BEWEFT_WEB_DIR=str(ROOT / "web/dist"), BEWEFT_SETUP_SECRET=setup, BEWEFT_ENCRYPTION_KEY=secrets.token_hex(32), BEWEFT_ENABLE_FIXTURES="true", BEWEFT_TEST_URL=origin, BEWEFT_TEST_ISOLATED="1", BEWEFT_TEST_DB_NAME=DB, BEWEFT_TEST_EMAIL="browser@example.test", BEWEFT_TEST_PASSWORD=password, BEWEFT_TEST_OUTPUT=directory + "/playwright")
     for name in ["beweft-server", "beweft-worker"]:
         processes.append(subprocess.Popen([str(ROOT / "target/debug" / name)], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
     for _ in range(150):
