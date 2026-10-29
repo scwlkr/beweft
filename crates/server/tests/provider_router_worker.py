@@ -76,6 +76,10 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     x_video_wait = 2
     x_video_fail = ""
     x_tweet_fail = False
+    bsky_mode = "normal"
+    bsky_polls = 0
+    bsky_record = None
+    bsky_uri = None
 
     def log_message(self, *_):
         pass
@@ -100,6 +104,31 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
         self.record("GET " + path)
+        if path == "/xrpc/com.atproto.server.getSession":
+            assert self.headers.get("Authorization") == "Bearer bluesky-access-fixture"
+            return self.respond({"did":"did:plc:fixture", "emailConfirmed":True,
+                                 "didDoc":{"id":"did:plc:fixture", "service":[{"id":"#atproto_pds", "serviceEndpoint":"https://assigned.pds.fixture"}]}})
+        if path == "/xrpc/com.atproto.server.getServiceAuth":
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            assert query["aud"] == ["did:web:assigned.pds.fixture"] and query["lxm"] == ["com.atproto.repo.uploadBlob"]
+            assert self.headers.get("Authorization") == "Bearer bluesky-access-fixture"
+            return self.respond({"token":"video-service-fixture"})
+        if path == "/xrpc/app.bsky.video.getJobStatus":
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            assert query == {"jobId":["fixture-job"]}
+            if self.bsky_mode == "status_error":
+                return self.respond({}, 503)
+            type(self).bsky_polls += 1
+            status = {"jobId":"fixture-job", "did":"did:plc:fixture", "state":"JOB_STATE_ENCODING"}
+            if self.bsky_mode == "failed":
+                status.update(state="JOB_STATE_FAILED", failureCode="encoding_failure")
+            elif self.bsky_polls > 1:
+                status.update(state="JOB_STATE_COMPLETED", blob={"$type":"blob", "ref":{"$link":"video-fixture"}, "mimeType":"video/mp4", "size":1024})
+            return self.respond({"jobStatus":status})
+        if path == "/xrpc/com.atproto.repo.getRecord":
+            if self.bsky_record is None:
+                return self.respond({}, 404)
+            return self.respond({"uri":self.bsky_uri, "cid":"fixture-cid", "value":self.bsky_record})
         if path == "/2/media/upload":
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             assert query == {"command":["STATUS"], "media_id":["123456789"]}, query
@@ -149,6 +178,22 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         if path == "/xrpc/com.atproto.server.createSession":
             return self.respond({"did":"did:plc:fixture", "handle":"fixture.bsky.social",
                                  "accessJwt":"bluesky-access-fixture", "refreshJwt":"bluesky-refresh-fixture"})
+        if path == "/xrpc/app.bsky.video.uploadVideo":
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            assert query == {"did":["did:plc:fixture"], "name":["video.mp4"]}
+            assert self.headers.get("Authorization") == "Bearer video-service-fixture"
+            assert self.headers.get("Content-Type") == "video/mp4" and len(body) > 0
+            if self.bsky_mode == "lost_upload":
+                return self.respond({}, 502)
+            return self.respond({"jobStatus":{"jobId":"fixture-job", "did":"did:plc:fixture", "state":"JOB_STATE_CREATED"}})
+        if path == "/xrpc/com.atproto.repo.createRecord":
+            value = json.loads(body)
+            assert value["repo"] == "did:plc:fixture" and value["collection"] == "app.bsky.feed.post"
+            type(self).bsky_record = value["record"]
+            type(self).bsky_uri = f"at://did:plc:fixture/app.bsky.feed.post/{value['rkey']}"
+            if self.bsky_mode == "lost_post":
+                return self.respond({}, 502)
+            return self.respond({"uri":self.bsky_uri, "cid":"fixture-cid"})
         if path == "/2/tweets":
             if self.headers.get("Authorization") == "Bearer x-refresh-fixture":
                 self.record("x_rotated_authorization")
@@ -441,6 +486,14 @@ def run():
             assert request("/connections/bluesky", {**bsky_body,"reconnect_channel_id":bsky["id"]})["id"] == bsky["id"]
             assert request("/connections/bluesky", {**bsky_body,"brand_id":other_brand})["id"] != bsky["id"]
             assert Fixture.counts.get("POST /xrpc/com.atproto.server.createSession") == 3
+            # A pre-upgrade connection keeps its grant data while exposing the
+            # formats of the installed adapter without another login.
+            sql(f"UPDATE channels SET capabilities=jsonb_set(capabilities||jsonb_build_object('fixture_marker','preserved'), '{{formats}}', '[\"text\",\"image\"]'::jsonb) WHERE id='{bsky['id']}'")
+            installed_bsky = next(row for row in request(f"/channels?brand_id={brand}") if row["id"] == bsky["id"])
+            assert installed_bsky["capabilities"]["formats"] == ["text", "image", "video"]
+            assert installed_bsky["capabilities"]["fixture_marker"] == "preserved"
+            assert installed_bsky["capabilities"]["permissions"]["actions"]["media"]["status"] == "unknown"
+            assert sql(f"SELECT capabilities->'formats' FROM channels WHERE id='{bsky['id']}'") == '["text", "image"]'
             assert fb["connection_status"] == "connected" and fb["manual_guidance"] is None
             assert fb["capabilities"]["verification"] == "identity_verified_publishing_unverified"
             assert fb["capabilities"]["permissions"]["actions"]["publish"]["status"] == "granted"
@@ -718,6 +771,90 @@ def run():
             assert Fixture.counts.get("POST /2/tweets", 0) == before_posts
             Fixture.x_exchange_scope = "tweet.read tweet.write users.read offline.access media.write"
             Fixture.x_refresh_scope = Fixture.x_exchange_scope
+
+            # The selected variants use a complete flat media-version union.
+            # A later library edit must not alter the frozen video description.
+            bsky_asset = upload(brand, video.read_bytes(), "bsky-fixture.mp4", "video/mp4")
+            described = request(f"/media/{bsky_asset['id']}", {"alt_text":"Original Bluesky video description", "metadata_version":1}, "PATCH")
+            post = request("/posts", {"brand_id":brand, "text":"Bluesky video snapshot", "media_ids":[asset["id"]],
+                           "variants":[{"channel_id":bsky["id"], "media_ids":[bsky_asset["id"]]}]})
+            request_id = str(uuid.uuid4())
+            intent = {"version":1, "channel_ids":[manual, bsky["id"]], "request_id":request_id,
+                      "scheduled_at":(dt.datetime.now(dt.timezone.utc)+dt.timedelta(seconds=60)).isoformat(timespec="microseconds"),
+                      "media_versions":{asset["id"]:asset["metadata_version"], bsky_asset["id"]:described["metadata_version"]}}
+            rows = request(f"/posts/{post['id']}/schedule", intent)
+            assert request(f"/schedule-requests/{request_id}")["request"]["media_versions"] == intent["media_versions"]
+            bsky_video = next(row for row in rows if row["channel_id"] == bsky["id"])
+            request(f"/media/{bsky_asset['id']}", {"alt_text":"Later library edit", "metadata_version":described["metadata_version"]}, "PATCH")
+            Fixture.bsky_mode = "lost_post"
+            Fixture.bsky_polls = 0
+            before_upload = Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0)
+            before_post = Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0)
+            sql(f"UPDATE publications SET scheduled_at=clock_timestamp() WHERE id='{bsky_video['id']}'")
+            wait_for(lambda: sql(f"SELECT EXISTS(SELECT 1 FROM publications p JOIN provider_delivery_checkpoints cp ON cp.publication_id=p.id WHERE p.id='{bsky_video['id']}' AND p.state='queued' AND cp.not_before>clock_timestamp())") == "t", "durable Bluesky processing delay")
+            worker.send_signal(signal.SIGTERM)
+            worker.wait(timeout=10)
+            worker = subprocess.Popen(loopback_only([TARGET / "debug/beweft-worker"]), cwd=ROOT, env=worker_env,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            processes.append(worker)
+            published_bsky = wait_for(lambda: state_is(bsky_video["id"], "published"), "Bluesky video after worker restart", seconds=35)
+            assert published_bsky["external_id"] == Fixture.bsky_uri
+            assert Fixture.bsky_record["embed"]["alt"] == "Original Bluesky video description"
+            assert Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0) == before_upload + 1
+            assert Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0) == before_post + 1
+            assert Fixture.counts.get("GET /xrpc/com.atproto.repo.getRecord", 0) >= 1
+
+            # An interrupted status read can be reconciled with the saved job,
+            # without another upload or public write during the recovery probe.
+            Fixture.bsky_mode = "status_error"
+            Fixture.bsky_polls = 0
+            before_upload = Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0)
+            recovery = schedule(brand, bsky["id"], "Resume saved video job", [bsky_asset["id"]])
+            wait_for(lambda: state_is(recovery["id"], "uncertain"), "Bluesky status failure", seconds=25)
+            before_post = Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0)
+            Fixture.bsky_mode = "normal"
+            assert request(f"/publications/{recovery['id']}/provider-reconcile", {})["state"] == "queued"
+            assert Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0) == before_post
+            wait_for(lambda: state_is(recovery["id"], "published"), "resumed Bluesky job", seconds=25)
+            assert Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0) == before_upload + 1
+            assert Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0) == before_post + 1
+
+            # Database time bounds automatic polling; an explicit probe may
+            # resume this same saved job after the local window ends.
+            Fixture.bsky_polls = 0
+            bounded = schedule(brand, bsky["id"], "Bounded Bluesky processing", [bsky_asset["id"]])
+            wait_for(lambda: sql(f"SELECT EXISTS(SELECT 1 FROM publications p JOIN provider_delivery_checkpoints cp ON cp.publication_id=p.id WHERE p.id='{bounded['id']}' AND p.state='queued' AND cp.not_before>clock_timestamp())") == "t", "Bluesky processing deadline")
+            before_poll = Fixture.counts.get("GET /xrpc/app.bsky.video.getJobStatus", 0)
+            before_upload = Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0)
+            sql(f"UPDATE provider_delivery_checkpoints SET expires_at=clock_timestamp()-interval '1 second' WHERE publication_id='{bounded['id']}'")
+            wait_for(lambda: state_is(bounded["id"], "uncertain"), "bounded Bluesky processing", seconds=15)
+            assert Fixture.counts.get("GET /xrpc/app.bsky.video.getJobStatus", 0) == before_poll
+            status = request(f"/publications/{bounded['id']}/provider-status")
+            assert status["session_expired"] and "Bluesky" in status["reason"] and not status["reset_allowed"]
+            assert request(f"/publications/{bounded['id']}/provider-reconcile", {})["state"] == "queued"
+            wait_for(lambda: state_is(bounded["id"], "published"), "Bluesky job after explicit probe", seconds=25)
+            assert Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0) == before_upload
+
+            # A lost upload has no queryable job ID. Even an owner resolution
+            # and retry cannot cause an automatic second upload or public post.
+            Fixture.bsky_mode = "lost_upload"
+            before_upload = Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0)
+            before_post = Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0)
+            lost = schedule(brand, bsky["id"], "Lost Bluesky upload", [bsky_asset["id"]])
+            wait_for(lambda: state_is(lost["id"], "uncertain"), "lost Bluesky upload")
+            assert request(f"/publications/{lost['id']}/provider-reconcile", {})["state"] == "uncertain"
+            request(f"/publications/{lost['id']}/reconcile", {"resolution":"not_published", "note":"Fixture inspected"})
+            request(f"/publications/{lost['id']}/retry", {})
+            wait_for(lambda: state_is(lost["id"], "uncertain"), "unresolved Bluesky retry")
+            assert Fixture.counts.get("POST /xrpc/app.bsky.video.uploadVideo", 0) == before_upload + 1
+            assert Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0) == before_post
+
+            Fixture.bsky_mode = "failed"
+            Fixture.bsky_polls = 0
+            failed = schedule(brand, bsky["id"], "Bluesky encoding failure", [bsky_asset["id"]])
+            wait_for(lambda: state_is(failed["id"], "failed"), "Bluesky processing failure", seconds=25)
+            assert Fixture.counts.get("POST /xrpc/com.atproto.repo.createRecord", 0) == before_post
+            Fixture.bsky_mode = "normal"
 
             # A video larger than one bounded claim crosses durable attempts;
             # processing delay survives the claim boundary and the originally

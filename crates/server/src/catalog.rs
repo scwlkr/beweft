@@ -49,6 +49,21 @@ pub async fn create_brand(
 pub fn manual_capabilities() -> Value {
     json!({"execution":"manual","verification":"owner_attestation","formats":["text","image","video"],"publishing":true,"analytics":false,"inbox":false})
 }
+pub(crate) fn decorate_channel(mut channel: Value) -> Value {
+    // Existing direct channels retain their granted scopes in stored JSON. Use
+    // the installed Bluesky adapter's format description without changing those
+    // permissions or requiring accounts to reconnect after an upgrade.
+    if channel["provider"] == "bluesky"
+        && channel["capabilities"]["execution"] == "direct"
+        && let Some(capability) = beweft_providers::capabilities()
+            .into_iter()
+            .find(|c| c.id == "bluesky")
+    {
+        channel["capabilities"]["formats"] = json!(capability.formats);
+        channel["capabilities"]["reason"] = json!(capability.reason);
+    }
+    crate::manual_channels::decorate(channel)
+}
 pub async fn channels(
     State(state): State<AppState>,
     auth: Auth,
@@ -59,9 +74,7 @@ pub async fn channels(
     }
     let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(c)-'encrypted_credentials' FROM channels c WHERE ($1::uuid IS NULL OR brand_id=$1) AND (cardinality($2::uuid[])=0 OR brand_id=ANY($2)) ORDER BY created_at").bind(filter.brand_id).bind(&auth.brand_ids).fetch_all(&state.db).await?;
     Ok(data(
-        rows.into_iter()
-            .map(crate::manual_channels::decorate)
-            .collect::<Vec<_>>(),
+        rows.into_iter().map(decorate_channel).collect::<Vec<_>>(),
     ))
 }
 pub async fn create_channel(
@@ -105,7 +118,7 @@ pub async fn create_channel(
     crate::brand_admin::active(&mut tx, brand).await?;
     let row:Value=sqlx::query_scalar("INSERT INTO channels(id,brand_id,name,provider,timezone,capabilities,target_platform) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING to_jsonb(channels.*)-'encrypted_credentials'").bind(Uuid::new_v4()).bind(brand).bind(name).bind(provider).bind(timezone).bind(caps).bind(target).fetch_one(&mut *tx).await?;
     tx.commit().await?;
-    Ok(data(crate::manual_channels::decorate(row)))
+    Ok(data(decorate_channel(row)))
 }
 pub async fn update_channel(
     State(state): State<AppState>,
@@ -144,7 +157,7 @@ pub async fn update_channel(
 
     let row:Value=sqlx::query_scalar("UPDATE channels SET name=COALESCE($2,name),paused=COALESCE($3,paused),timezone=COALESCE($4,timezone),target_platform=COALESCE($5,target_platform) WHERE id=$1 RETURNING to_jsonb(channels.*)-'encrypted_credentials'").bind(id).bind(name).bind(body.get("paused").and_then(Value::as_bool)).bind(timezone).bind(target).fetch_one(&mut *tx).await?;
     tx.commit().await?;
-    Ok(data(crate::manual_channels::decorate(row)))
+    Ok(data(decorate_channel(row)))
 }
 pub fn validate_timezone(t: &str) -> Result<chrono_tz::Tz> {
     t.parse()
