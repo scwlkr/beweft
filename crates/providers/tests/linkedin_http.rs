@@ -40,7 +40,12 @@ async fn provider(State(state): State<Arc<Mutex<Fixture>>>, request: Request) ->
             "urn:li:person:member"
         );
         s.uploads += 1;
-        return Json(json!({"value":{"image":format!("urn:li:image:image{}",s.uploads),"uploadUrl":format!("https://www.linkedin.com/dms-uploads/image{}",s.uploads),"uploadUrlExpiresAt":expiry}})).into_response();
+        let upload = if s.fail == "bad_url" {
+            "https://untrusted.example/dms-uploads/image".to_string()
+        } else {
+            format!("https://www.linkedin.com/dms-uploads/image{}", s.uploads)
+        };
+        return Json(json!({"value":{"image":format!("urn:li:image:image{}",s.uploads),"uploadUrl":upload,"uploadUrlExpiresAt":expiry}})).into_response();
     }
     if path.starts_with("/dms-uploads/image") {
         assert_eq!(method, "PUT");
@@ -256,6 +261,21 @@ async fn linkedin_images_and_video_checkpoint_through_processing_and_one_post() 
             .iter()
             .any(|(path, _)| path.starts_with("POST /rest/posts"))
     );
+    // A provider-supplied upload URL cannot redirect the member bearer token.
+    *state.lock().unwrap() = Fixture {
+        fail: "bad_url".into(),
+        ..Default::default()
+    };
+    let Step::Checkpoint(init) = adapter.publish_step(&c, &p, None).await.unwrap() else {
+        panic!("expected image initialization")
+    };
+    let error = match adapter.publish_step(&c, &p, Some(&init)).await {
+        Err(error) => error,
+        Ok(_) => panic!("untrusted upload URL must be rejected"),
+    };
+    assert_eq!(error.kind, FailureKind::Uncertain);
+    assert_eq!(state.lock().unwrap().requests.len(), 1);
+
     // A provider that never finishes cannot be polled indefinitely.
     *state.lock().unwrap() = Fixture::default();
     let mut cp = None;

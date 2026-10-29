@@ -172,7 +172,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             assert self.headers.get("Linkedin-Version") == "202610"
             if action == ["initializeUpload"]:
                 assert value["initializeUploadRequest"]["owner"] == "urn:li:person:linkedin-member"
-                expiry = int((time.time()+3600)*1000)
+                expiry = int((time.time()+(-60 if self.linkedin_mode == "expired_upload" else 3600))*1000)
                 if path == "/rest/images":
                     return self.respond({"value":{"image":"urn:li:image:fixture", "uploadUrl":"https://www.linkedin.com/dms-uploads/image", "uploadUrlExpiresAt":expiry}})
                 size = value["initializeUploadRequest"]["fileSizeBytes"]
@@ -760,6 +760,15 @@ def run():
             wait_for(lambda: state_is(unknown_li["id"], "published"), "LinkedIn explicit attested retry")
             assert Fixture.counts.get("POST /rest/posts", 0) == before_li_posts + 2
             assert sql(f"SELECT count(*) FROM audit_events WHERE subject_id='{unknown_li['id']}' AND action='retry_linkedin_delivery'") == "1"
+
+            # Expired upload URLs never receive bytes, even though the worker's
+            # host wall clock is deliberately behind the database clock.
+            Fixture.linkedin_mode = "expired_upload"
+            before_upload = Fixture.counts.get("PUT /dms-uploads/image", 0)
+            expired_li = schedule(brand, linkedin["id"], "Expired LinkedIn upload", [asset["id"]])
+            wait_for(lambda: state_is(expired_li["id"], "uncertain"), "LinkedIn expired upload")
+            assert Fixture.counts.get("PUT /dms-uploads/image", 0) == before_upload
+            assert request(f"/publications/{expired_li['id']}/provider-status")["linkedin_delivery"]["phase"] == "upload"
 
             # A lost private upload is quarantined and can be restarted only
             # after a current owner observation and a separate explicit retry.
