@@ -118,6 +118,7 @@ pub struct PostSummary {
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct Media {
     pub alt_text: String,
+    pub metadata_version: i32,
     pub id: Uuid,
     pub brand_id: Uuid,
     pub name: String,

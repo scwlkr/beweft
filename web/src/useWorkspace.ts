@@ -467,7 +467,14 @@ export function useWorkspace() {
           setChannels(cs);
           setPosts(posts);
           setIdeas(ins);
-          setMedia(ms);
+          setMedia((previous) =>
+            ms.map((item) => {
+              const known = previous.find((row) => row.id === item.id);
+              return known && known.metadata_version > item.metadata_version
+                ? known
+                : item;
+            }),
+          );
           setPublications(pubs);
         });
       } else {
@@ -564,6 +571,26 @@ export function useWorkspace() {
     setSidebar(false);
     setSearch("");
   };
+  const reconcileMedia = useCallback(
+    (updated: Media, requestSession: ApiSession) => {
+      if (
+        !readyRef.current ||
+        context.current !== updated.brand_id ||
+        sessionEpoch.current !== requestSession.epoch ||
+        !isCurrentApiSession(requestSession)
+      )
+        return;
+      setMedia((previous) =>
+        previous.map((item) =>
+          item.id === updated.id &&
+          updated.metadata_version >= item.metadata_version
+            ? updated
+            : item,
+        ),
+      );
+    },
+    [],
+  );
   return {
     ready,
     acceptSession,
@@ -605,6 +632,7 @@ export function useWorkspace() {
     brand,
     load,
     action,
+    reconcileMedia,
     go,
     chooseBrand,
     createBrand,

@@ -60,6 +60,8 @@ export const PostSchema = z.object({
 export const MediaSchema = z.object({
   id,
   brand_id: id,
+  alt_text: z.string(),
+  metadata_version: z.number().int().positive(),
   name: z.string(),
   mime: z.string(),
   size: z.number(),

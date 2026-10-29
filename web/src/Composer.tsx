@@ -1,12 +1,19 @@
 import { useComposer } from "./useComposer";
 import { Check, ImagePlus, Save, Send, X } from "lucide-react";
-import { type Brand, type Channel, type Media, type Post } from "./api";
+import {
+  type ApiSession,
+  type Brand,
+  type Channel,
+  type Media,
+  type Post,
+} from "./api";
 import { Network } from "./components/brand";
 import { PostPreview } from "./components/PostPreview";
 import { ErrorNotice, Field } from "./components/shared";
 import { Button } from "./components/ui/button";
 import { Dialog } from "./components/ui/dialog";
 import { ProviderOptions } from "./ProviderOptions";
+import type { PendingMedia } from "./usePendingMedia";
 export function Composer({
   brand,
   channels,
@@ -15,6 +22,9 @@ export function Composer({
   initialDate,
   onClose,
   onSaved,
+  pendingMedia,
+  reconcileMedia,
+  onReviewMedia,
 }: {
   brand: Brand;
   channels: Channel[];
@@ -23,6 +33,9 @@ export function Composer({
   initialDate?: string;
   onClose: () => void;
   onSaved: () => Promise<void>;
+  pendingMedia: PendingMedia;
+  reconcileMedia: (media: Media, session: ApiSession) => void;
+  onReviewMedia: (id: string) => void;
 }) {
   const {
     post,
@@ -53,6 +66,9 @@ export function Composer({
     activeMedia,
     setActiveMedia,
     selectedMedia,
+    affectedMedia,
+    missingMedia,
+    scheduleBlocked,
     submit,
   } = useComposer({
     brand,
@@ -62,6 +78,8 @@ export function Composer({
     initialDate,
     onSaved,
     onClose,
+    pendingMedia,
+    reconcileMedia,
   });
   return (
     <Dialog
@@ -207,7 +225,7 @@ export function Composer({
                       }
                     >
                       {m.mime.startsWith("image/") ? (
-                        <img src={m.url} alt={m.name} />
+                        <img src={m.url} alt={m.alt_text || m.name} />
                       ) : (
                         <span>Video</span>
                       )}
@@ -223,7 +241,7 @@ export function Composer({
               {selectedMedia.map((m) => (
                 <div key={m.id}>
                   {m.mime.startsWith("image/") ? (
-                    <img src={m.url} alt={m.name} />
+                    <img src={m.url} alt={m.alt_text || m.name} />
                   ) : (
                     <span>{m.name}</span>
                   )}
@@ -241,28 +259,23 @@ export function Composer({
               ))}
             </div>
           )}
-          {active &&
-            ["bluesky", "mastodon"].includes(active.provider) &&
-            selectedMedia.some((m) => m.mime.startsWith("image/")) && (
-              <Field
-                label="Image description"
-                hint="Currently applied to every image in this channel variant. Describe the content for people who cannot see it."
-              >
-                <textarea
-                  rows={2}
-                  value={String(options[active.id]?.alt_text ?? "")}
-                  onChange={(e) =>
-                    setOptions({
-                      ...options,
-                      [active.id]: {
-                        ...options[active.id],
-                        alt_text: e.target.value,
-                      },
-                    })
-                  }
-                />
-              </Field>
-            )}
+          {selectedMedia.length > 0 && (
+            <div className="media-descriptions">
+              <strong>Media descriptions</strong>
+              <p className="muted">
+                These are the last descriptions loaded. Scheduling uses saved
+                descriptions, which another browser can change.
+              </p>
+              <ul>
+                {selectedMedia.map((item) => (
+                  <li key={item.id}>
+                    <strong>{item.name}:</strong>{" "}
+                    {item.alt_text || "No description yet"}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {active && (
             <ProviderOptions
               provider={active.provider}
@@ -314,6 +327,53 @@ export function Composer({
             )}
           </div>
           {error && <ErrorNotice message={error} />}
+          {mode !== "draft" && !pendingMedia.ready && (
+            <div role="status" className="quiet-note">
+              <p>
+                {pendingMedia.error || "Checking media description recovery…"}
+              </p>
+              {pendingMedia.error && (
+                <Button variant="secondary" onClick={pendingMedia.retry}>
+                  Check media again
+                </Button>
+              )}
+            </div>
+          )}
+          {mode !== "draft" && affectedMedia.length > 0 && (
+            <div role="status" className="quiet-note">
+              <p>
+                A selected media description is unconfirmed. Review it before
+                scheduling.
+              </p>
+              {affectedMedia.map((id) =>
+                pendingMedia.assetErrors[id] ? (
+                  <p key={id}>
+                    {media.find((item) => item.id === id)?.name ?? "Media"}:{" "}
+                    {pendingMedia.assetErrors[id]}
+                  </p>
+                ) : null,
+              )}
+              {affectedMedia.map((id) => (
+                <Button
+                  key={id}
+                  variant="secondary"
+                  onClick={() => onReviewMedia(id)}
+                >
+                  Review{" "}
+                  {media.find((item) => item.id === id)?.name ??
+                    "media description"}
+                </Button>
+              ))}
+              {affectedMedia.some((id) => !!pendingMedia.assetErrors[id]) && (
+                <Button variant="secondary" onClick={pendingMedia.retry}>
+                  Check media again
+                </Button>
+              )}
+            </div>
+          )}
+          {mode !== "draft" && missingMedia.length > 0 && (
+            <ErrorNotice message="A selected media asset could not be loaded. Refresh the workspace before scheduling." />
+          )}
         </fieldset>
         <PostPreview
           brand={brand}
@@ -326,7 +386,7 @@ export function Composer({
         <Button variant="ghost" onClick={onClose} disabled={busy}>
           Cancel
         </Button>
-        <Button onClick={submit} disabled={busy}>
+        <Button onClick={submit} disabled={busy || scheduleBlocked}>
           {mode === "draft" ? <Save size={17} /> : <Send size={17} />}{" "}
           {busy
             ? "Saving…"

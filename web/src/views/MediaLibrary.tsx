@@ -2,10 +2,18 @@ import type { MediaLimits } from "../lib/api-contract.generated";
 import { Play, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
-import { api, MediaSchema, ok, type Brand, type Media } from "../api";
-import { Empty, ErrorNotice, Time } from "../components/shared";
+import {
+  api,
+  MediaSchema,
+  ok,
+  type ApiSession,
+  type Brand,
+  type Media,
+} from "../api";
+import { Empty, ErrorNotice, Field, Time } from "../components/shared";
 import { Button } from "../components/ui/button";
 import { Dialog } from "../components/ui/dialog";
+import { useMediaDescription } from "./useMediaDescription";
 
 const LimitsSchema: z.ZodType<MediaLimits> = z.object({
   max_upload_bytes: z.number().positive(),
@@ -23,14 +31,17 @@ export function MediaLibrary({
   media,
   action,
   pending,
+  reconcileMedia,
 }: {
   brand: Brand;
   media: Media[];
   action: Action;
   pending: boolean;
+  reconcileMedia: (media: Media, session: ApiSession) => void;
 }) {
   const input = useRef<HTMLInputElement>(null);
-  const [selected, setSelected] = useState<Media | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = media.find((item) => item.id === selectedId);
   const [uploadError, setUploadError] = useState("");
   const [limit, setLimit] = useState<number | null>(null);
   useEffect(() => {
@@ -117,11 +128,17 @@ export function MediaLibrary({
               <button
                 className="media-card"
                 key={m.id}
-                onClick={() => setSelected(m)}
+                onClick={() => {
+                  setSelectedId(m.id);
+                }}
               >
                 <div className="media-image">
                   {m.mime.startsWith("image/") ? (
-                    <img src={m.url} alt={m.name} loading="lazy" />
+                    <img
+                      src={m.url}
+                      alt={m.alt_text || m.name}
+                      loading="lazy"
+                    />
                   ) : (
                     <>
                       <video src={m.url} preload="metadata" />
@@ -145,52 +162,184 @@ export function MediaLibrary({
         )}
       </div>
       {selected && (
-        <Dialog
-          open
-          onOpenChange={(v) => !v && setSelected(null)}
-          title={selected.name}
-        >
-          <div className="form-stack">
-            {selected.mime.startsWith("image/") ? (
-              <img
-                className="media-detail"
-                src={selected.url}
-                alt={selected.name}
-              />
-            ) : (
-              <video className="media-detail" controls src={selected.url} />
-            )}
-            <p className="muted">
-              {(selected.size / 1024 / 1024).toFixed(2)} MiB · Uploaded{" "}
-              <Time value={selected.created_at} />
-            </p>
-            <a
-              className="button button-secondary"
-              href={selected.url}
-              download={selected.name}
-            >
-              Download original
-            </a>
-            <Button
-              variant="destructive"
-              disabled={pending || limit === null}
-              onClick={() =>
-                void action(
-                  () => api(`/media/${selected.id}`, ok, "DELETE"),
-                  "Media deleted",
-                ).then((ok) => ok && setSelected(null))
-              }
-            >
-              <Trash2 size={16} />
-              Delete unused media
-            </Button>
-            <small className="muted">
-              Media attached to a draft or publication is protected from
-              deletion.
-            </small>
-          </div>
-        </Dialog>
+        <MediaDetails
+          key={selected.id}
+          selected={selected}
+          pending={pending}
+          action={action}
+          limit={limit}
+          reconcileMedia={reconcileMedia}
+          onClose={() => setSelectedId(null)}
+        />
       )}
     </>
+  );
+}
+
+export function MediaDetails({
+  selected,
+  pending,
+  action,
+  limit,
+  reconcileMedia,
+  onClose,
+}: {
+  selected: Media;
+  pending: boolean;
+  action: Action;
+  limit: number | null;
+  reconcileMedia: (media: Media, session: ApiSession) => void;
+  onClose: () => void;
+}) {
+  const description = useMediaDescription(selected, reconcileMedia);
+  const record = description.media;
+  const locked =
+    pending || description.claiming || description.phase !== "ready";
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+      title={record.name}
+    >
+      <div className="form-stack">
+        {record.mime.startsWith("image/") ? (
+          <img
+            className="media-detail"
+            src={record.url}
+            alt={record.alt_text || record.name}
+          />
+        ) : (
+          <video className="media-detail" controls src={record.url} />
+        )}
+        <p className="muted">
+          {(record.size / 1024 / 1024).toFixed(2)} MiB · Uploaded{" "}
+          <Time value={record.created_at} />
+        </p>
+        <Field label="Description">
+          <textarea
+            rows={3}
+            value={description.text}
+            disabled={
+              pending ||
+              description.claiming ||
+              !["ready", "stale"].includes(description.phase)
+            }
+            readOnly={description.phase === "stale"}
+            aria-label="Description"
+            aria-describedby="media-description-help"
+            onChange={(event) => description.setText(event.target.value)}
+          />
+        </Field>
+        <small id="media-description-help" className="muted">
+          Describe this media for people who cannot see it. New schedules save
+          the current description; already scheduled posts keep their existing
+          description.
+        </small>
+        <div className="inline-actions">
+          <Button
+            variant="secondary"
+            disabled={
+              locked ||
+              description.text === record.alt_text ||
+              description.text.includes("\0") ||
+              Array.from(description.text).length > 2000
+            }
+            onClick={() => void description.send()}
+          >
+            Save description
+          </Button>
+          <small className="muted">
+            {Array.from(description.text).length} / 2,000 characters
+          </small>
+        </div>
+        {description.status && (
+          <p role="status" className="muted">
+            {description.status}
+          </p>
+        )}
+        {description.error && <ErrorNotice message={description.error} />}
+        {["pending", "blocked", "stale"].includes(description.phase) && (
+          <div className="inline-actions">
+            <Button
+              variant="secondary"
+              disabled={description.claiming}
+              onClick={() =>
+                void description.check(undefined, description.phase === "stale")
+              }
+            >
+              {description.phase === "stale"
+                ? "Use latest description"
+                : "Check description"}
+            </Button>
+            {description.phase === "pending" &&
+              description.intent &&
+              !description.intent.alt_text.includes("\0") && (
+                <Button
+                  variant="secondary"
+                  disabled={description.claiming}
+                  onClick={() => void description.send(description.intent!)}
+                >
+                  Retry this description
+                </Button>
+              )}
+            {description.phase === "pending" &&
+              description.intent?.alt_text.includes("\0") && (
+                <Button
+                  variant="secondary"
+                  disabled={description.claiming}
+                  onClick={() =>
+                    void description.checkInvalid(description.intent!)
+                  }
+                >
+                  Check invalid description
+                </Button>
+              )}
+          </div>
+        )}
+        {description.phase === "pending" && description.intent && (
+          <p className="muted">
+            Pending description: {description.intent.alt_text || "(empty)"}
+          </p>
+        )}
+        {description.phase === "stale" && (
+          <p className="muted">
+            Last loaded description: {record.alt_text || "(empty)"}
+          </p>
+        )}
+        {Array.from(description.text).length > 2000 && (
+          <ErrorNotice message="Descriptions must be 2,000 characters or fewer." />
+        )}
+        {description.text.includes("\0") && (
+          <ErrorNotice message="Descriptions cannot contain NUL characters. Remove them before saving." />
+        )}
+        <a
+          className="button button-secondary"
+          href={record.url}
+          download={record.name}
+        >
+          Download original
+        </a>
+        <Button
+          variant="destructive"
+          disabled={locked || limit === null}
+          onClick={() =>
+            void action(
+              () => api(`/media/${record.id}`, ok, "DELETE"),
+              "Media deleted",
+            ).then((ok) => {
+              if (ok) onClose();
+            })
+          }
+        >
+          <Trash2 size={16} />
+          Delete unused media
+        </Button>
+        <small className="muted">
+          Media attached to a draft or publication is protected from deletion.
+        </small>
+      </div>
+    </Dialog>
   );
 }

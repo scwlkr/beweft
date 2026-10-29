@@ -103,7 +103,10 @@ pub fn router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(upload_limit)),
         )
         .route("/media/limits", get(media::limits))
-        .route("/media/{id}", delete(media::delete).patch(media::update))
+        .route(
+            "/media/{id}",
+            get(media::get).delete(media::delete).patch(media::update),
+        )
         .route("/media/{id}/file", get(media::file))
         .route("/schedules", get(schedules::list).post(schedules::create))
         .route("/schedules/{id}", delete(schedules::delete))
