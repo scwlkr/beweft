@@ -406,6 +406,16 @@ pub struct ProviderStatus {
     pub reason: Option<String>,
     #[schema(required = true)]
     pub x_upload: Option<XUploadStatus>,
+    #[schema(required = true)]
+    pub meta_delivery: Option<MetaDeliveryStatus>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct MetaDeliveryStatus {
+    pub phase: XUploadPhase,
+    pub attempt_id: Uuid,
+    pub checkpoint_id: Uuid,
+    pub retry_allowed: bool,
+    pub reason: String,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct XUploadStatus {

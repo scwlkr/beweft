@@ -80,6 +80,42 @@ pub fn guidance(id: &str) -> Result<Value> {
         .ok_or_else(|| ApiError::bad("Unknown manual target_platform"))
 }
 pub fn decorate(mut channel: Value) -> Value {
+    // Stored grants and health remain channel-specific; implemented formats
+    // come from this running version, including for channels connected earlier.
+    if let Some(provider) = channel["provider"].as_str().map(str::to_owned)
+        && matches!(provider.as_str(), "facebook" | "instagram" | "threads")
+        && let Some(current) = beweft_providers::capabilities()
+            .into_iter()
+            .find(|c| c.id == provider)
+        && channel["capabilities"].is_object()
+    {
+        channel["capabilities"]["formats"] = json!(current.formats);
+        channel["capabilities"]["reason"] = json!(current.reason);
+        if provider == "facebook" && channel["capabilities"]["permissions"].is_object() {
+            let permissions = &channel["capabilities"]["permissions"];
+            let scopes = permissions["reported_scopes"].as_array();
+            let known = permissions["source"] == "provider_token_response" && scopes.is_some();
+            let required = ["pages_manage_posts", "pages_read_engagement"];
+            let missing: Vec<_> = required
+                .iter()
+                .copied()
+                .filter(|required| {
+                    !scopes.is_some_and(|scopes| scopes.iter().any(|scope| scope == *required))
+                })
+                .collect();
+            let status = if !known {
+                "unknown"
+            } else if missing.is_empty() {
+                "granted"
+            } else {
+                "missing"
+            };
+            channel["capabilities"]["permissions"]["actions"]["reel"] = json!({
+                "status":status, "required_scopes":required,
+                "missing_scopes":if known { json!(missing) } else { Value::Null }
+            });
+        }
+    }
     channel["manual_guidance"] = if channel["provider"] == "manual" {
         guidance(channel["target_platform"].as_str().unwrap_or("generic")).unwrap_or(Value::Null)
     } else {

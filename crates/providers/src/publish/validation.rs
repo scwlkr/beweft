@@ -25,7 +25,7 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
         .iter()
         .filter(|m| video(m) || m.mime == "image/gif")
         .count();
-    if moving > 0 && p.media.len() > 1 {
+    if moving > 0 && p.media.len() > 1 && !matches!(provider, "instagram" | "threads") {
         return Err(invalid(
             "Animated images and video cannot be combined with other attachments",
         ));
@@ -99,24 +99,58 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
             post_limit(p, 5000)?;
         }
         "facebook" => {
-            if p.media.len() > 1 || p.media.iter().any(|m| !image(m)) {
+            if p.options.get("format").is_some_and(|v| v != "reel") {
                 return Err(invalid(
-                    "Facebook adapter supports text or one image. Use manual handoff for other formats.",
+                    "Facebook format must be reel when publishing video",
+                ));
+            }
+            if p.options["format"] == "reel" {
+                if p.media.len() != 1
+                    || p.media[0].mime != "video/mp4"
+                    || !p.media[0].alt_text.trim().is_empty()
+                {
+                    return Err(invalid(
+                        "Facebook Reels require one MP4; video descriptions are not supported by this adapter",
+                    ));
+                }
+            } else if p.media.len() > 1 || p.media.iter().any(|m| !image(m)) {
+                return Err(invalid(
+                    "Facebook supports text, one image, or one video with format=reel. Standard video uses manual handoff.",
                 ));
             }
         }
         "instagram" => {
-            if p.media.len() != 1 || (!image(&p.media[0]) && !video(&p.media[0])) {
+            if p.options.get("format").is_some() {
                 return Err(invalid(
-                    "Instagram adapter needs one image or Reel. Other formats use manual handoff.",
+                    "Instagram Stories are not implemented; use manual handoff. Carousels are selected by the attachment count.",
                 ));
             }
-            if image(&p.media[0]) && p.media[0].mime != "image/jpeg" {
-                return Err(invalid("Instagram single-image publishing requires JPEG"));
+            if p.media.is_empty()
+                || p.media.len() > 10
+                || p.media
+                    .iter()
+                    .any(|m| !matches!(m.mime.as_str(), "image/jpeg" | "video/mp4"))
+            {
+                return Err(invalid(
+                    "Instagram supports one JPEG or MP4 Reel, or a carousel of 2–10 JPEG/MP4 items",
+                ));
+            }
+            if p.media
+                .iter()
+                .any(|m| video(m) && !m.alt_text.trim().is_empty())
+            {
+                return Err(invalid(
+                    "Instagram video descriptions are not supported by this adapter",
+                ));
             }
             post_limit(p, 2200)?;
         }
         "threads" => {
+            if p.options.get("format").is_some() {
+                return Err(invalid(
+                    "Threads carousels are selected by the attachment count; explicit format options are not supported.",
+                ));
+            }
             post_limit(p, 500)?;
             if p.options.get("reply_control").is_some_and(|v| {
                 !matches!(
@@ -126,9 +160,13 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
             }) {
                 return Err(invalid("Unsupported Threads reply control"));
             }
-            if p.media.len() > 1 {
+            if p.media.len() > 10
+                || p.media
+                    .iter()
+                    .any(|m| !matches!(m.mime.as_str(), "image/jpeg" | "image/png" | "video/mp4"))
+            {
                 return Err(invalid(
-                    "Threads adapter supports one media attachment; carousel uses manual handoff",
+                    "Threads supports text, one JPEG/PNG/MP4, or a carousel of 2–10 JPEG/PNG/MP4 items",
                 ));
             }
         }

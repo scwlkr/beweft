@@ -83,6 +83,7 @@ use serde_json::{Value, json};
         ProviderSyncResult,
         ProviderReply,
         ProviderStatus,
+        MetaDeliveryStatus,
         XUploadStatus,
         XUploadPhase,
         ProviderReconcilePending,
