@@ -67,7 +67,9 @@ PR #17 passed fresh independent review at `55eab7c` and merged at `6a351f0`.
 Nonblocking admission leaves recovery/authentication reads usable under repeated
 same-key retries. Compact summary display fields cap channel names at 100 and
 provider labels at 64 Unicode characters, including for existing rows. Large
-escaped/multibyte label fixtures keep receipts below 100 KB with original IDs.
+escaped/multibyte label fixtures without a media-version map keep receipts
+  below 100 KB with original IDs. The 1,000-entry map boundary in PR #19
+  measured 123,182 bytes; the contract does not impose a 100 KB ceiling.
 Web and CLI consumers still require adoption; backend availability alone does
 not close the browser scheduling uncertainty finding.
 Timestamps accept at most six fractional digits and normalize exactly to UTC;
@@ -77,7 +79,10 @@ The next schedule contract adds an optional normalized media-version map to the
 immutable request and receipt. New clients will supply the complete effective
 media union; the server will lock and check versions in the snapshot transaction.
 This is implemented in PR #19 `74c3fa8` and undergoing independent review; it
-depends on media #15 and needs integration with later web changes. It prevents an unknown
+depends on media #15 and needs integration with later web changes. Fresh
+review found historical uppercase channel UUIDs were compared as text, selecting
+base media instead of the variant; UUID-aware selection and canonical read
+responses are being corrected. It prevents an unknown
 schedule after reload from silently snapshotting later description edits.
 
 Media saves persist owner/brand/asset/base-version/text before PATCH. Unknown
