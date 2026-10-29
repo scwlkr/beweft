@@ -1426,6 +1426,10 @@
             "type": "string"
           },
           "receipt": {},
+          "revision": {
+            "format": "int64",
+            "type": "integer"
+          },
           "state": {
             "type": "string"
           },
@@ -1442,6 +1446,7 @@
           "inbox_id",
           "text",
           "state",
+          "revision",
           "receipt",
           "error",
           "created_at",
@@ -1949,12 +1954,24 @@
           "note": {
             "type": "string"
           },
+          "observed_revision": {
+            "format": "int64",
+            "type": "integer"
+          },
           "resolution": {
             "$ref": "#/components/schemas/ProviderReplyResolution"
+          },
+          "sender_stopped": {
+            "description": "Required and true for not_published: the owner attests the sender stopped.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
           "resolution",
+          "observed_revision",
           "note"
         ],
         "type": "object"

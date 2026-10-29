@@ -6,7 +6,7 @@ pub(super) async fn check_history(
     request_id: Uuid,
     body: &Value,
 ) -> Result<Option<Value>> {
-    sqlx::query("UPDATE provider_replies SET state='uncertain',error='Reply response was lost; inspect the network and record its outcome before a new reply',updated_at=now() WHERE inbox_id=$1 AND state='sending' AND delivery_deadline<clock_timestamp()").bind(id).execute(&mut **tx).await?;
+    sqlx::query("UPDATE provider_replies SET state='uncertain',error='Reply outcome is unknown; ensure the original sender has stopped and inspect the network before resolving',updated_at=clock_timestamp() WHERE inbox_id=$1 AND state='sending' AND delivery_deadline<clock_timestamp()").bind(id).execute(&mut **tx).await?;
     let existing:Option<Value>=sqlx::query_scalar("SELECT to_jsonb(r)-'owner_id'-'history_order'-'delivery_deadline' FROM provider_replies r WHERE id=$1 AND inbox_id=$2 AND owner_id=$3").bind(request_id).bind(id).bind(auth.owner_id).fetch_optional(&mut **tx).await?;
     if let Some(value) = existing {
         return Ok(Some(value));

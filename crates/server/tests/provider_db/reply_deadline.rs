@@ -61,12 +61,13 @@ async fn reply_claim_clock_is_independent_of_waits(h: &Harness) {
         .await
         .unwrap();
     assert_eq!(history.0["data"][0]["state"], "sending");
+    let revision = history.0["data"][0]["revision"].as_i64().unwrap();
     assert!(
         provider_bridge::resolve_reply(
             State(h.state.clone()),
             h.auth.clone(),
             Path((id, request)),
-            Json(json!({"resolution":"not_published","note":"must not accept while HTTP active"}))
+            Json(json!({"resolution":"not_published","note":"must not accept while HTTP active","observed_revision":revision,"sender_stopped":true}))
         )
         .await
         .is_err()

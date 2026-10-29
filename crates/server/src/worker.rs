@@ -5,7 +5,7 @@ use uuid::Uuid;
 /// Recover only by quarantine. A lease expiring never authorizes a second external call.
 pub async fn recover_stale(state: &AppState) -> anyhow::Result<()> {
     let mut tx = state.db.begin().await?;
-    let ids:Vec<Uuid>=sqlx::query_scalar("UPDATE publications SET state='uncertain',last_error='Worker stopped while an attempt was in flight. Reconcile before retrying.',lease_until=NULL,updated_at=clock_timestamp() WHERE state='sending' AND lease_until<=clock_timestamp() RETURNING id").fetch_all(&mut *tx).await?;
+    let ids:Vec<Uuid>=sqlx::query_scalar("UPDATE publications SET state='uncertain',last_error='Delivery outcome is unknown. Ensure the original worker has stopped and inspect the provider before retrying.',lease_until=NULL,updated_at=clock_timestamp() WHERE state='sending' AND lease_until<=clock_timestamp() RETURNING id").fetch_all(&mut *tx).await?;
     if !ids.is_empty() {
         sqlx::query("UPDATE publication_attempts SET state='uncertain',finished_at=now(),error='Worker lease expired; external outcome is unknown' WHERE publication_id=ANY($1) AND state='sending'").bind(ids).execute(&mut *tx).await?;
     }

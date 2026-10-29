@@ -5,6 +5,10 @@ use tokio::io::AsyncWriteExt;
 /// Inspect only a forced media demuxer with no network protocols, no inherited secrets,
 /// a bounded stdout reader, and a deadline. Playlists and external references are excluded.
 async fn probe(m: &Media) -> Result<Value> {
+    probe_with_program(m, "ffprobe").await
+}
+
+async fn probe_with_program(m: &Media, program: &str) -> Result<Value> {
     let format = match m.mime.as_str() {
         "image/jpeg" => "jpeg_pipe",
         "image/png" => "png_pipe",
@@ -18,7 +22,7 @@ async fn probe(m: &Media) -> Result<Value> {
             ));
         }
     };
-    let mut cmd = tokio::process::Command::new("ffprobe");
+    let mut cmd = tokio::process::Command::new(program);
     cmd.env_clear()
         .env("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
         .kill_on_drop(true)
@@ -47,6 +51,7 @@ async fn probe(m: &Media) -> Result<Value> {
     cmd.args([
         "-show_entries",
         "format=duration:stream=codec_type,codec_name,width,height,duration",
+        "-show_error",
         "-of",
         "json",
         "-i",
@@ -69,12 +74,16 @@ async fn probe(m: &Media) -> Result<Value> {
     let output = child
         .stdout
         .take()
-        .ok_or_else(|| invalid("Media inspection failed"))?;
+        .ok_or_else(|| error(FailureKind::Unavailable, "Media inspection failed"))?;
     let run = async {
         let write = async {
-            if let (Some(mut stdin), MediaSource::Bytes(bytes)) = (input, &m.source) {
-                let _ = stdin.write_all(bytes).await;
+            if let MediaSource::Bytes(bytes) = &m.source {
+                let mut stdin = input.ok_or_else(|| {
+                    std::io::Error::other("Media inspection input is unavailable")
+                })?;
+                stdin.write_all(bytes).await?;
             }
+            Ok::<_, std::io::Error>(())
         };
         let read = async {
             let mut bytes = vec![];
@@ -82,24 +91,51 @@ async fn probe(m: &Media) -> Result<Value> {
                 .take(65537)
                 .read_to_end(&mut bytes)
                 .await
-                .map_err(|_| invalid("Media inspection failed"))?;
+                .map_err(|_| error(FailureKind::Unavailable, "Media inspection output failed"))?;
             if bytes.len() > 65536 {
-                return Err(invalid("Media has too many streams"));
+                return Err(error(
+                    FailureKind::Unavailable,
+                    "Media inspection output exceeded its limit",
+                ));
             }
             Ok::<_, ProviderError>(bytes)
         };
-        let (_, bytes) = tokio::join!(write, read);
+        let (written, bytes) = tokio::join!(write, read);
         let bytes = bytes?;
         let status = child
             .wait()
             .await
-            .map_err(|_| invalid("Media inspection failed"))?;
-        if !status.success() {
-            return Err(invalid(
-                "Media bytes are invalid or do not match their declared format",
+            .map_err(|_| error(FailureKind::Unavailable, "Media inspection failed"))?;
+        let parsed: Value = serde_json::from_slice(&bytes).map_err(|_| {
+            error(
+                FailureKind::Unavailable,
+                "Media inspection returned invalid output",
+            )
+        })?;
+        if written
+            .as_ref()
+            .is_err_and(|error| error.kind() != std::io::ErrorKind::BrokenPipe)
+        {
+            return Err(error(
+                FailureKind::Unavailable,
+                "Media inspection input failed",
             ));
         }
-        serde_json::from_slice(&bytes).map_err(|_| invalid("Media inspection failed"))
+        if !status.success() {
+            // FFmpeg reports stable AVERROR_INVALIDDATA and AVERROR_EOF codes
+            // for malformed content. OS errors, signals, missing structured
+            // output and other failures remain retryable infrastructure errors.
+            return Err(match parsed["error"]["code"].as_i64() {
+                Some(-1094995529 | -541478725) => {
+                    invalid("Media bytes are invalid or do not match their declared format")
+                }
+                _ => error(
+                    FailureKind::Unavailable,
+                    "Media inspection could not read the file",
+                ),
+            });
+        }
+        Ok(parsed)
     };
     tokio::time::timeout(Duration::from_secs(15), run)
         .await
@@ -229,4 +265,60 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_invalid_content_is_distinct_from_inspector_failures() {
+        let dir = Scratch(
+            std::env::temp_dir().join(format!("beweft-probe-test-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir(&dir.0).unwrap();
+        let file = dir.0.join("fixture.jpg");
+        std::fs::write(&file, b"fixture").unwrap();
+        let media = Media {
+            name: "fixture.jpg".into(),
+            mime: "image/jpeg".into(),
+            source: MediaSource::File {
+                path: file,
+                size: 7,
+            },
+            public_url: None,
+            alt_text: String::new(),
+        };
+        let script = dir.0.join("inspector");
+        for (output, expected) in [
+            (r#"{"error":{"code":-1094995529}}"#, FailureKind::Rejected),
+            (r#"{"error":{"code":-13}}"#, FailureKind::Unavailable),
+            ("not-json", FailureKind::Unavailable),
+        ] {
+            std::fs::write(
+                &script,
+                format!("#!/bin/sh\nprintf '%s' '{output}'\nexit 1\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let result = probe_with_program(&media, script.to_str().unwrap()).await;
+            assert_eq!(result.unwrap_err().kind, expected);
+        }
+        let missing = dir.0.join("missing-inspector");
+        assert_eq!(
+            probe_with_program(&media, missing.to_str().unwrap())
+                .await
+                .unwrap_err()
+                .kind,
+            FailureKind::Unavailable
+        );
+    }
 }

@@ -99,25 +99,26 @@ pub async fn bluesky(
     if let Some(id) = reconnect {
         check_bluesky_reconnect(&mut tx, id, brand, false).await?;
     }
-    let started = std::time::Instant::now();
+    let started = providers::SuspendInstant::now();
     let remaining: Option<f64> = sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM (expires_at-clock_timestamp()))::double precision FROM sessions WHERE token_hash=$1 AND owner_id=$2")
         .bind(&browser_session).bind(auth.owner_id).fetch_optional(&mut *tx).await?;
     let deadline = super::flows::authorization_deadline(started, remaining)?;
-    let channel = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
-        adapter_for(&app)
-            .await?
-            .with_monotonic_deadline(deadline)
-            .connect_bluesky(&app, &identifier, &password)
-            .await
-            .map_err(provider_error)
-    })
-    .await
-    .map_err(|_| {
-        ApiError::conflict(super::flows::recovery(
-            "Bluesky session creation timed out and its outcome is unknown.",
-        ))
-    })?
-    .map_err(super::flows::post_grant_error)?;
+    let channel = deadline
+        .run(async {
+            adapter_for(&app)
+                .await?
+                .with_deadline(deadline)
+                .connect_bluesky(&app, &identifier, &password)
+                .await
+                .map_err(provider_error)
+        })
+        .await
+        .map_err(|_| {
+            ApiError::conflict(super::flows::recovery(
+                "Bluesky session creation timed out and its outcome is unknown.",
+            ))
+        })?
+        .map_err(super::flows::post_grant_error)?;
     lock_active_brand(&mut tx, brand)
         .await
         .map_err(super::flows::post_grant_error)?;
@@ -162,7 +163,7 @@ pub async fn load_channel_tx(
     state: &AppState,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: Uuid,
-    deadline: Option<std::time::Instant>,
+    deadline: Option<providers::Deadline>,
 ) -> Result<Channel> {
     load_channel_inner(state, tx, id, deadline, true).await
 }
@@ -178,7 +179,7 @@ async fn load_channel_inner(
     state: &AppState,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: Uuid,
-    deadline: Option<std::time::Instant>,
+    deadline: Option<providers::Deadline>,
     refresh: bool,
 ) -> Result<Channel> {
     let row=sqlx::query("SELECT provider,encrypted_credentials,connection_status FROM channels WHERE id=$1 FOR UPDATE").bind(id).fetch_one(&mut **tx).await?;
@@ -209,22 +210,20 @@ async fn load_channel_inner(
             .is_some_and(|t| t < chrono::Utc::now().timestamp() + 300)
     {
         let mut adapter = if let Some(deadline) = deadline {
-            if deadline <= std::time::Instant::now() {
+            if deadline.remaining().is_none() {
                 return Err(ApiError::conflict(
                     "Delivery lease expired before provider setup",
                 ));
             }
-            tokio::time::timeout_at(
-                tokio::time::Instant::from_std(deadline),
-                adapter_for(&channel.app),
-            )
-            .await
-            .map_err(|_| ApiError::conflict("Delivery lease expired during provider setup"))??
+            deadline
+                .run(adapter_for(&channel.app))
+                .await
+                .map_err(|_| ApiError::conflict("Delivery lease expired during provider setup"))??
         } else {
             adapter_for(&channel.app).await?
         };
         if let Some(deadline) = deadline {
-            adapter = adapter.with_monotonic_deadline(deadline);
+            adapter = adapter.with_deadline(deadline);
         }
         match adapter.refresh(&channel.app, &channel.tokens).await {
             Ok(tokens) => {
@@ -334,9 +333,14 @@ pub async fn disconnect(
             "Channel access changed during disconnect; try again",
         ));
     }
-    // Provider HTTP calls have a 60-second timeout. A crashed reply remains uncertain,
-    // never retried automatically; it must not block disconnect forever.
-    sqlx::query("UPDATE provider_replies r SET state='uncertain',error='Reply process stopped; inspect the network before a new reply',updated_at=now() FROM provider_inbox i WHERE i.id=r.inbox_id AND i.channel_id=ANY($1) AND r.state='sending' AND r.delivery_deadline<clock_timestamp()").bind(&affected).execute(&mut *tx).await?;
+    // Expiry alone does not prove the original sender stopped. Never queue a
+    // disconnect behind an active executor or treat its elapsed claim as proof.
+    let reply_inboxes: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT r.inbox_id FROM provider_replies r JOIN provider_inbox i ON i.id=r.inbox_id WHERE i.channel_id=ANY($1) AND r.state IN ('sending','uncertain') ORDER BY r.inbox_id")
+        .bind(&affected).fetch_all(&mut *tx).await?;
+    for inbox in reply_inboxes {
+        crate::provider_bridge::try_reply_execution_tx(&mut tx, inbox).await?;
+    }
+    sqlx::query("UPDATE provider_replies r SET state='uncertain',error='Reply outcome is unknown; ensure the sender has stopped and inspect the network before a new reply',updated_at=clock_timestamp() FROM provider_inbox i WHERE i.id=r.inbox_id AND i.channel_id=ANY($1) AND r.state='sending' AND r.delivery_deadline<clock_timestamp()").bind(&affected).execute(&mut *tx).await?;
     let sending: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM publications WHERE channel_id=ANY($1) AND state='sending') OR EXISTS(SELECT 1 FROM provider_replies r JOIN provider_inbox i ON i.id=r.inbox_id WHERE i.channel_id=ANY($1) AND r.state='sending')",
     )
