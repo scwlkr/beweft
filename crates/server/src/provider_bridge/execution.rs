@@ -195,6 +195,7 @@ async fn fenced_step(
                             | "meta_public"
                             | "meta_legacy_ambiguous"
                             | "fb_reel_public"
+                            | "fb_reel_processing"
                     );
                     if is_public && !is_x {
                         return Ok(Err(providers::error(
@@ -365,6 +366,7 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
         .and_then(|start| start.deadline(std::time::Duration::from_secs(180)));
     let mut completed_managed_checkpoint = false;
     let mut post_started = false;
+    let mut accepted_reel = false;
     for step in 0..48 {
         if overall.and_then(|deadline| deadline.remaining()).is_none() {
             if completed_managed_checkpoint && !post_started {
@@ -381,6 +383,7 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                     || stage.starts_with("linkedin_")
                 {
                     completed_managed_checkpoint = true;
+                    accepted_reel = stage == "fb_reel_processing";
                     post_started = matches!(
                         stage,
                         "x_post_started"
@@ -388,6 +391,7 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                             | "meta_public"
                             | "meta_legacy_ambiguous"
                             | "fb_reel_public"
+                            | "fb_reel_processing"
                             | "linkedin_post_started"
                     );
                     let remaining = overall
@@ -401,6 +405,11 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                         return BridgeOutcome::Continue;
                     }
                 }
+            }
+            Ok(Ok(Step::Wait(next))) if next["stage"] == "fb_reel_processing" => {
+                return BridgeOutcome::Uncertain {
+                    reason: "Facebook accepted the Reel and is still processing it. Check provider status before resolving its outcome.".into(),
+                };
             }
             Ok(Ok(Step::Wait(next)))
                 if next["stage"].as_str().is_some_and(|stage| {
@@ -427,6 +436,12 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                     receipt,
                 };
             }
+            // Once Facebook accepted a public finish, even an authorization,
+            // rate-limit, validation, or status-read rejection cannot prove it
+            // stopped. Keep the existing checkpoint for read-only recovery.
+            Ok(Err(e)) if accepted_reel => {
+                return BridgeOutcome::Uncertain { reason: e.message };
+            }
             Ok(Err(e))
                 if matches!(
                     e.kind,
@@ -436,10 +451,24 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                 return BridgeOutcome::Uncertain { reason: e.message };
             }
             Ok(Err(e)) => return BridgeOutcome::Rejected { reason: e.message },
-            Err(e)
-                if e.1 == "delivery_paused"
-                    && (step == 0 || (completed_managed_checkpoint && !post_started)) =>
-            {
+            Err(e) if e.1 == "delivery_paused" && step == 0 => {
+                // A legacy queued checkpoint may already represent an accepted
+                // public Reel. A pause racing its first claim must not put it
+                // back in the ordinary queue.
+                match super::preparation::checkpoint(state, id).await {
+                    Ok(Some(cp))
+                        if matches!(
+                            cp["stage"].as_str(),
+                            Some("fb_reel_public" | "fb_reel_processing")
+                        ) =>
+                    {
+                        return BridgeOutcome::Uncertain { reason: "The Facebook Reel may already be processing. Inspect its outcome before retrying.".into() };
+                    }
+                    Ok(_) => return BridgeOutcome::Continue,
+                    Err(error) => return BridgeOutcome::Uncertain { reason: error.2 },
+                }
+            }
+            Err(e) if e.1 == "delivery_paused" && completed_managed_checkpoint && !post_started => {
                 return BridgeOutcome::Continue;
             }
             Err(e) => return BridgeOutcome::Uncertain { reason: e.2 },

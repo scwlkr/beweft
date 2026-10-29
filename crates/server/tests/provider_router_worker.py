@@ -138,7 +138,9 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         if path == "/v23.0/me":
             return self.respond({"user_id":"ig-destination", "name":"Fixture Instagram", "username":"fixture"})
         if path == "/v23.0/12345":
-            phase = "not_started" if self.reel_mode in ("uncertain", "blocked") else "complete"
+            if self.reel_mode == "status_403":
+                return self.respond({}, 403)
+            phase = "in_progress" if self.reel_mode == "pending" else "not_started" if self.reel_mode in ("uncertain", "blocked") else "error" if self.reel_mode == "ended" else "complete"
             return self.respond({"id":"12345", "status":{"video_status":"ready" if phase == "complete" else "processing", "uploading_phase":{"status":"complete"}, "processing_phase":{"status":"complete"}, "publishing_phase":{"status":phase,"publish_status":"published"}}})
         if path.startswith("/v23.0/") and path.rsplit("/", 1)[-1].isdigit():
             return self.respond({"status_code":"FINISHED"})
@@ -1019,6 +1021,58 @@ def run():
             reel_brand = request("/brands", {"name":"Reel recovery fixture"})["id"]
             reel_fb = connect("facebook", reel_brand)
             reel_asset = upload(reel_brand, reel_file.read_bytes(), "reel.mp4", "video/mp4")
+            # An accepted public finish remains uncertain while remote processing
+            # continues; it cannot become an ordinary cancelable queue entry.
+            Fixture.reel_mode = "pending"
+            before_pending = Fixture.counts.get("reel_finish", 0)
+            pending_reel = schedule(reel_brand, reel_fb["id"], "Accepted and processing", [reel_asset["id"]], options={"format":"reel"})
+            wait_for(lambda: state_is(pending_reel["id"], "uncertain"), "accepted Facebook Reel processing", seconds=35)
+            assert Fixture.counts["reel_finish"] == before_pending + 1
+            assert sql(f"SELECT count(*) FROM provider_delivery_checkpoints WHERE publication_id='{pending_reel['id']}'") == "1"
+            pending_status = request(f"/publications/{pending_reel['id']}/provider-status")["meta_delivery"]
+            assert pending_status["phase"] == "post_started" and not pending_status["retry_allowed"]
+            assert "remote operation definitively failed" in pending_status["reason"]
+            request(f"/publications/{pending_reel['id']}/cancel", {}, expected=409)
+            future = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=10)).isoformat(timespec="microseconds")
+            request(f"/publications/{pending_reel['id']}/reschedule", {"scheduled_at":future}, expected=409)
+            request(f"/publications/{pending_reel['id']}/replace", {"post_version":1, "publication_post_version":1, "scheduled_at":pending_reel["scheduled_at"]}, expected=409)
+            request(f"/channels/{reel_fb['id']}", {"paused":True}, "PATCH")
+            assert publication(pending_reel["id"])["state"] == "uncertain"
+            assert request(f"/publications/{pending_reel['id']}/provider-status")["meta_delivery"] == pending_status
+            assert request(f"/publications/{pending_reel['id']}/provider-reconcile", {})["state"] == "uncertain"
+            assert Fixture.counts["reel_finish"] == before_pending + 1
+            # Simulate an old queued checkpoint/replaced claim: the new worker
+            # must quarantine it without issuing another public finish.
+            sql(f"UPDATE publications SET state='queued' WHERE id='{pending_reel['id']}'; UPDATE provider_delivery_checkpoints SET not_before=NULL WHERE publication_id='{pending_reel['id']}'")
+            sql("CREATE FUNCTION fixture_pause_reel_claim() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+                f"IF NEW.publication_id='{pending_reel['id']}' THEN UPDATE channels SET paused=true WHERE id='{reel_fb['id']}'; END IF; "
+                "RETURN NEW; END $$; CREATE TRIGGER fixture_pause_reel_claim BEFORE INSERT ON publication_attempts "
+                "FOR EACH ROW EXECUTE FUNCTION fixture_pause_reel_claim()")
+            request(f"/channels/{reel_fb['id']}", {"paused":False}, "PATCH")
+            wait_for(lambda: state_is(pending_reel["id"], "uncertain"), "paused restarted Reel quarantined", seconds=20)
+            assert sql(f"SELECT paused FROM channels WHERE id='{reel_fb['id']}'") == "t"
+            assert Fixture.counts["reel_finish"] == before_pending + 1
+            assert request(f"/publications/{pending_reel['id']}/provider-status")["meta_delivery"]["attempt_id"] == pending_status["attempt_id"]
+            sql("DROP TRIGGER fixture_pause_reel_claim ON publication_attempts; DROP FUNCTION fixture_pause_reel_claim()")
+            request(f"/channels/{reel_fb['id']}", {"paused":False}, "PATCH")
+            Fixture.reel_mode = "success"
+            reconciled_reel = request(f"/publications/{pending_reel['id']}/provider-reconcile", {})
+            assert reconciled_reel["state"] == "published" and reconciled_reel["external_id"] == "12345"
+            assert Fixture.counts["reel_finish"] == before_pending + 1
+
+            # A rejected status read after acceptance is still an unknown public outcome.
+            error_brand = request("/brands", {"name":"Reel status error fixture"})["id"]
+            error_fb = connect("facebook", error_brand)
+            error_asset = upload(error_brand, reel_file.read_bytes(), "reel.mp4", "video/mp4")
+            Fixture.reel_mode = "status_403"
+            before_error = Fixture.counts["reel_finish"]
+            error_reel = schedule(error_brand, error_fb["id"], "Status rejected", [error_asset["id"]], options={"format":"reel"})
+            wait_for(lambda: state_is(error_reel["id"], "uncertain"), "accepted Reel status rejected", seconds=35)
+            assert Fixture.counts["reel_finish"] == before_error + 1
+            assert request(f"/publications/{error_reel['id']}/provider-status")["meta_delivery"]["phase"] == "post_started"
+            request(f"/publications/{error_reel['id']}/cancel", {}, expected=409)
+            Fixture.reel_mode = "success"
+
             reel_before = Fixture.counts.get("reel_finish", 0)
             published_reel = schedule(reel_brand, reel_fb["id"], "A Reel", [reel_asset["id"]], options={"format":"reel"})
             wait_for(lambda: state_is(published_reel["id"], "published"), "Facebook Reel receipt", seconds=35)
@@ -1033,7 +1087,8 @@ def run():
             assert observed["phase"] == "post_started" and not observed["retry_allowed"]
             writes = Fixture.counts["reel_finish"]
             request(f"/publications/{uncertain_reel['id']}/retry", {}, expected=409)
-            resolution = {"resolution":"not_published", "note":"Fixture inspected", "observed_attempt_id":observed["attempt_id"],
+            Fixture.reel_mode = "ended"
+            resolution = {"resolution":"not_published", "note":"Fixture confirmed remote operation ended", "observed_attempt_id":observed["attempt_id"],
                           "observed_checkpoint_id":observed["checkpoint_id"], "sender_stopped":True, "provider_inspected":True}
             request(f"/publications/{uncertain_reel['id']}/reconcile", {**resolution,"sender_stopped":False}, expected=409)
             request(f"/publications/{uncertain_reel['id']}/reconcile", {**resolution,"observed_checkpoint_id":str(uuid.uuid4())}, expected=409)
@@ -1330,6 +1385,21 @@ def run():
             assert request("/connections/facebook/removal-status")["revocation_id"] == orphan
             request("/connections/facebook/acknowledge-revocation", {"access_removed":True,"revocation_id":orphan})
             assert not any("revoke" in key for key in Fixture.counts), Fixture.counts
+
+            # Disconnect may remove local credentials, but it must retain the
+            # uncertain publication and its public checkpoint for recovery.
+            request("/provider-apps/facebook", {"client_id":"facebook-client", "client_secret":"fixture-secret"}, "PUT")
+            reel_fb = connect("facebook", reel_brand, reel_fb["id"])
+            Fixture.reel_mode = "pending"
+            before_disconnect = Fixture.counts["reel_finish"]
+            disconnected_reel = schedule(reel_brand, reel_fb["id"], "Pending before disconnect", [reel_asset["id"]], options={"format":"reel"})
+            wait_for(lambda: state_is(disconnected_reel["id"], "uncertain"), "Reel pending before disconnect", seconds=35)
+            before_checkpoint = request(f"/publications/{disconnected_reel['id']}/provider-status")["meta_delivery"]
+            disconnected = request(f"/channels/{reel_fb['id']}/disconnect", {"confirm_shared_impact":True})
+            assert disconnected["disconnected"] is True
+            assert publication(disconnected_reel["id"])["state"] == "uncertain"
+            assert request(f"/publications/{disconnected_reel['id']}/provider-status")["meta_delivery"] == before_checkpoint
+            assert Fixture.counts["reel_finish"] == before_disconnect + 1
             print("PASS production router, OAuth, worker receipts, media capability, observations, replies, recovery and revocation fences")
         finally:
             if locker is not None:

@@ -397,6 +397,10 @@ pub async fn provider_status(
             let retry_allowed = current == "failed" && (!public || meta_attested(cp, attempt, checkpoint));
             let reason = if current == "published" {
                 "A publication is recorded; this delivery cannot be retried."
+            } else if provider == "facebook" && public && retry_allowed {
+                "Retry starts a fresh session. Only retry after confirming Facebook's original operation definitively failed, stopped, or was canceled; an absent post or stopped local sender alone is not proof."
+            } else if provider == "facebook" && public && ["uncertain", "failed"].contains(&current.as_str()) {
+                "Stop the local sender and inspect Facebook. Record not-published only after confirming the remote operation definitively failed, stopped, or was canceled; an absent post or stopped local sender alone is not proof."
             } else if retry_allowed {
                 "An explicit retry starts a fresh provider session and retains the earlier checkpoint in the audit record."
             } else if ["uncertain", "failed"].contains(&current.as_str()) {
