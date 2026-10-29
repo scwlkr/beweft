@@ -72,8 +72,10 @@ that an in-flight request did not commit.
 
 For known API rejection codes, the CLI and MCP return fixed guidance such as a
 text limit or missing posting schedule. They never display remote error messages
-or unknown codes, which could contain private data. An unrecognized write error
-still requires checking authoritative state before retrying.
+or unknown codes, which could contain private data. An authentication error on
+a write, like an unrecognized write error, requires checking authoritative state
+before retrying; authentication can fail after a change has committed. For list
+query errors, use an integer `limit` from 1 to 10.
 
 ## MCP configuration
 

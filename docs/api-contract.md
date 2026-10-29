@@ -4,8 +4,9 @@ Additional implemented content and account workflows are specified in [workflows
 
 Base `/api/v1`. Success `{ "data": ... }`; failure `{ "error": { "code": "...", "message": "..." } }`. Lists return arrays in `data`. IDs are UUID strings; timestamps RFC3339 UTC. JSON requests set `Content-Type: application/json` and `X-Beweft-Request: 1`. Browser calls use cookie credentials. State-changing browser requests must have matching Origin when present; authenticated cookie mutations require the custom header. All endpoints except auth/status, auth/bootstrap and auth/login need authentication. API tokens use `Authorization: Bearer ...`. Read APIs accept valid tokens except token management; writes need the listed scope. Token listing/creation/revocation and logout require an owner cookie session and reject bearer tokens, including admin tokens. Tokens may restrict `brand_ids`; UI sessions have all owner access.
 
-The following stable codes identify correctable rejections. The indicated
-validation happens before a durable change, or its transaction is rolled back:
+The following stable codes identify correctable rejections. They leave no
+committed post, media record or publication from the rejected request. An
+upload's temporary reservation and partial file are cleaned up asynchronously:
 
 | HTTP | Code | Meaning |
 | --- | --- | --- |
@@ -15,17 +16,21 @@ validation happens before a durable change, or its transaction is rolled back:
 | 409 | `posting_slots_unavailable` | No posting-rule slot is free in the next 60 days. |
 | 409 | `post_version_conflict` | The submitted post version is stale. |
 | 400 | `invalid_cursor` | A list cursor is malformed or incompatible with its filters or scope. |
-| 400 | `invalid_page_limit` | The list limit is outside 1–10. |
+| 400 | `invalid_page_limit` | A parsed unsigned 32-bit list limit is outside 1–10. |
 
 Existing `unauthorized` (401) and `forbidden` (403) codes indicate authentication
-or access denial. Other failures retain their existing codes. A transport
-failure, interrupted response or unknown error after a write does not establish
-its outcome.
+or access denial. A 401 after a write does not always establish its outcome:
+bootstrap can create the owner before session creation fails. Other failures
+retain their existing codes. A transport failure, interrupted response or unknown
+error after a write likewise does not establish its outcome.
 
 ## Bounded list inspection
 
-GET `/posts`, `/media`, and `/publications` accept optional `limit` (1–10) and
-`cursor`. A request with `limit` returns `{data:[...],next_cursor:string|null}`;
+GET `/posts`, `/media`, and `/publications` accept optional `limit` (an integer
+from 1 to 10) and `cursor`. Parsed unsigned 32-bit limits outside that range
+return `invalid_page_limit`; malformed, negative, or greater-than-4294967295
+query values return `invalid_request` instead. Use an integer from 1 to 10 for
+either error. A request with `limit` returns `{data:[...],next_cursor:string|null}`;
 the cursor is null on the last page. Supply the returned cursor with a limit and
 the same route, filters, view, and authorized brand scope. Malformed or
 incompatible cursors return 400. A cursor is opaque and limited to 2048

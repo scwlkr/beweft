@@ -8,6 +8,7 @@ removes that database and its temporary files on exit. No worker or provider is 
 """
 import base64
 import datetime as dt
+import hashlib
 import http.client
 import http.cookiejar
 import http.server
@@ -48,6 +49,12 @@ def stop(process):
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=10)
+
+
+def sql(statement):
+    subprocess.run(["docker", "exec", "-i", CONTAINER, "psql", "-U", DB_USER,
+                    "-d", DB, "-v", "ON_ERROR_STOP=1"], input=statement,
+                   text=True, capture_output=True, check=True)
 
 
 def cli(env, *args, body=None, success=True):
@@ -284,7 +291,18 @@ def reflected_error_test(env):
         thread.join(timeout=5)
 
 
-def actionable_errors_test(env, read_env, call, brand, channel, upload_root):
+def wait_for_upload_cleanup(call, media_dir, before, existing_files):
+    for _ in range(100):
+        limits = call("/media/limits")
+        if (limits["reserved_bytes"] == before["reserved_bytes"]
+                and limits["used_bytes"] == before["used_bytes"]
+                and set(media_dir.iterdir()) == existing_files):
+            return
+        time.sleep(0.05)
+    raise AssertionError("Upload reservation or temporary file was not cleaned up")
+
+
+def actionable_errors_test(env, read_env, call, brand, channel, upload_root, media_dir):
     """Real API rejections produce fixed, useful CLI and MCP guidance."""
     mcp = Mcp(env)
     restricted = Mcp(read_env)
@@ -301,10 +319,12 @@ def actionable_errors_test(env, read_env, call, brand, channel, upload_root):
         bad_file.write_bytes(b"x" * 64)
         upload = {"brand_id": brand, "path": str(bad_file)}
         before = call("/media/limits")
-        for error in (cli(env, "media-upload", "--json", "-", body=upload, success=False), mcp.call("media_upload", upload, error=True)):
+        existing_files = set(media_dir.iterdir())
+        for upload_call in (lambda: cli(env, "media-upload", "--json", "-", body=upload, success=False),
+                            lambda: mcp.call("media_upload", upload, error=True)):
+            error = upload_call()
             assert "HTTP 400" in error and "JPEG" in error and "MP4" in error and "outcome may be unknown" not in error
-        after = call("/media/limits")
-        assert after["used_bytes"] == before["used_bytes"] and after["reserved_bytes"] == before["reserved_bytes"]
+            wait_for_upload_cleanup(call, media_dir, before, existing_files)
 
         post = call("/posts", {"brand_id": brand, "text": "Needs posting rule"})
         schedule = {"id": post["id"], "intent": "queue", "body": {"version": post["version"], "channel_ids": [channel]}}
@@ -336,7 +356,56 @@ def actionable_errors_test(env, read_env, call, brand, channel, upload_root):
         restricted.close()
 
 
-def chunked_preflight_test(env, origin, call, brand, media_dir):
+def large_unsupported_upload_test(env, call, brand, upload_root, media_dir):
+    """Large invalid streams reject cleanly; a valid stream round-trips byte for byte."""
+    path = upload_root / "unsupported-large.bin"
+    with path.open("wb") as file:
+        file.truncate(64 * 1024 * 1024)
+    before = call("/media/limits")
+    existing_files = set(media_dir.iterdir())
+    media_ids = {row["id"] for row in call("/media")}
+    upload = {"brand_id": brand, "path": str(path)}
+    mcp = Mcp(env)
+    try:
+        mcp.initialize()
+        for _ in range(5):
+            for upload_call in (lambda: cli(env, "media-upload", "--json", "-", body=upload, success=False),
+                                lambda: mcp.call("media_upload", upload, error=True)):
+                error = upload_call()
+                assert "HTTP 400" in error and "JPEG" in error and "MP4" in error, error
+                assert "outcome may be unknown" not in error.lower(), error
+                wait_for_upload_cleanup(call, media_dir, before, existing_files)
+                assert {row["id"] for row in call("/media")} == media_ids
+
+        # Reuse the sparse fixture, changing only its signature. Verify every
+        # byte returned by the authenticated file endpoint, then delete it.
+        with path.open("r+b") as file:
+            file.write(b"\x00\x00\x00\x18ftypisom")
+        uploaded = cli(env, "media-upload", "--json", "-", body=upload)["data"]
+        assert uploaded["size"] == 64 * 1024 * 1024
+        expected = hashlib.sha256()
+        with path.open("rb") as file:
+            while chunk := file.read(65536):
+                expected.update(chunk)
+        actual = hashlib.sha256()
+        request = urllib.request.Request(env["BEWEFT_URL"] + uploaded["url"],
+                                         headers={"Authorization": "Bearer " + env["BEWEFT_TOKEN"]})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            while chunk := response.read(65536):
+                actual.update(chunk)
+        assert actual.digest() == expected.digest()
+        request = urllib.request.Request(env["BEWEFT_URL"] + "/api/v1/media/" + uploaded["id"],
+                                         headers={"Authorization": "Bearer " + env["BEWEFT_TOKEN"]}, method="DELETE")
+        with urllib.request.urlopen(request, timeout=10) as response:
+            assert response.status == 200
+        wait_for_upload_cleanup(call, media_dir, before, existing_files)
+        assert {row["id"] for row in call("/media")} == media_ids
+    finally:
+        mcp.close()
+        path.unlink()
+
+
+def chunked_stream_test(env, origin, call, brand, media_dir):
     """Split a slow chunked signature, then verify admission, bytes and cleanup."""
     image = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII=")
     prefix = b'--preflight-fixture\r\nContent-Disposition: form-data; name="file"; filename="split.png"\r\nContent-Type: image/png\r\n\r\n'
@@ -344,6 +413,7 @@ def chunked_preflight_test(env, origin, call, brand, media_dir):
     url = origin + "/api/v1/media?brand_id=" + brand
     headers = {"Authorization": "Bearer " + env["BEWEFT_TOKEN"], "Content-Type": "multipart/form-data; boundary=preflight-fixture"}
     before = call("/media/limits")
+    existing_files = set(media_dir.iterdir())
     empty = urllib.request.Request(url, data=prefix + suffix, headers=headers)
     try:
         urllib.request.urlopen(empty, timeout=10)
@@ -351,8 +421,7 @@ def chunked_preflight_test(env, origin, call, brand, media_dir):
     except urllib.error.HTTPError as error:
         assert error.code == 400
         assert json.load(error)["error"]["code"] == "invalid_request"
-    assert call("/media/limits")["reserved_bytes"] == before["reserved_bytes"]
-    assert not list(media_dir.iterdir())
+    wait_for_upload_cleanup(call, media_dir, before, existing_files)
 
     port = int(origin.rsplit(":", 1)[1])
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
@@ -366,16 +435,13 @@ def chunked_preflight_test(env, origin, call, brand, media_dir):
             connection.send(f"{len(data):x}\r\n".encode() + data + b"\r\n")
         send(prefix)
         send(image[:3])
-        time.sleep(0.2)
-        assert call("/media/limits")["reserved_bytes"] == before["reserved_bytes"]
-        assert not list(media_dir.iterdir())
-        send(image[3:32])
         for _ in range(100):
             if call("/media/limits")["reserved_bytes"] > before["reserved_bytes"]:
                 break
             time.sleep(0.05)
         else:
-            raise AssertionError("Chunked upload did not reserve quota after signature")
+            raise AssertionError("Chunked upload did not reserve quota")
+        send(image[3:32])
         send(image[32:])
         send(suffix)
         connection.send(b"0\r\n\r\n")
@@ -390,9 +456,85 @@ def chunked_preflight_test(env, origin, call, brand, media_dir):
     request = urllib.request.Request(origin + "/api/v1/media/" + uploaded["id"], headers={"Authorization": headers["Authorization"]}, method="DELETE")
     with urllib.request.urlopen(request, timeout=10) as response:
         assert response.status == 200
-    after = call("/media/limits")
-    assert after["reserved_bytes"] == before["reserved_bytes"] and after["used_bytes"] == before["used_bytes"]
-    assert not list(media_dir.iterdir())
+    wait_for_upload_cleanup(call, media_dir, before, existing_files)
+
+
+def bootstrap_commit_401_test(env, setup_secret, call):
+    """Force the committed-owner/session-creation race in an isolated database."""
+    sql("""
+        CREATE FUNCTION cli_bootstrap_hash_change() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.email = 'bootstrap-race@example.invalid' THEN
+                UPDATE owners SET password_hash = 'isolated-changed-hash' WHERE id = NEW.id;
+            END IF;
+            RETURN NEW;
+        END $$;
+        CREATE TRIGGER cli_bootstrap_hash_change AFTER INSERT ON owners
+        FOR EACH ROW EXECUTE FUNCTION cli_bootstrap_hash_change();
+    """)
+    try:
+        body = {"setup_secret": setup_secret, "email": "bootstrap-race@example.invalid",
+                "password": "Isolated-bootstrap-password!"}
+        error = cli(env, "api", "POST", "/auth/bootstrap", "--json", "-", body=body, success=False)
+        assert "HTTP 401" in error and "credentials" in error.lower(), error
+        assert "outcome may be unknown" in error.lower() and "authoritative state" in error.lower(), error
+        assert "token was rejected" not in error.lower(), error
+        assert call("/auth/status")["initialized"] is True
+    finally:
+        # This database is created exclusively for this integration run.
+        sql("DROP TRIGGER cli_bootstrap_hash_change ON owners; DROP FUNCTION cli_bootstrap_hash_change(); DELETE FROM owners;")
+    assert call("/auth/status")["initialized"] is False
+
+
+def auth_error_test(env, brand):
+    """401 may be a password failure or an invalid bearer, and writes remain uncertain."""
+    login = {"email": "cli@example.invalid", "password": "wrong-isolated-password"}
+    error = cli(env, "api", "POST", "/auth/login", "--json", "-", body=login, success=False)
+    assert "HTTP 401" in error and "credentials" in error.lower(), error
+    assert "outcome may be unknown" in error.lower() and "authoritative state" in error.lower(), error
+    assert "token was rejected" not in error.lower(), error
+    invalid_env = dict(env, BEWEFT_TOKEN="isolated-invalid-token")
+    read_error = cli(invalid_env, "brands", success=False)
+    assert "HTTP 401" in read_error and "credentials" in read_error.lower(), read_error
+    assert "outcome may be unknown" not in read_error.lower(), read_error
+    mcp = Mcp(invalid_env)
+    try:
+        mcp.initialize()
+        read_error = mcp.call("brands", error=True)
+        write_error = mcp.call("draft_create", {"body": {"brand_id": brand, "text": "rejected"}}, error=True)
+        assert "HTTP 401" in read_error and "credentials" in read_error.lower(), read_error
+        assert "outcome may be unknown" not in read_error.lower(), read_error
+        assert "HTTP 401" in write_error and "credentials" in write_error.lower(), write_error
+        assert "outcome may be unknown" in write_error.lower() and "authoritative state" in write_error.lower(), write_error
+        assert "token was rejected" not in write_error.lower(), write_error
+    finally:
+        mcp.close()
+
+
+def page_limit_error_test(env, origin):
+    """Check deserialization errors, parsed range errors and local guidance."""
+    cases = [("-1", "invalid_request"), ("4294967296", "invalid_request"),
+             ("abc", "invalid_request"), ("0", "invalid_page_limit"),
+             ("11", "invalid_page_limit"), ("4294967295", "invalid_page_limit")]
+    for route in ("posts", "media", "publications"):
+        for value, expected in cases:
+            request = urllib.request.Request(origin + "/api/v1/" + route + "?limit=" + value,
+                                             headers={"Authorization": "Bearer " + env["BEWEFT_TOKEN"]})
+            try:
+                urllib.request.urlopen(request, timeout=10)
+                raise AssertionError(f"{route} accepted limit={value}")
+            except urllib.error.HTTPError as error:
+                assert error.code == 400 and json.load(error)["error"]["code"] == expected
+    mcp = Mcp(env)
+    try:
+        mcp.initialize()
+        for limit in (-1, 0, 11, 4294967296):
+            args = {"limit": limit}
+            for error in (cli(env, "drafts", "--json", "-", body=args, success=False),
+                          mcp.call("drafts", args, error=True)):
+                assert "limit must be between 1 and 10" in error, error
+    finally:
+        mcp.close()
 
 
 def lost_response_test(env, origin, brand):
@@ -679,6 +821,8 @@ def run(temporary):
                 time.sleep(0.1)
         else:
             raise AssertionError("Isolated API did not start")
+        bootstrap_env = dict(clean_env, BEWEFT_URL=origin, BEWEFT_TOKEN="isolated-bootstrap-token")
+        bootstrap_commit_401_test(bootstrap_env, server_env["BEWEFT_SETUP_SECRET"], call)
         call("/auth/bootstrap", {"setup_secret": server_env["BEWEFT_SETUP_SECRET"], "email": "cli@example.invalid", "password": "Isolated-cli-password!"})
         brand = call("/brands", {"name": "CLI fixture"})
         other = call("/brands", {"name": "Outside scope"})
@@ -690,6 +834,8 @@ def run(temporary):
         env = dict(clean_env, BEWEFT_URL=origin, BEWEFT_TOKEN=write,
                    BEWEFT_UPLOAD_ROOT=str(upload_root), BEWEFT_MCP_CALLS_PER_MINUTE="120")
         read_env = dict(env, BEWEFT_TOKEN=read)
+        auth_error_test(env, brand["id"])
+        page_limit_error_test(env, origin)
         assert [item["id"] for item in cli(read_env, "brands")["data"]] == [brand["id"]]
         assert "403" in cli(read_env, "draft-create", "--json", "-", body={"body": {"brand_id": brand["id"], "text": "denied"}}, success=False)
         assert "HTTP 422" in cli(env, "draft-create", "--json", "-", body={"body": {"brand_id": brand["id"], "text": 123}}, success=False)
@@ -709,9 +855,10 @@ def run(temporary):
         token_file.chmod(0o600)
         assert cli(file_env, "brands")["data"][0]["id"] == brand["id"]
         assert "only one" in cli(dict(file_env, BEWEFT_TOKEN=write), "brands", success=False)
-        actionable_errors_test(env, read_env, call, brand["id"], channel["id"], upload_root)
+        actionable_errors_test(env, read_env, call, brand["id"], channel["id"], upload_root, media)
+        large_unsupported_upload_test(env, call, brand["id"], upload_root, media)
         reflected_error_test(env)
-        chunked_preflight_test(env, origin, call, brand["id"], media)
+        chunked_stream_test(env, origin, call, brand["id"], media)
         created = cli(env, "draft-create", "--json", "-", body={"body": {"brand_id": brand["id"], "text": "CLI draft", "options": {"source": "fixture"}, "variants": [{"channel_id": channel["id"], "text": "fixture variant"}]}})["data"]
         assert created["status"] == "draft" and not cli(env, "queue")["data"]
         summary = cli(env, "drafts")["data"][0]
@@ -815,7 +962,7 @@ def run(temporary):
         race_test(env, upload_root, temp / "race-secret", brand["id"])
         pagination_test(env, dict(env, BEWEFT_TOKEN=unrestricted), call, brand["id"], other["id"], channel["id"])
         request_bounds_test(env, call, brand["id"], channel["id"])
-        print("PASS: isolated API CLI/MCP, actionable redacted errors, schedule rollback, split chunked/empty uploads, lost-response recovery, scoped pagination, 50-channel compact scheduling, bounded escaped envelopes and upload confinement")
+        print("PASS: isolated API CLI/MCP, post-commit 401 and redacted guidance, 10 large rejected uploads with cleanup, limit errors, schedule rollback, split chunked/empty uploads, lost-response recovery, scoped pagination, 50-channel compact scheduling, bounded escaped envelopes and upload confinement")
     finally:
         stop(server)
 

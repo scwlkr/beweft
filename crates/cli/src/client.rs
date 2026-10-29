@@ -34,7 +34,7 @@ fn known_guidance(status: u16, bytes: &[u8]) -> Option<&'static str> {
         ),
         (400, "invalid_page_limit") => Some("Use a page limit from 1 to 10."),
         (401, "unauthorized") => {
-            Some("The token was rejected. Check whether it is valid or revoked.")
+            Some("Authentication failed. Check the credentials required for this request.")
         }
         (403, "forbidden") => Some(
             "Access is denied. Check token scopes, authorized brands, and whether an owner session is required.",
@@ -193,6 +193,14 @@ impl Api {
         }
         if !status.is_success() {
             if let Some(guidance) = known_guidance(status.as_u16(), &bytes) {
+                // Authentication can fail after an auth mutation has committed
+                // (for example, bootstrap before session creation). A 401 is
+                // therefore not proof that every write was rejected.
+                if is_write && status.as_u16() == 401 {
+                    bail!(
+                        "API returned HTTP 401: {guidance} Outcome may be unknown. Inspect authoritative state before retrying a write"
+                    );
+                }
                 bail!("API returned HTTP {}: {guidance}", status.as_u16());
             }
             if is_write {

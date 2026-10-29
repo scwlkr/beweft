@@ -127,43 +127,6 @@ async fn receive_upload(
             .filter(|c| !c.is_control() && *c != '/' && *c != '\\')
             .take(200)
             .collect::<String>();
-        // Every supported signature fits within 12 bytes. Check it before
-        // reserving quota or creating a file so this coded rejection has not
-        // committed any upload state. Keep received chunks for streaming.
-        let mut prefix = Vec::with_capacity(12);
-        let mut initial = Vec::new();
-        let mut initial_size = 0u64;
-        while prefix.len() < 12 {
-            let Some(chunk) = field
-                .chunk()
-                .await
-                .map_err(|_| ApiError::bad("Upload exceeds the size limit or is incomplete"))?
-            else {
-                break;
-            };
-            if chunk.is_empty() {
-                continue;
-            }
-            initial_size = initial_size.saturating_add(chunk.len() as u64);
-            if initial_size > reserved {
-                return Err(ApiError::bad(format!(
-                    "Upload exceeds its declared length or the {}-byte limit",
-                    state.config.max_upload_bytes
-                )));
-            }
-            let sample = (12 - prefix.len()).min(chunk.len());
-            prefix.extend_from_slice(&chunk[..sample]);
-            initial.push(chunk);
-        }
-        if initial_size == 0 {
-            return Err(ApiError::bad("Upload must not be empty"));
-        }
-        let mime = detect(&prefix).ok_or_else(|| {
-            ApiError::bad_code(
-                "unsupported_media_type",
-                "Only JPEG, PNG, GIF, WebP, MP4 and WebM are supported",
-            )
-        })?;
         let id = Uuid::new_v4();
         let key = format!("{id}.bin");
         let mut guard = crate::media_storage::reserve(state, id, reserved).await?;
@@ -175,18 +138,12 @@ async fn receive_upload(
             .await
             .map_err(ApiError::internal)?;
         let mut size = 0u64;
-        let mut initial = initial.into_iter();
-        loop {
-            let chunk =
-                match initial.next() {
-                    Some(chunk) => chunk,
-                    None => match field.chunk().await.map_err(|_| {
-                        ApiError::bad("Upload exceeds the size limit or is incomplete")
-                    })? {
-                        Some(chunk) => chunk,
-                        None => break,
-                    },
-                };
+        let mut prefix = Vec::with_capacity(12);
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|_| ApiError::bad("Upload exceeds the size limit or is incomplete"))?
+        {
             size = size.saturating_add(chunk.len() as u64);
             if size > reserved {
                 return Err(ApiError::bad(format!(
@@ -194,8 +151,22 @@ async fn receive_upload(
                     state.config.max_upload_bytes
                 )));
             }
+            let sample = (12 - prefix.len()).min(chunk.len());
+            prefix.extend_from_slice(&chunk[..sample]);
             file.write_all(&chunk).await.map_err(ApiError::internal)?;
         }
+        if size == 0 {
+            return Err(ApiError::bad("Upload must not be empty"));
+        }
+        // Consume the whole bounded field before rejecting its signature, so
+        // a streaming client can finish sending and receive this response.
+        // The upload guard cleans the reservation and temporary file on error.
+        let mime = detect(&prefix).ok_or_else(|| {
+            ApiError::bad_code(
+                "unsupported_media_type",
+                "Only JPEG, PNG, GIF, WebP, MP4 and WebM are supported",
+            )
+        })?;
         file.sync_all().await.map_err(ApiError::internal)?;
         drop(file);
         let mut tx = state.db.begin().await?;
