@@ -1,5 +1,8 @@
 use super::*;
 pub fn validate(provider: &str, p: &Publication) -> Result<()> {
+    if provider != "x" && p.options.get("x_thread").is_some() {
+        return Err(invalid("X thread options are only supported on X channels"));
+    }
     if p.text.trim().is_empty() && p.media.is_empty() {
         return Err(invalid("Post needs text or media"));
     }
@@ -42,6 +45,7 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
     match provider {
         "x" => {
             post_limit(p, 280)?;
+            x::x_thread_replies(p)?;
             if p.media.len() > 4
                 || p.media.iter().any(|m| !image(m) && m.mime != "video/mp4")
                 || p.options

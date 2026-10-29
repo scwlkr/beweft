@@ -32,6 +32,12 @@ impl ScheduleFormatValidator {
                 .bind(brand)
                 .fetch_one(&mut **tx)
                 .await?;
+        if provider != "x" && payload["options"].get("x_thread").is_some() {
+            return Err(ApiError::bad_code(
+                "provider_format_invalid",
+                "X thread options are only supported on X channels",
+            ));
+        }
         if !providers::known(&provider) {
             // Manual, fixture and legacy unknown channels keep their existing behavior.
             if payload["text"].as_str().unwrap_or("").trim().is_empty()

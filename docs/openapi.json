@@ -1547,6 +1547,20 @@
           "session_expired": {
             "type": "boolean"
           },
+          "x_thread": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/XThreadStatus"
+              }
+            ]
+          },
+          "x_thread_retry_allowed": {
+            "description": "True only after an explicitly authorized X thread reset with no later attempt.",
+            "type": "boolean"
+          },
           "x_upload": {
             "oneOf": [
               {
@@ -1563,6 +1577,8 @@
           "reset_allowed",
           "reason",
           "x_upload",
+          "x_thread",
+          "x_thread_retry_allowed",
           "meta_delivery",
           "linkedin_delivery"
         ],
@@ -1923,6 +1939,16 @@
           "sender_stopped": {
             "type": [
               "boolean",
+              "null"
+            ]
+          },
+          "thread_ids": {
+            "description": "Complete ordered X post IDs for owner-attested thread completion.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
               "null"
             ]
           }
@@ -2895,6 +2921,64 @@
           "scheduled",
           "published",
           "attention"
+        ],
+        "type": "object"
+      },
+      "XThreadPhase": {
+        "enum": [
+          "preparing",
+          "ready",
+          "request_started",
+          "complete"
+        ],
+        "type": "string"
+      },
+      "XThreadStatus": {
+        "properties": {
+          "attempt_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "checkpoint_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "confirmed_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "next_index": {
+            "description": "Zero-based index of the first unconfirmed segment.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/XThreadPhase"
+          },
+          "remaining_texts": {
+            "description": "Unconfirmed does not mean unsent; the first may already exist on X.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "total": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "phase",
+          "confirmed_ids",
+          "next_index",
+          "total",
+          "remaining_texts",
+          "attempt_id",
+          "checkpoint_id"
         ],
         "type": "object"
       },

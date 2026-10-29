@@ -371,6 +371,9 @@ pub struct ReconcileRequest {
     pub sender_stopped: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_inspected: Option<bool>,
+    /// Complete ordered X post IDs for owner-attested thread completion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_ids: Option<Vec<String>>,
 }
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]

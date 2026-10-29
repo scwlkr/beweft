@@ -109,6 +109,10 @@ async fn provider_fetches_committed_media_during_post(h: &Harness) {
     h.app("facebook", "fb-client", None).await;
     let channel = h.channel("facebook").await;
     let id = h.publication(channel, "unused").await;
+    // The shared publication helper seeds a YouTube upload checkpoint. A new
+    // Facebook post has no such checkpoint and must not inherit another provider's session.
+    sqlx::query("DELETE FROM provider_delivery_checkpoints WHERE publication_id=$1")
+        .bind(id).execute(&h.state.db).await.unwrap();
     let attempt = Uuid::new_v4();
     let media: Value =
         sqlx::query_scalar("SELECT payload->'media_ids' FROM publications WHERE id=$1")

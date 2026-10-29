@@ -87,6 +87,8 @@ use serde_json::{Value, json};
         MetaDeliveryStatus,
         XUploadStatus,
         XUploadPhase,
+        XThreadStatus,
+        XThreadPhase,
         ProviderReconcilePending,
         ResetExpiredSessionResult,
         IdeaStatus,

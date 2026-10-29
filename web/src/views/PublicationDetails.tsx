@@ -85,6 +85,9 @@ export function PublicationDetails({
       p.provider,
     ),
   );
+  const xThread =
+    p.provider === "x" && p.payload.options?.x_thread !== undefined;
+  const [xThreadCancelAllowed, setXThreadCancelAllowed] = useState(false);
   const [copyStatus, setCopyStatus] = useState("");
   const [url, setUrl] = useState("");
   const [note, setNote] = useState("");
@@ -354,6 +357,7 @@ export function PublicationDetails({
           <XRecovery
             publication={p}
             onRetryAllowed={setRetryAllowed}
+            onCancelAllowed={setXThreadCancelAllowed}
             action={action}
             pending={pending}
           />
@@ -378,15 +382,16 @@ export function PublicationDetails({
             Retry publication
           </Button>
         )}
-        {["queued", "manual_required", "failed"].includes(p.state) && (
-          <Button
-            variant="destructive"
-            disabled={pending}
-            onClick={() => void perform("cancel", {}, "Publication canceled")}
-          >
-            Cancel publication
-          </Button>
-        )}
+        {["queued", "manual_required", "failed"].includes(p.state) &&
+          (!xThread || p.state === "queued" || xThreadCancelAllowed) && (
+            <Button
+              variant="destructive"
+              disabled={pending}
+              onClick={() => void perform("cancel", {}, "Publication canceled")}
+            >
+              Cancel publication
+            </Button>
+          )}
         <AttemptHistory attempts={attempts} error={attemptError} />
       </div>
     </Dialog>

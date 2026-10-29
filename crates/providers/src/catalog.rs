@@ -15,12 +15,12 @@ pub fn capabilities() -> Vec<Capabilities> {
         Capabilities {
             id: "x",
             name: "X",
-            formats: &["text", "image", "video"],
+            formats: &["text", "image", "video", "thread"],
             oauth: true,
             analytics: true,
             inbox: false,
             reply: false,
-            reason: "Paid API access may be required. Video uses a checkpointed upload; threads are not yet implemented.",
+            reason: "Paid API access may be required. Text-only thread replies depend on account and plan eligibility.",
         },
         Capabilities {
             id: "youtube",

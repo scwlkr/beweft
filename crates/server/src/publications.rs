@@ -157,7 +157,7 @@ async fn change(
     auth: &Auth,
     id: Uuid,
     action: &str,
-    body: Value,
+    mut body: Value,
 ) -> Result<Json<Value>> {
     auth.scope("publishing:write")?;
     let mut tx = state.db.begin().await?;
@@ -173,11 +173,88 @@ async fn change(
     }
     let current: String = row.get("state");
     let provider: String = row.get("provider");
-    let mut x_checkpoint = if provider == "x" && ["retry", "reconcile"].contains(&action) {
+    let payload: Value = row.get("payload");
+    let x_thread = provider == "x" && crate::provider_bridge::has_x_thread(&payload);
+    if body.get("thread_ids").is_some()
+        && (!x_thread || action != "reconcile" || body["resolution"] != "published")
+    {
+        return Err(ApiError::bad(
+            "Thread IDs are only valid for X thread completion",
+        ));
+    }
+    let mut x_checkpoint = if provider == "x"
+        && (["retry", "reconcile"].contains(&action)
+            || (x_thread && ["cancel", "reschedule"].contains(&action)))
+    {
         crate::provider_bridge::x_checkpoint_on(state, &mut tx, id).await?
     } else {
         None
     };
+    if x_thread && ["retry", "cancel", "reschedule"].contains(&action) {
+        if let Some(cp) = x_checkpoint.as_ref() {
+            crate::provider_bridge::x_thread_status(&payload, cp)?;
+            if !crate::provider_bridge::x_thread_pre_public(cp) {
+                return Err(ApiError::conflict(
+                    "An X thread may already be public. Inspect its reply chain before recovery; the whole thread cannot be restarted or canceled.",
+                ));
+            }
+        } else {
+            // A new queued thread has no attempt. After any attempt, a missing
+            // checkpoint cannot prove no write occurred; a recorded pre-public
+            // reset is the sole exception, fenced against later attempts.
+            if !crate::provider_bridge::valid_x_thread_snapshot(&payload) {
+                return Err(ApiError::conflict(
+                    "The saved X thread is invalid; recovery cannot proceed",
+                ));
+            }
+            let no_attempts: bool = sqlx::query_scalar(
+                "SELECT NOT EXISTS(SELECT 1 FROM publication_attempts WHERE publication_id=$1)",
+            )
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let safe = no_attempts
+                || crate::provider_bridge::x_thread_reset_covers_attempts(&mut tx, id).await?;
+            if !safe {
+                return Err(ApiError::conflict(
+                    "X thread progress is missing. Inspect its actual reply chain; whole-thread retry or cancellation is unavailable.",
+                ));
+            }
+        }
+    }
+    if x_thread && action == "reconcile" {
+        let cp = x_checkpoint.as_mut().ok_or_else(|| {
+            ApiError::conflict(
+                "The X thread checkpoint is missing; its outcome cannot be safely resolved",
+            )
+        })?;
+        if body["resolution"] == "published" {
+            auth.owner_session()?;
+            let (root, url) = crate::provider_bridge::x_thread_completion(&payload, cp, &body)?;
+            body["external_id"] = json!(root);
+            body["external_url"] = json!(url);
+        } else {
+            let status = crate::provider_bridge::x_thread_status(&payload, cp)?;
+            if !crate::provider_bridge::x_thread_pre_public(cp) {
+                auth.owner_session()?;
+                if status["phase"] != "request_started"
+                    || status["next_index"] != 0
+                    || status["confirmed_ids"]
+                        .as_array()
+                        .is_none_or(|ids| !ids.is_empty())
+                    || body["observed_attempt_id"] != status["attempt_id"]
+                    || body["observed_checkpoint_id"] != status["checkpoint_id"]
+                    || body["sender_stopped"] != true
+                    || body["provider_inspected"] != true
+                {
+                    return Err(ApiError::conflict(
+                        "Only an unconfirmed root can be recorded not published after the owner confirms the remote operation definitively ended, using the current IDs.",
+                    ));
+                }
+                cp["thread_root_ended_attestation"] = json!({"attempt_id":status["attempt_id"],"checkpoint_id":status["checkpoint_id"]});
+            }
+        }
+    }
     let mut meta_checkpoint = if matches!(provider.as_str(), "facebook" | "instagram" | "threads")
         && ["retry", "reconcile"].contains(&action)
     {
@@ -262,12 +339,13 @@ async fn change(
         "reconcile"
             if current == "uncertain"
                 || (current == "failed"
-                    && body["resolution"] == "not_published"
-                    && (x_checkpoint
-                        .as_ref()
-                        .is_some_and(crate::provider_bridge::x_public_boundary)
-                        || meta_checkpoint.is_some()
-                        || linkedin_checkpoint.is_some())) =>
+                    && ((x_thread && body["resolution"] == "published")
+                        || (body["resolution"] == "not_published"
+                            && (x_checkpoint
+                                .as_ref()
+                                .is_some_and(crate::provider_bridge::x_public_boundary)
+                                || meta_checkpoint.is_some()
+                                || linkedin_checkpoint.is_some())))) =>
         {
             required(&body, "note")?;
             match body["resolution"].as_str() {

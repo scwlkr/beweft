@@ -27,7 +27,7 @@ its final runtime qualification will be recorded in the orchestration record.
 
 ## Remaining feasible product work
 
-X threads, ordinary Facebook Page video, Instagram Stories eligibility,
+Ordinary Facebook Page video, Instagram Stories eligibility,
 Threads/Bluesky replies, LinkedIn organization opt-in, expanded Pinterest
 formats/reads, Google Business Profile direct posting and Google grant-family
 handling remain local implementation work. Bluesky entryway-to-PDS onboarding

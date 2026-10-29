@@ -110,9 +110,128 @@ export function ProviderOptions({
         )}
       </section>
     );
-  if (provider === "x")
+  if (provider === "x") {
+    const thread = value.x_thread;
+    const threadObject =
+      thread && typeof thread === "object" && !Array.isArray(thread)
+        ? (thread as Record<string, unknown>)
+        : null;
+    const validThread =
+      thread === undefined ||
+      (threadObject !== null &&
+        Object.keys(threadObject).length === 1 &&
+        Array.isArray(threadObject.replies) &&
+        threadObject.replies.every((reply) => typeof reply === "string"));
+    const replies: string[] =
+      validThread && threadObject ? (threadObject.replies as string[]) : [];
+    const setReplies = (next: string[]) => {
+      const options = { ...value };
+      if (next.length) options.x_thread = { replies: next };
+      else delete options.x_thread;
+      onChange(options);
+    };
     return (
       <section className="provider-options form-stack">
+        {formats.includes("thread") && <h3>X thread</h3>}
+        {!formats.includes("thread") && thread !== undefined && (
+          <p className="muted">
+            This server does not advertise X thread publishing. Saved replies
+            are retained, but cannot be scheduled until the server is updated.
+          </p>
+        )}
+        {formats.includes("thread") && (
+          <p className="muted">
+            Add up to nine text-only replies in order. Attachments are sent with
+            the first post only. X account and API plan eligibility apply; X’s
+            self-serve reply rules may limit this feature. Each post may incur
+            an API charge.
+          </p>
+        )}
+        {formats.includes("thread") && !validThread && (
+          <div className="notice">
+            <p>
+              These saved thread options are invalid and cannot be scheduled.
+            </p>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setReplies([])}
+            >
+              Remove invalid thread options
+            </Button>
+          </div>
+        )}
+        {formats.includes("thread") &&
+          replies.map((reply, index) => (
+            <div className="form-stack" key={index}>
+              <Field
+                label={`Reply ${index + 1}`}
+                hint={`${Array.from(reply).length}/280 characters`}
+              >
+                <textarea
+                  rows={3}
+                  value={reply}
+                  onChange={(event) =>
+                    setReplies(
+                      replies.map((text, i) =>
+                        i === index ? event.target.value : text,
+                      ),
+                    )
+                  }
+                />
+              </Field>
+              <div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={index === 0}
+                  onClick={() => {
+                    const next = [...replies];
+                    [next[index - 1], next[index]] = [
+                      next[index],
+                      next[index - 1],
+                    ];
+                    setReplies(next);
+                  }}
+                >
+                  Move reply {index + 1} up
+                </Button>{" "}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={index === replies.length - 1}
+                  onClick={() => {
+                    const next = [...replies];
+                    [next[index], next[index + 1]] = [
+                      next[index + 1],
+                      next[index],
+                    ];
+                    setReplies(next);
+                  }}
+                >
+                  Move reply {index + 1} down
+                </Button>{" "}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() =>
+                    setReplies(replies.filter((_, i) => i !== index))
+                  }
+                >
+                  Remove reply {index + 1}
+                </Button>
+              </div>
+            </div>
+          ))}
+        {formats.includes("thread") && validThread && replies.length < 9 && (
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => setReplies([...replies, ""])}
+          >
+            Add reply
+          </Button>
+        )}
         <h3>X video requirements</h3>
         <p className="muted">
           The current beweft adapter accepts one MP4 video with H.264,
@@ -124,6 +243,7 @@ export function ProviderOptions({
         </p>
       </section>
     );
+  }
   if (provider === "youtube")
     return (
       <section className="provider-options form-stack">
