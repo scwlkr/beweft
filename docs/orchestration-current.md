@@ -6,7 +6,7 @@ qualification or completed release is claimed.
 
 ## Integration
 
-Integration branch: `codex/orchestrator-handoff`, ideas merge `9bcc379`.
+Integration branch: `codex/orchestrator-handoff`, metadata-contract merge `6e57386`.
 Main remains at durable-core PR #3. Open PRs #4–#8 preserve the original stack.
 Reviewed additions land through merge commits; the completed stack will land
 without squashing an ancestor beneath open descendants.
@@ -48,9 +48,9 @@ three active children plus the orchestrator. Each milestone freezes its SHA.
 
 | Lane | Checkpoint | Next acceptance boundary |
 | --- | --- | --- |
-| Core/providers A+B | PR #19 metadata preconditions reviewed; provider wiring started | Integrate #15/#19, then qualify production routes and worker dispatch; practical formats still follow. |
-| Web C | PR #14 scheduling; #15 media descriptions; #16 idea organization | PR #15 `7e62ad3` fixes known-key isolation and scoped namespace gaps; fresh review is underway. Ideas #16 is merged. Scheduling and preserved manual guidance await integration. |
-| CLI/operations D+E | PR #18 recovery corrections | The second fresh review confirmed earlier fixes but found an unbounded downtime lookup, project ownership collision, unpinned PostgreSQL and helper-volume cleanup; these are being corrected. |
+| Core/providers A+B | PR #19 merged; provider wiring #20 in correction | DB-clock lease admission, local validation and durable rejected/retired receipts; practical formats still follow. |
+| Web C | PR #14 scheduling; #15 media descriptions; #16 idea organization | PR #15 merged `025c319` after fresh review (24/24 media cases). PR #14 review found unsafe generic-error release and stale intent transitions; fixes now use authoritative receipts/retirement. Preserved manual guidance still awaits integration. |
+| CLI/operations D+E | PR #18 recovery corrections | Ownership/reservation, DB pin and cleanup corrections passed targeted checks; the next review found editable app/hold controls and plugin-child supervision gaps. Controlled atomic state and a bounded wrapper surface are being qualified. |
 
 Core owns server/worker/providers/migrations/generated exports. Web owns client
 and browser tests, plus a narrow loan for media metadata CAS and authorized GET:
@@ -81,9 +81,8 @@ media union; the server will lock and check versions in the snapshot transaction
 PR #19 passed fresh independent review at `b126474`, including legacy UUID
 spellings, populated migration, edit races, scoped receipts, complete rollback
 and concurrent mismatch retries. Read responses normalize known UUID fields
-without changing stored draft JSON or historical publication payloads. Its merge
-awaits #15 and the inherited web dependency conflict; client adoption is still
-unfinished. The contract prevents an unknown schedule after reload from silently
+without changing stored draft JSON or historical publication payloads. It merged at `6e57386` after #15; the local merge tree was verified exactly.
+Client adoption is still unfinished. The contract prevents an unknown schedule after reload from silently
 snapshotting later description edits.
 
 Media saves persist owner/brand/asset/base-version/text before PATCH. Unknown
@@ -93,15 +92,25 @@ cache reconciliation must be monotonic and status accessible in the dialog.
 
 ## Runtime and resources
 
-The retained preview at localhost:3000 is an earlier API/worker build, not the
-current integrated release. Its served web bundle was rebuilt during checks.
-The project PostgreSQL container remains on loopback 55439. Private settings
-stay ignored. Other projects' services and normal browsers are protected.
+The old preview processes are no longer running and port 3000 has no listener
+at the latest check. Its existing dev database remains intact: one owner, brand,
+channel, draft, media item and publication; no provider apps, migrations 1–2.
+These records/media are preserved. The final local installation is still pending.
+The project PostgreSQL container stays on loopback 55439; other services and
+normal browsers are protected.
 
-Root workspace build and all 66 browser scenarios passed at `5a42e6e`. Root
-binaries predate the worker-health/provider merges; broader integrated checks
-follow the remaining contract and workflow merges. No live provider account,
-public post, paid call or Buffer queue mutation was used.
+At merged `6e57386`, the root workspace build, web build, both scheduling API
+suites and all 93 isolated Chromium scenarios passed. Temporary fixture resources
+were cleaned by the harnesses. Root binaries and web/dist now match this merge;
+they are not a running preview.
+
+During provider #20 qualification, a shared-target feature mismatch may have
+sent synthetic OAuth client/code data to Facebook's token endpoint. No real
+credentials or public content were involved. That run stopped. Startup guards
+now reject mismatched fixture builds/origins, and provider fixture runners use a
+verified loopback-only OS sandbox. Subsequent sandboxed runs passed; no live
+provider qualification is claimed. Public posts, paid calls and Buffer queue
+changes remain outside testing authorization.
 
 Workers own isolated test databases/processes/artifacts. Shared mutable outputs
 are avoided; retained builds are tied to a source SHA. Finished review worktrees
