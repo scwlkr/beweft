@@ -6,11 +6,13 @@ is running on loopback port 3000 with first-owner setup available. Current work,
 release qualification, remaining formats and review findings are in
 [the active delivery record](docs/orchestration-current.md).
 
-The practical local release target is 2026-10-29 at 16:30 America/Chicago. Core
+The practical local release checkpoint passed at about 16:17 America/Chicago
+on 2026-10-29, ahead of the 16:30 target. Core
 UI/API/worker use and a real schema-changing image upgrade/rollback passed;
 provider fixtures do not establish live account access or publication. Content/owner
 UI and Meta, Bluesky and LinkedIn media milestones are merged through #28; the
-combined installation image is being packaged and qualified.
+combined installation image `beweft:release-bb359e3` is qualified and running.
+Google Business Profile backend/web and X threads are the next active milestones.
 The full intended product scope stays open until its feasible work is finished.
 
 Owner decisions: original unicorn identity; self-host deployment uses placeholders

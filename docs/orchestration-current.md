@@ -26,12 +26,28 @@ queue; restart/worker health, subsequent upload and matching old-image/data/key
 rollback with a held worker passed. PostgreSQL major-version migration and a
 physical host reboot have not been qualified.
 
-The retained local installation is healthy on loopback port 3000, now upgraded
-backup-first to image source `3b4445b` and schema 14. First-owner setup remains
-uninitialized so the owner chooses their identity and password. It has no demo
-content or provider credentials. Private installation/configuration and rollback
-material remain ignored; never print or commit their secret values. The earlier
-dev database/media remain preserved separately.
+The retained local installation is healthy on loopback port 3000. It was upgraded
+backup-first to `beweft:release-bb359e3`, immutable image
+`sha256:ecb0f104f1e594f5d74d49a6b266138bea7a23de6a3d1602c799b40ce745a9db`,
+source `bb359e31a50f98c0f99a76f1c47d8ab612169371`. Runtime OpenAPI equals the
+reviewed generated source, and the actual release web assets are served. Owner
+setup remains uninitialized so the owner chooses their identity/password.
+
+A fresh independent review of this exact image passed first-owner empty data,
+manual channel, media bytes/description, template CRUD/apply to an unscheduled
+draft, queue revision replacement/audit link/priority/exact-time preservation,
+lost-response recovery, worker manual handoff/history, brand maintenance with
+restored channels paused, sessions/password, and restart persistence. Services
+were healthy, non-root, read-only and fixture-disabled. No live provider calls
+or external browser requests occurred. The isolated review installation and all
+its containers, volumes, network, reservation and temporary files were removed.
+The practical local release checkpoint was achieved at approximately 16:17 Central,
+ahead of the 16:30 target. The full goal remains active.
+
+The matching prior image and consistent backup are retained for rollback. The
+superseded initial image/backup were removed after successful qualification.
+Installation/configuration and rollback keys remain private and ignored; never
+print or commit secret values. The earlier dev database/media remain preserved.
 
 ## Current work
 
@@ -77,8 +93,9 @@ posts, Buffer changes or unrelated services are authorized.
 
 ## Remaining full scope and cleanup
 
-The reviewed source milestones through #28 have landed; the combined local
-image is being packaged and qualified. Additional local implementation still includes X threads, standard
+The reviewed source milestones through #28 have landed and their combined local
+image is qualified and installed. Google Business Profile backend/web work and X
+thread publishing are now active. Additional local implementation still includes X threads, standard
 Facebook Page video, Instagram Stories eligibility, Threads/Bluesky replies,
 LinkedIn organization opt-in, expanded Pinterest formats/reads, Google Business
 Profile direct support and safe Google grant-family handling. Bluesky entryway
