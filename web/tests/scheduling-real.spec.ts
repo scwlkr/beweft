@@ -1611,7 +1611,7 @@ for (const swapped of [false, true]) {
       });
       await page.route(/\/api\/v1\/publications\?.*\bid=/, (route) => {
         checks++;
-        if (failSummary)
+        if (failSummary && checks === 1)
           return route.fulfill({
             status: 503,
             json: {
@@ -1657,6 +1657,12 @@ for (const swapped of [false, true]) {
         await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
           "Summary unavailable",
         );
+        await expect
+          .poll(
+            async () =>
+              (await pending(page, f.key)).observed_publications?.length,
+          )
+          .toBe(1);
         expect((await pending(page, f.key)).observed_publication_ids).toEqual(
           originals.map((row) => row.id).sort(),
         );
