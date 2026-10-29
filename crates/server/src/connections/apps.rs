@@ -30,13 +30,34 @@ pub(super) async fn oauth_gate(
         .await
         .map_err(gate_error)?;
     if row.is_none() {
-        sqlx::query("INSERT INTO provider_oauth_fences(provider) VALUES($1) ON CONFLICT(provider) DO NOTHING")
-            .bind(provider).execute(&mut **tx).await.map_err(gate_error)?;
+        // An uncommitted first insert is invisible to SELECT. Serialize only
+        // fence creation with a nonblocking provider-specific advisory lock so
+        // a concurrent first save never waits on INSERT's unique constraint.
+        let creator: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))")
+                .bind(format!("provider-fence-init:{provider}"))
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(gate_error)?;
+        if !creator {
+            return Err(ApiError::conflict(
+                "Provider revocation or another connection operation is in progress; try again",
+            ));
+        }
         row = sqlx::query(query)
             .bind(provider)
             .fetch_optional(&mut **tx)
             .await
             .map_err(gate_error)?;
+        if row.is_none() {
+            sqlx::query("INSERT INTO provider_oauth_fences(provider) VALUES($1) ON CONFLICT(provider) DO NOTHING")
+                .bind(provider).execute(&mut **tx).await.map_err(gate_error)?;
+            row = sqlx::query(query)
+                .bind(provider)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(gate_error)?;
+        }
     }
     Ok(row.map(|row| (row.get("oauth_generation"), row.get("revocation_id"))))
 }
@@ -45,7 +66,7 @@ pub(super) fn require_open_oauth_gate(gate: Option<(i64, Option<Uuid>)>) -> Resu
     match gate {
         Some((generation, None)) => Ok(generation),
         Some((_, Some(_))) => Err(ApiError::conflict(
-            "Provider revocation is not confirmed. Remove access at the provider and confirm it before connecting again.",
+            "Provider revocation is not confirmed. Removing provider access may affect other channels and unrelated accounts. Inspect connected channels, remove the affected access, and confirm removal before connecting again.",
         )),
         None => Err(ApiError::bad("Set up this provider app first")),
     }

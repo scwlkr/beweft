@@ -63,17 +63,6 @@ async fn check_bluesky_reconnect(
     Ok(())
 }
 
-fn bluesky_after_session_error(error: ApiError) -> ApiError {
-    ApiError(
-        error.0,
-        error.1,
-        super::flows::recovery(&format!(
-            "{} The provider session may have been created.",
-            error.2
-        )),
-    )
-}
-
 pub async fn bluesky(
     State(state): State<AppState>,
     auth: Auth,
@@ -125,21 +114,21 @@ pub async fn bluesky(
             "Bluesky session creation timed out and its outcome is unknown.",
         ))
     })?
-    .map_err(|error| ApiError::bad(super::flows::recovery(&error.2)))?;
+    .map_err(super::flows::post_grant_error)?;
     lock_active_brand(&mut tx, brand)
         .await
-        .map_err(bluesky_after_session_error)?;
+        .map_err(super::flows::post_grant_error)?;
     if let Some(id) = reconnect {
         crate::schedules::lock_channel(&mut tx, id)
             .await
-            .map_err(bluesky_after_session_error)?;
+            .map_err(super::flows::post_grant_error)?;
         check_bluesky_reconnect(&mut tx, id, brand, true)
             .await
-            .map_err(bluesky_after_session_error)?;
+            .map_err(super::flows::post_grant_error)?;
     }
     let result = store_channel(&state, &mut tx, brand, reconnect, timezone, &channel)
         .await
-        .map_err(bluesky_after_session_error)?;
+        .map_err(super::flows::post_grant_error)?;
     let session_is_live: Option<i32> = sqlx::query_scalar("SELECT 1 FROM sessions WHERE token_hash=$1 AND owner_id=$2 AND expires_at>clock_timestamp() FOR SHARE")
         .bind(browser_session)
         .bind(auth.owner_id)
@@ -264,10 +253,18 @@ pub async fn disconnect(
             "Provider revocation is already in progress or needs confirmation",
         ));
     }
-    // Google revocation affects the account/project grant, not just one YouTube
-    // destination. Lock in the same order used by multi-channel scheduling.
-    let affected: Vec<Uuid> = if provider == "youtube" {
-        sqlx::query_scalar("SELECT id FROM channels WHERE provider='youtube' ORDER BY id")
+    // Provider grant sharing is not reliably known. A stored grant (and every
+    // Google disconnect) may affect any channel for that provider. Read the
+    // hint without a row lock, then acquire channel locks in stable order.
+    let has_grant_hint: bool =
+        sqlx::query_scalar("SELECT encrypted_credentials IS NOT NULL FROM channels WHERE id=$1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let provider_wide = provider == "youtube" || has_grant_hint;
+    let affected: Vec<Uuid> = if provider_wide {
+        sqlx::query_scalar("SELECT id FROM channels WHERE provider=$1 ORDER BY id")
+            .bind(&provider)
             .fetch_all(&mut *tx)
             .await?
     } else {
@@ -282,6 +279,11 @@ pub async fn disconnect(
     .bind(id)
     .fetch_one(&mut *tx)
     .await?;
+    if has_grant && !provider_wide {
+        return Err(ApiError::conflict(
+            "Channel access changed during disconnect; try again",
+        ));
+    }
     // Provider HTTP calls have a 60-second timeout. A crashed reply remains uncertain,
     // never retried automatically; it must not block disconnect forever.
     sqlx::query("UPDATE provider_replies r SET state='uncertain',error='Reply process stopped; inspect the network before a new reply',updated_at=now() FROM provider_inbox i WHERE i.id=r.inbox_id AND i.channel_id=ANY($1) AND r.state='sending' AND r.delivery_deadline<clock_timestamp()").bind(&affected).execute(&mut *tx).await?;
@@ -304,9 +306,9 @@ pub async fn disconnect(
         load_stored_channel_tx(&state, &mut tx, id).await.ok()
     };
     let revocation_id = (provider == "youtube" || has_grant).then(Uuid::new_v4);
-    let affected_channels = if provider == "youtube" && revocation_id.is_some() {
-        sqlx::query("UPDATE channels SET connection_status='reconnect_required',connection_error='Google grant may have been revoked; reconnect this channel' WHERE provider='youtube' AND id<>$1 AND connection_status='connected'")
-            .bind(id).execute(&mut *tx).await?.rows_affected()
+    let affected_channels = if revocation_id.is_some() {
+        sqlx::query("UPDATE channels SET connection_status='reconnect_required',connection_error='Provider access may change; reconnect this channel after removal is resolved' WHERE provider=$2 AND id<>$1 AND connection_status='connected'")
+            .bind(id).bind(&provider).execute(&mut *tx).await?.rows_affected()
     } else {
         0
     };
@@ -349,13 +351,18 @@ pub async fn disconnect(
         false
     };
     let next_action = match (revoked, affected_channels > 0, revocation_id.is_some()) {
-        (true, true, _) => "Reconnect the other YouTube channels marked as needing reconnection.",
+        (true, true, _) => {
+            "Other channels for this provider, including unrelated accounts, were conservatively marked for reconnection. Reconnect them; their saved credentials and queued work were retained."
+        }
         (true, false, _) => "No action needed",
-        (false, _, true) => {
-            "Remove beweft access in the provider account's connected-app settings, then confirm removal before connecting again."
+        (false, true, true) => {
+            "Other channels for this provider, including unrelated accounts, were conservatively marked for reconnection. Removing provider access may affect them. Remove beweft access in the provider account's connected-app settings, then confirm removal before connecting again; their saved credentials and queued work were retained."
+        }
+        (false, false, true) => {
+            "Provider access removal can affect other channels or accounts. Inspect connected channels, remove beweft access in the provider account's connected-app settings, then confirm removal before connecting again."
         }
         (false, _, false) => {
-            "No remote revocation was attempted. Remove beweft access in the provider account's connected-app settings."
+            "No remote removal was attempted. Inspect existing connected channels before removing only orphaned provider access."
         }
     };
     Ok(data(

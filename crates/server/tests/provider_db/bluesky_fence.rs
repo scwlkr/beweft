@@ -168,7 +168,7 @@ async fn bluesky_connection_obeys_provider_and_brand_fences(h: &Harness) {
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let body = response.text().await.unwrap();
     assert!(body.contains("First inspect your connected channels"));
-    assert!(body.contains("session may have been created"));
+    assert!(body.contains("session may already exist"));
     for secret in [
         "bluesky-password-fixture",
         "bluesky-access-fixture",

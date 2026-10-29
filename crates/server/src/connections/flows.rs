@@ -6,6 +6,22 @@ pub(super) fn recovery(message: &str) -> String {
     format!("{message} {RECOVERY_GUIDANCE}")
 }
 
+// After provider consent, even a local validation or database failure can
+// leave remote access behind. Preserve the original status and safe message.
+pub(super) fn post_grant_error(error: ApiError) -> ApiError {
+    if error.2.contains(RECOVERY_GUIDANCE) {
+        return error;
+    }
+    ApiError(
+        error.0,
+        error.1,
+        recovery(&format!(
+            "{} Provider authorization or a session may already exist.",
+            error.2
+        )),
+    )
+}
+
 fn uncertain_authorization() -> String {
     recovery(
         "Provider authorization is in progress, or its outcome is unknown if interrupted. Provider access may already have been granted.",
@@ -107,12 +123,12 @@ pub async fn callback(
         })?;
     let state_hash = crypto::digest(&state_value);
     let correlation_hash = crypto::digest(correlation);
-    let row=sqlx::query("UPDATE connection_flows f SET consumed_at=now() WHERE state_hash=$1 AND correlation_hash=$2 AND provider=$3 AND expires_at>now() AND consumed_at IS NULL AND EXISTS(SELECT 1 FROM sessions s WHERE s.token_hash=f.session_hash AND s.owner_id=f.owner_id AND s.expires_at>now()) RETURNING id,encrypted_verifier,encrypted_app,oauth_generation").bind(&state_hash).bind(&correlation_hash).bind(&provider).fetch_optional(&state.db).await?;
+    let row=sqlx::query("UPDATE connection_flows f SET consumed_at=now() WHERE state_hash=$1 AND correlation_hash=$2 AND provider=$3 AND expires_at>now() AND consumed_at IS NULL AND EXISTS(SELECT 1 FROM sessions s WHERE s.token_hash=f.session_hash AND s.owner_id=f.owner_id AND s.expires_at>now()) RETURNING id,encrypted_verifier,encrypted_app,oauth_generation").bind(&state_hash).bind(&correlation_hash).bind(&provider).fetch_optional(&state.db).await.map_err(|error|post_grant_error(error.into()))?;
     let Some(row) = row else {
         // The same browser state and a live originating session are required
         // even for this status-only replay response.
         let previous = sqlx::query("SELECT consumed_at IS NOT NULL AS consumed, completed_at IS NOT NULL AS completed, encrypted_candidates IS NOT NULL AS has_candidates, expires_at>now() AS unexpired FROM connection_flows f WHERE state_hash=$1 AND correlation_hash=$2 AND provider=$3 AND EXISTS(SELECT 1 FROM sessions s WHERE s.token_hash=f.session_hash AND s.owner_id=f.owner_id AND s.expires_at>now())")
-            .bind(&state_hash).bind(&correlation_hash).bind(&provider).fetch_optional(&state.db).await?;
+            .bind(&state_hash).bind(&correlation_hash).bind(&provider).fetch_optional(&state.db).await.map_err(|error|post_grant_error(error.into()))?;
         let message = if let Some(previous) = previous {
             if previous.get::<bool, _>("completed") {
                 "This connection was already completed.".to_owned()
@@ -135,6 +151,7 @@ pub async fn callback(
     if query.error.is_some() {
         return Ok(Redirect::to("/settings?connection_error=consent_declined").into_response());
     }
+    let result = async {
     let id: Uuid = row.get("id");
     let code = query
         .code
@@ -253,6 +270,9 @@ pub async fn callback(
             .unwrap(),
     );
     Ok(response)
+    }
+    .await;
+    result.map_err(post_grant_error)
 }
 async fn flow(
     state: &AppState,
@@ -261,7 +281,7 @@ async fn flow(
     id: Uuid,
 ) -> Result<(sqlx::postgres::PgRow, Vec<Channel>)> {
     auth.owner_session()?;
-    let row=sqlx::query("SELECT *,expires_at>clock_timestamp() AS unexpired FROM connection_flows WHERE id=$1 AND owner_id=$2 AND session_hash=$3").bind(id).bind(auth.owner_id).bind(session_hash(headers)?).fetch_optional(&state.db).await?.ok_or_else(||ApiError::bad(recovery("Connection flow expired or is unavailable; its outcome may be unknown.")))?;
+    let row=sqlx::query("SELECT *,expires_at>clock_timestamp() AS unexpired FROM connection_flows WHERE id=$1 AND owner_id=$2 AND session_hash=$3").bind(id).bind(auth.owner_id).bind(session_hash(headers)?).fetch_optional(&state.db).await.map_err(|error|post_grant_error(error.into()))?.ok_or_else(||ApiError::bad(recovery("Connection flow expired or is unavailable; its outcome may be unknown.")))?;
     let encrypted: Option<String> = row.get("encrypted_candidates");
     if row
         .get::<Option<chrono::DateTime<chrono::Utc>>, _>("completed_at")
@@ -281,14 +301,15 @@ async fn flow(
             "Connection flow expired; provider consent or access may exist.",
         )));
     }
-    let plain = crypto::decrypt(
-        key(state)?,
-        id,
-        &encrypted.ok_or_else(|| ApiError::bad("Provider authorization has not completed"))?,
-    )
-    .map_err(|_| ApiError::bad("Connection candidates could not be decrypted"))?;
-    let candidates = serde_json::from_str(&plain)
-        .map_err(|_| ApiError::bad("Stored connection candidates are invalid"))?;
+    let encrypted =
+        encrypted.ok_or_else(|| ApiError::bad("Provider authorization has not completed"))?;
+    let candidates = (|| {
+        let plain = crypto::decrypt(key(state)?, id, &encrypted)
+            .map_err(|_| ApiError::bad("Connection candidates could not be decrypted"))?;
+        serde_json::from_str(&plain)
+            .map_err(|_| ApiError::bad("Stored connection candidates are invalid"))
+    })()
+    .map_err(post_grant_error)?;
     Ok((row, candidates))
 }
 pub async fn flow_destinations(
@@ -310,6 +331,7 @@ pub async fn complete(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>> {
     let (row, candidates) = flow(&state, &auth, &headers, id).await?;
+    let result = async {
     let identity = required(&body, "destination_id")?;
     let candidate = candidates
         .into_iter()
@@ -368,4 +390,7 @@ pub async fn complete(
         ))
     })?;
     Ok(data(result))
+    }
+    .await;
+    result.map_err(post_grant_error)
 }

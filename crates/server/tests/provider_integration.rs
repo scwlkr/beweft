@@ -34,6 +34,9 @@ include!("provider_db/revocation.rs");
 include!("provider_db/sync_pool.rs");
 include!("provider_db/callback_fence.rs");
 include!("provider_db/bluesky_fence.rs");
+include!("provider_db/provider_gate.rs");
+include!("provider_db/shared_provider.rs");
+include!("provider_db/post_grant_recovery.rs");
 #[path = "../../providers/tests/support/mod.rs"]
 mod media_fixture;
 #[tokio::test]
@@ -43,6 +46,9 @@ async fn provider_database_security_and_recovery() {
     overlapping_syncs_preserve_pool_and_rotated_tokens(&h).await;
     callback_exchange_respects_removal_boundary(&h).await;
     bluesky_connection_obeys_provider_and_brand_fences(&h).await;
+    first_provider_save_rejects_concurrent_creators(&h).await;
+    disconnect_fences_shared_provider_channels(&h).await;
+    post_grant_failures_preserve_status_and_recovery(&h).await;
     oauth_revocation_fences_reconnects(&h).await;
     populated_oauth_fence_upgrade(&h).await;
     oauth_replay_session_binding_and_config_change(&h).await;
