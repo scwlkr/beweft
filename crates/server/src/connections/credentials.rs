@@ -1,4 +1,13 @@
 use super::*;
+
+/// Keep grant-derived state in sync without changing adapter implementation
+/// flags or treating an unreported scope as a verified grant.
+fn update_grant_capabilities(caps: &mut Value, channel: &Channel) {
+    let permissions = providers::grant_permissions(channel);
+    caps["publishing"] = json!(permissions["actions"]["publish"]["status"] != "missing");
+    caps["permissions"] = permissions;
+}
+
 pub(super) async fn store_channel(
     state: &AppState,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -31,8 +40,7 @@ pub(super) async fn store_channel(
     .map_err(ApiError::internal)?;
     caps["execution"] = json!("direct");
     caps["verification"] = json!("identity_verified_publishing_unverified");
-    caps["permissions"] = providers::grant_permissions(channel);
-    caps["publishing"] = json!(caps["permissions"]["actions"]["publish"]["status"] != "missing");
+    update_grant_capabilities(&mut caps, channel);
     let row:Value=sqlx::query_scalar("INSERT INTO channels(id,brand_id,name,provider,timezone,capabilities,encrypted_credentials,connection_identity,connection_status,connected_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'connected',now()) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,capabilities=EXCLUDED.capabilities,encrypted_credentials=EXCLUDED.encrypted_credentials,connection_status='connected',connection_error=NULL,connected_at=now() RETURNING to_jsonb(channels.*)-'encrypted_credentials'").bind(id).bind(brand).bind(&channel.identity.name).bind(&channel.app.provider).bind(timezone).bind(caps).bind(encrypted).bind(channel.destination_key()).fetch_one(&mut **tx).await?;
     Ok(crate::manual_channels::decorate(row))
 }
@@ -77,13 +85,7 @@ pub async fn bluesky(
     if identifier.len() > 512 || password.len() > 512 {
         return Err(ApiError::bad("Credentials are too long"));
     }
-    let reconnect = body["reconnect_channel_id"]
-        .as_str()
-        .map(|s| {
-            s.parse()
-                .map_err(|_| ApiError::bad("Invalid reconnect channel"))
-        })
-        .transpose()?;
+    let reconnect = optional_reconnect_channel(&body)?;
     let timezone = body["timezone"].as_str().unwrap_or("UTC");
     catalog::validate_timezone(timezone)?;
     let browser_session = session_hash(&headers)?;
@@ -182,7 +184,7 @@ async fn load_channel_inner(
     deadline: Option<providers::Deadline>,
     refresh: bool,
 ) -> Result<Channel> {
-    let row=sqlx::query("SELECT provider,encrypted_credentials,connection_status FROM channels WHERE id=$1 FOR UPDATE").bind(id).fetch_one(&mut **tx).await?;
+    let row=sqlx::query("SELECT provider,encrypted_credentials,connection_status,capabilities FROM channels WHERE id=$1 FOR UPDATE").bind(id).fetch_one(&mut **tx).await?;
     if row.get::<String, _>("connection_status") != "connected" {
         return Err(ApiError::bad("Channel needs reconnection"));
     }
@@ -234,7 +236,9 @@ async fn load_channel_inner(
                     &serde_json::to_string(&channel).map_err(ApiError::internal)?,
                 )
                 .map_err(ApiError::internal)?;
-                sqlx::query("UPDATE channels SET encrypted_credentials=$2,connection_error=NULL,capabilities=jsonb_set(capabilities,'{permissions}',$3) WHERE id=$1").bind(id).bind(encrypted).bind(providers::grant_permissions(&channel)).execute(&mut **tx).await?;
+                let mut capabilities: Value = row.get("capabilities");
+                update_grant_capabilities(&mut capabilities, &channel);
+                sqlx::query("UPDATE channels SET encrypted_credentials=$2,connection_error=NULL,capabilities=$3 WHERE id=$1").bind(id).bind(encrypted).bind(capabilities).execute(&mut **tx).await?;
             }
             Err(e) => {
                 if e.kind == providers::FailureKind::Authentication

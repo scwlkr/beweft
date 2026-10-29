@@ -32,6 +32,16 @@ fn session_hash(headers: &HeaderMap) -> Result<String> {
         .ok_or_else(ApiError::unauthorized)?;
     Ok(crypto::digest(token))
 }
+fn optional_reconnect_channel(body: &Value) -> Result<Option<Uuid>> {
+    match body.get("reconnect_channel_id") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => value
+            .parse()
+            .map(Some)
+            .map_err(|_| ApiError::bad("reconnect_channel_id must be a UUID or null")),
+        _ => Err(ApiError::bad("reconnect_channel_id must be a UUID or null")),
+    }
+}
 fn provider_error(e: providers::ProviderError) -> ApiError {
     ApiError::bad(format!(
         "{}{}",

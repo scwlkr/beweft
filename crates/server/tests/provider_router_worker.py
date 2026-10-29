@@ -66,6 +66,9 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     x_media_started = threading.Event()
     x_media_release = threading.Event()
     x_media_returned = threading.Event()
+    x_exchange_scope = "tweet.read tweet.write users.read offline.access media.write"
+    x_refresh_scope = "tweet.read tweet.write users.read offline.access media.write"
+    x_refresh_expires = 7200
 
     def log_message(self, *_):
         pass
@@ -122,9 +125,15 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             refresh = form.get("grant_type") == ["refresh_token"]
             if refresh:
                 self.record("x_refresh")
-            return self.respond({"access_token":"x-refresh-fixture" if refresh else "x-original-fixture",
-                                 "refresh_token":"x-next-fixture", "expires_in":7200 if refresh else -1200,
-                                 "scope":"tweet.read tweet.write users.read offline.access media.write"})
+            response = {"access_token":"x-refresh-fixture" if refresh else "x-original-fixture",
+                        "refresh_token":"x-next-fixture", "expires_in":self.x_refresh_expires if refresh else -1200}
+            scope = self.x_refresh_scope if refresh else self.x_exchange_scope
+            if scope is not None:
+                response["scope"] = scope
+            return self.respond(response)
+        if path == "/xrpc/com.atproto.server.createSession":
+            return self.respond({"did":"did:plc:fixture", "handle":"fixture.bsky.social",
+                                 "accessJwt":"bluesky-access-fixture", "refreshJwt":"bluesky-refresh-fixture"})
         if path == "/2/tweets":
             if self.headers.get("Authorization") == "Bearer x-refresh-fixture":
                 self.record("x_rotated_authorization")
@@ -350,13 +359,42 @@ def run():
             request("/provider-apps/facebook", {"client_id":"facebook-client", "client_secret":"fixture-secret"}, "PUT")
             request("/provider-apps/x", {"client_id":"x-client", "client_secret":"fixture-secret"}, "PUT")
             request("/provider-apps/youtube", {"client_id":"youtube-client", "client_secret":"fixture-secret"}, "PUT")
+            request("/provider-apps/bluesky", {"client_id":""}, "PUT")
             apps = request("/provider-apps")
             assert all("client_secret" not in item and "revocation_id" in item for item in apps)
             assert next(item for item in request("/providers") if item["id"] == "facebook")["configuration"] == "configured"
+            # Both connection entry points reject mistyped reconnect targets
+            # before changing a flow/fence/channel or contacting a provider.
+            before_invalid = dict(Fixture.counts)
+            before_rows = sql("SELECT (SELECT count(*) FROM connection_flows)||':'||(SELECT count(*) FROM channels)||':'||(SELECT count(*) FROM provider_oauth_fences)")
+            fence_snapshot = "SELECT COALESCE(string_agg(provider||':'||oauth_generation::text||':'||COALESCE(revocation_id::text,'none'),',' ORDER BY provider),'') FROM provider_oauth_fences"
+            before_fences = sql(fence_snapshot)
+            for invalid_reconnect in ({}, [], 123, 1.5, True, False, "not-a-uuid", ""):
+                oauth_bad = request("/connections/x/start", {"brand_id":brand,"reconnect_channel_id":invalid_reconnect}, expected=400)
+                bsky_bad = request("/connections/bluesky", {"brand_id":brand,"identifier":"fixture.bsky.social",
+                                   "app_password":"fixture-password","reconnect_channel_id":invalid_reconnect}, expected=400)
+                assert "UUID or null" in oauth_bad["error"]["message"] and "UUID or null" in bsky_bad["error"]["message"]
+            assert Fixture.counts == before_invalid, "invalid reconnect IDs must cause zero provider traffic"
+            assert sql("SELECT (SELECT count(*) FROM connection_flows)||':'||(SELECT count(*) FROM channels)||':'||(SELECT count(*) FROM provider_oauth_fences)") == before_rows
+            assert sql(fence_snapshot) == before_fences, "invalid reconnect IDs must not advance provider fences"
             fb = connect("facebook", brand)
             sibling = connect("facebook", other_brand)
             x = connect("x", brand)
             youtube = connect("youtube", brand)
+            # Omitted/null values remain new connections; a valid ID continues
+            # the exact matching destination for both OAuth and Bluesky.
+            for reconnect in ("omitted", None, x["id"]):
+                body = {"brand_id":brand}
+                if reconnect != "omitted":
+                    body["reconnect_channel_id"] = reconnect
+                flow = request("/connections/x/start", body)["flow_id"]
+                stored = sql(f"SELECT COALESCE(reconnect_channel_id::text,'none') FROM connection_flows WHERE id='{flow}'")
+                assert stored == ("none" if reconnect in ("omitted", None) else x["id"])
+            bsky_body = {"brand_id":brand,"identifier":"fixture.bsky.social","app_password":"fixture-password"}
+            bsky = request("/connections/bluesky", {**bsky_body,"reconnect_channel_id":None})
+            assert request("/connections/bluesky", {**bsky_body,"reconnect_channel_id":bsky["id"]})["id"] == bsky["id"]
+            assert request("/connections/bluesky", {**bsky_body,"brand_id":other_brand})["id"] != bsky["id"]
+            assert Fixture.counts.get("POST /xrpc/com.atproto.server.createSession") == 3
             assert fb["connection_status"] == "connected" and fb["manual_guidance"] is None
             assert fb["capabilities"]["verification"] == "identity_verified_publishing_unverified"
             assert fb["capabilities"]["permissions"]["actions"]["publish"]["status"] == "granted"
@@ -593,6 +631,45 @@ def run():
             wait_for(lambda: state_is(rotated["id"], "published"), "persisted refresh token")
             assert Fixture.counts.get("x_refresh", 0) == refresh_before + 1
             assert Fixture.counts.get("x_rotated_authorization", 0) == 2
+
+            # A real refresh can remove and later restore scope. Derived
+            # publishing and detailed permissions must change atomically while
+            # static implementation flags and unrelated fields stay intact.
+            scope_brand = request("/brands", {"name":"Grant refresh fixture"})["id"]
+            scope_x = connect("x", scope_brand)
+            sql(f"UPDATE channels SET capabilities=capabilities||jsonb_build_object('fixture_marker','preserved') WHERE id='{scope_x['id']}'")
+            Fixture.x_refresh_scope = "tweet.read users.read offline.access"
+            Fixture.x_refresh_expires = -1200
+            before_posts = Fixture.counts.get("POST /2/tweets", 0)
+            request(f"/channels/{scope_x['id']}/sync", {"allow_metered":True})
+            dropped = request(f"/channels?brand_id={scope_brand}")[0]["capabilities"]
+            assert dropped["publishing"] is False and dropped["permissions"]["actions"]["publish"]["status"] == "missing"
+            assert dropped["permissions"]["actions"]["media"]["status"] == "missing"
+            assert dropped["permissions"]["actions"]["metrics"]["status"] == "granted"
+            assert dropped["analytics"] is True and dropped["inbox"] is False and dropped["reply"] is False
+            assert dropped["fixture_marker"] == "preserved"
+            Fixture.x_refresh_scope = "tweet.read tweet.write users.read offline.access media.write"
+            Fixture.x_refresh_expires = 7200
+            request(f"/channels/{scope_x['id']}/sync", {"allow_metered":True})
+            restored = request(f"/channels?brand_id={scope_brand}")[0]["capabilities"]
+            assert restored["publishing"] is True and restored["permissions"]["actions"]["publish"]["status"] == "granted"
+            assert restored["permissions"]["actions"]["media"]["status"] == "granted"
+            assert restored["fixture_marker"] == "preserved"
+
+            # An unreported scope remains unknown through a refresh that also
+            # omits scope; publishing=true must not become a claim of a grant.
+            Fixture.x_exchange_scope = None
+            Fixture.x_refresh_scope = None
+            unknown_brand = request("/brands", {"name":"Unknown grant fixture"})["id"]
+            unknown_x = connect("x", unknown_brand)
+            assert unknown_x["capabilities"]["permissions"]["actions"]["publish"]["status"] == "unknown"
+            request(f"/channels/{unknown_x['id']}/sync", {"allow_metered":True})
+            unknown = request(f"/channels?brand_id={unknown_brand}")[0]["capabilities"]
+            assert unknown["publishing"] is True and unknown["permissions"]["actions"]["publish"]["status"] == "unknown"
+            assert unknown["permissions"]["actions"]["publish"]["missing_scopes"] is None
+            assert Fixture.counts.get("POST /2/tweets", 0) == before_posts
+            Fixture.x_exchange_scope = "tweet.read tweet.write users.read offline.access media.write"
+            Fixture.x_refresh_scope = Fixture.x_exchange_scope
 
             # The provider fetches the committed media capability while its
             # publish POST is in progress, through the actual public router.
