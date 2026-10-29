@@ -46,6 +46,13 @@ The command checkpoints completed API writes in a private marker tied to the
 installation and pinned image. `./project demo resume .local/demo` resumes a
 partially completed seed only while that owned API is running. Once seeding is
 complete, resume does nothing: it does not reset the password or replace edits.
+If you changed the owner password before an interrupted seed finished, pipe the
+current password as one UTF-8 line from a private source to
+`./project demo resume .local/demo --password-stdin`. The command preserves
+spaces, reads at most 1024 password bytes, and never saves or prints it. Do not
+put the password in command arguments or shell history. The input must be a
+non-interactive stream and provide a line or end of file within ten seconds.
+Completed seeds do not read the stream.
 If a request was interrupted with an uncertain outcome, resume stops without
 retrying it; inspect the demo and its marker before deciding what to do. If
 setup stopped before creating a marker, the directory is not adopted on retry;

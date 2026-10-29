@@ -18,7 +18,7 @@ case "${1:-help}" in
             '  release DIRECTORY                  Release an empty project reservation'
         printf '%s\n' \
             '  demo create DIRECTORY PROJECT PORT IMAGE  Create an isolated example installation' \
-            '  demo resume DIRECTORY             Resume an interrupted example seed'
+            '  demo resume DIRECTORY [--password-stdin]  Resume an interrupted example seed'
         exit 0 ;;
     demo)
         shift

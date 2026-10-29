@@ -7,6 +7,7 @@ import http.cookiejar
 import json
 import os
 from pathlib import Path
+import select
 import socket
 import stat
 import struct
@@ -22,6 +23,7 @@ import self_host as host
 EMAIL = 'demo@example.com'
 PASSWORD = 'BeweftDemo123!'
 MARKER = 'demo-state.json'
+MAX_PASSWORD_BYTES = 1024
 
 
 def save_marker(path, marker, *, create=False):
@@ -148,14 +150,44 @@ class Client:
         try:
             with self.client.open(request, timeout=15) as response:
                 return json.load(response)['data']
-        except (OSError, urllib.error.URLError, ValueError, KeyError) as error:
-            status = f' (HTTP {error.code})' if isinstance(error, urllib.error.HTTPError) else ''
-            raise host.OperationError(f'Demo API request {path} failed{status}; inspect before retrying.') from None
+        except urllib.error.HTTPError as error:
+            if path == '/auth/login' and error.code == 401:
+                raise host.OperationError('Demo login was rejected. If you changed the demo password, pipe the current password into demo resume with --password-stdin.') from None
+            raise host.OperationError(f'Demo API request {path} failed (HTTP {error.code}); inspect before retrying.') from None
+        except (OSError, urllib.error.URLError, ValueError, KeyError):
+            raise host.OperationError(f'Demo API request {path} failed; inspect before retrying.') from None
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+def password_from_stdin():
+    host.require(not sys.stdin.isatty(), '--password-stdin requires a private non-interactive input stream.')
+    fd = sys.stdin.fileno()
+    data = bytearray()
+    deadline = time.monotonic() + 10
+    while len(data) <= MAX_PASSWORD_BYTES + 1:
+        remaining = deadline - time.monotonic()
+        host.require(remaining > 0 and select.select([fd], [], [], remaining)[0],
+                     'Timed out waiting for a password line on stdin.')
+        chunk = os.read(fd, MAX_PASSWORD_BYTES + 2 - len(data))
+        if not chunk:
+            break
+        data.extend(chunk)
+        if b'\n' in chunk:
+            del data[data.index(b'\n') + 1:]
+            break
+    if data.endswith(b'\n'):
+        del data[-1:]
+        if data.endswith(b'\r'):
+            del data[-1:]
+    host.require(0 < len(data) <= MAX_PASSWORD_BYTES, 'Password input must be one non-empty UTF-8 line of at most 1024 bytes.')
+    try:
+        return data.decode('utf-8')
+    except UnicodeDecodeError:
+        raise host.OperationError('Password input must be UTF-8.') from None
 
 
 def card(kind):
@@ -200,7 +232,7 @@ class Seed:
         save_marker(self.path, self.marker)
         return saved
 
-    def run(self):
+    def run(self, password_stdin=False):
         marker, call, action = self.marker, self.client.request, self.action
         host.require(marker['pending'] is None,
                      'The previous demo write has an uncertain outcome. Inspect the demo and marker; automatic retry is withheld.')
@@ -209,12 +241,15 @@ class Seed:
             return
         verify_api_binding(self.install, marker['port'])
         status = call('/auth/status')
-        if 'owner' not in marker['steps']:
+        creating_owner = 'owner' not in marker['steps']
+        if creating_owner:
+            host.require(not password_stdin, '--password-stdin applies after the demo owner exists; resume without it to create the example owner.')
             host.require(status['initialized'] is False, 'Demo already has an owner; refusing to adopt or seed it.')
             action('owner', '/auth/bootstrap', {'setup_secret': self.install.values['BEWEFT_SETUP_SECRET'], 'email': EMAIL, 'password': PASSWORD})
         else:
             host.require(status['initialized'] is True, 'Demo owner is missing; inspect before proceeding.')
-            me = call('/auth/login', {'email': EMAIL, 'password': PASSWORD})
+            password = password_from_stdin() if password_stdin else PASSWORD
+            me = call('/auth/login', {'email': EMAIL, 'password': password})
             host.require(me['email'] == EMAIL, 'Unexpected demo owner; no seed data was written.')
         coffee = action('brand-coffee', '/brands', {'name': 'DEMO · Cloudline Coffee', 'color': '#566B4D'})
         paper = action('brand-paper', '/brands', {'name': 'DEMO · Paperbird Studio', 'color': '#B76E6C'})
@@ -288,7 +323,10 @@ class Seed:
         marker['complete'] = True
         save_marker(self.path, marker)
         print('Demo ready: http://localhost:' + marker['port'])
-        print('Example login: ' + EMAIL + ' / ' + PASSWORD)
+        if creating_owner:
+            print('Initial example login: ' + EMAIL + ' / ' + PASSWORD)
+        else:
+            print('Demo owner: ' + EMAIL + ' (use its current password).')
 
 
 def main():
@@ -303,6 +341,7 @@ def main():
     p.add_argument('--postgres-image', default='postgres:17-alpine')
     p = commands.add_parser('resume')
     p.add_argument('directory')
+    p.add_argument('--password-stdin', action='store_true', help='read the current demo password from a private input stream')
     args = parser.parse_args()
     if args.command == 'create':
         host.require(args.project.startswith('beweft-demo'), 'Use a unique Compose project starting with beweft-demo.')
@@ -329,7 +368,7 @@ def main():
         read_marker(install)
         with install.locked():
             marker = read_marker(install)
-            Seed(install, marker).run()
+            Seed(install, marker).run(password_stdin=args.password_stdin)
 
 
 if __name__ == '__main__':
