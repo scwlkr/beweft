@@ -23,11 +23,16 @@ import {
   effectiveMediaIds,
   inspectScheduleIntent,
   makeScheduleIntent,
+  markScheduleMismatch,
   readScheduleIntent,
+  requireSavedSchedule,
+  retireScheduleIntent,
   sameScheduleIntent,
+  scheduleHasConflict,
   scheduleLock,
   sendScheduleIntent,
   type PublicationSummary,
+  type ScheduleIntent,
 } from "./scheduleIntent";
 import type { usePendingSchedule } from "./usePendingSchedule";
 import { withMediaScheduleGuard } from "./mediaIntent";
@@ -242,6 +247,71 @@ export function useComposer({
       return false;
     }
   };
+  const settleRejection = async (
+    saved: ScheduleIntent,
+    rejection: { code: string; message: string },
+    lockedSession: ApiSession,
+    signal?: AbortSignal,
+  ) => {
+    const current = await requireSavedSchedule(
+      pendingSchedule.key,
+      saved,
+      lockedSession,
+      signal,
+    );
+    const mediaChanged = current.rejection_code === "media_version_conflict";
+    for (const id of Object.keys(saved.media_versions ?? {})) {
+      try {
+        const row = await api(
+          `/media/${id}`,
+          MediaSchema,
+          "GET",
+          undefined,
+          signal,
+        );
+        if (!active(lockedSession, signal)) return;
+        await requireSavedSchedule(
+          pendingSchedule.key,
+          saved,
+          lockedSession,
+          signal,
+        );
+        if (!active(lockedSession, signal)) return;
+        if (row.id !== id || row.brand_id !== saved.post.brand_id)
+          throw new Error("The media check returned a different asset.");
+        reconcileMedia(row, lockedSession);
+      } catch (failure) {
+        if (!(failure instanceof ApiError && failure.status === 404))
+          throw failure;
+      }
+    }
+    await requireSavedSchedule(
+      pendingSchedule.key,
+      saved,
+      lockedSession,
+      signal,
+    );
+    if (!active(lockedSession, signal)) return;
+    await onSaved();
+    if (!active(lockedSession, signal)) return;
+    await clearScheduleIntent(
+      pendingSchedule.key,
+      saved,
+      { kind: "rejected" },
+      lockedSession,
+      signal,
+    );
+    if (!active(lockedSession, signal)) return;
+    setRecovery("unchecked");
+    setRecoveryMessage("");
+    setError(
+      mediaChanged
+        ? "Media descriptions changed. Review the refreshed descriptions before scheduling again."
+        : rejection.code === "schedule_request_retired"
+          ? "The original schedule was stopped. You can make changes and schedule again."
+          : `The original schedule was not made: ${rejection.message} You can correct it and schedule again.`,
+    );
+  };
   const recover = async (retry: boolean) => {
     if (running.current || !pendingSchedule.ready || !intent) return;
     let session: ApiSession;
@@ -264,14 +334,18 @@ export function useComposer({
             throw new Error(
               "This scheduling intent changed in another tab. Reopen it to review the current outcome.",
             );
-          if (saved.rejection_code === "schedule_request_conflict")
+          if (scheduleHasConflict(saved))
             throw new ApiError(
               "The server record does not match this saved request.",
               409,
               "schedule_request_conflict",
             );
           if (retry) {
-            if (saved.request_contract !== "request-id-v2" || !saved.uncertain)
+            if (
+              saved.request_contract !== "request-id-v2" ||
+              (saved.rejection_code === "media_version_conflict" &&
+                !saved.uncertain)
+            )
               throw new Error(
                 "Only an unresolved original schedule can be retried.",
               );
@@ -285,7 +359,8 @@ export function useComposer({
             if (!active(lockedSession, signal)) return;
             await clearScheduleIntent(
               pendingSchedule.key,
-              saved.id,
+              saved,
+              { kind: "accepted", publicationIds: rows.map((row) => row.id) },
               lockedSession,
               signal,
             );
@@ -304,7 +379,11 @@ export function useComposer({
           if (state.kind === "complete") {
             await clearScheduleIntent(
               pendingSchedule.key,
-              saved.id,
+              saved,
+              {
+                kind: "accepted",
+                publicationIds: state.publications.map((row) => row.id),
+              },
               lockedSession,
               signal,
             );
@@ -313,10 +392,18 @@ export function useComposer({
             setRecoveryMessage(confirmationMessage(state.publications));
             await onSaved();
           } else if (state.kind === "mismatch") {
+            await markScheduleMismatch(
+              pendingSchedule.key,
+              saved,
+              lockedSession,
+            );
+            if (!active(lockedSession, signal)) return;
             setRecovery("mismatch");
             setRecoveryMessage(
               "The server record does not match this saved request. The original remains locked for review.",
             );
+          } else if (state.kind === "rejected") {
+            await settleRejection(saved, state.error, lockedSession, signal);
           } else if (
             state.kind === "legacy" ||
             saved.request_contract !== "request-id-v2"
@@ -331,11 +418,6 @@ export function useComposer({
             setRecovery("partial");
             setRecoveryMessage(
               "The server returned only part of this request. The original remains saved; check again or retry the original schedule.",
-            );
-          } else if (!saved.uncertain && saved.rejection) {
-            setRecovery("release");
-            setRecoveryMessage(
-              `The original request was rejected: ${saved.rejection}`,
             );
           } else {
             setRecovery("retry");
@@ -405,63 +487,49 @@ export function useComposer({
             throw new Error("Scheduling intent changed in another tab.");
           if (
             saved.request_contract !== "request-id-v2" ||
-            saved.uncertain ||
-            !saved.rejection
+            scheduleHasConflict(saved)
           )
             throw new Error(
-              "The original outcome is not yet safe to release. Check it again.",
+              "This original schedule cannot be stopped safely here.",
             );
-          const state = await inspectScheduleIntent(
+          const state = await retireScheduleIntent(
             saved,
             lockedSession,
             signal,
           );
           if (!active(lockedSession, signal)) return;
-          if (state.kind !== "missing")
-            throw new Error(
-              "A server record exists or could not be verified. Check the original outcome again.",
+          if (state.kind === "complete") {
+            await clearScheduleIntent(
+              pendingSchedule.key,
+              saved,
+              {
+                kind: "accepted",
+                publicationIds: state.publications.map((row) => row.id),
+              },
+              lockedSession,
+              signal,
             );
-          if (saved.rejection_code === "media_version_conflict") {
-            const ids = Object.keys(saved.media_versions ?? {});
-            for (const id of ids) {
-              try {
-                const row = await api(
-                  `/media/${id}`,
-                  MediaSchema,
-                  "GET",
-                  undefined,
-                  signal,
-                );
-                if (!active(lockedSession, signal)) return;
-                if (row.id !== id || row.brand_id !== saved.post.brand_id)
-                  throw new Error(
-                    "The media check returned a different asset.",
-                  );
-                reconcileMedia(row, lockedSession);
-              } catch (failure) {
-                if (!(failure instanceof ApiError && failure.status === 404))
-                  throw failure;
-              }
-            }
-            await onSaved();
             if (!active(lockedSession, signal)) return;
-          }
-          await clearScheduleIntent(
-            pendingSchedule.key,
-            saved.id,
-            lockedSession,
-            signal,
-          );
-          if (!active(lockedSession, signal)) return;
-          if (saved.rejection_code === "media_version_conflict") {
-            setRecovery("unchecked");
-            setRecoveryMessage("");
-            setError(
-              "Media descriptions changed. Review the refreshed descriptions before scheduling again.",
+            setRecovery("complete");
+            setRecoveryMessage(confirmationMessage(state.publications));
+            await onSaved();
+          } else if (state.kind === "rejected") {
+            await settleRejection(saved, state.error, lockedSession, signal);
+          } else if (state.kind === "mismatch") {
+            await markScheduleMismatch(
+              pendingSchedule.key,
+              saved,
+              lockedSession,
+            );
+            throw new ApiError(
+              "The server record does not match this saved request.",
+              409,
+              "schedule_request_conflict",
             );
           } else {
-            await onSaved();
-            if (active(lockedSession, signal)) onClose();
+            throw new Error(
+              "The original outcome could not be fully confirmed. Check it again.",
+            );
           }
         },
         signal,
@@ -473,10 +541,22 @@ export function useComposer({
         mounted.current &&
         lifetime.current?.signal === signal &&
         isCurrentWorkspaceSession(session)
-      )
+      ) {
+        if (e instanceof ApiError && e.code === "schedule_request_conflict") {
+          await markScheduleMismatch(
+            pendingSchedule.key,
+            intent,
+            session,
+          ).catch(() => {});
+          setRecovery("mismatch");
+          setRecoveryMessage(
+            "The server record does not match this saved request. The original remains locked for review.",
+          );
+        }
         setError(
-          e instanceof Error ? e.message : "Unable to release the schedule.",
+          e instanceof Error ? e.message : "Unable to stop the schedule.",
         );
+      }
     } finally {
       running.current = false;
       if (
@@ -646,7 +726,7 @@ export function useComposer({
               date,
               mediaVersions,
             );
-            await sendScheduleIntent(
+            const rows = await sendScheduleIntent(
               pendingSchedule.key,
               schedule,
               lockedSession,
@@ -656,7 +736,8 @@ export function useComposer({
             if (!active(lockedSession, signal)) return;
             await clearScheduleIntent(
               pendingSchedule.key,
-              schedule.id,
+              schedule,
+              { kind: "accepted", publicationIds: rows.map((row) => row.id) },
               lockedSession,
               signal,
             );

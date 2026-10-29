@@ -417,7 +417,7 @@ export function Composer({
             <p>
               {recoveryMessage ||
                 (intent?.request_contract === "request-id-v2"
-                  ? "The outcome is not yet confirmed. This saved revision and its channel choices are locked until you check or retry the original schedule."
+                  ? "The outcome is not yet confirmed. This saved revision and its channel choices are locked until you check, retry, or stop the original schedule. Stopping first checks whether it already completed."
                   : intent?.request_contract === "request-id-v1"
                     ? "This older request has no saved media versions. Check its outcome and keep this record; it cannot be retried safely."
                     : "This older request has no recovery ID. Check its destinations and keep this record; retrying could create a duplicate.")}
@@ -445,15 +445,8 @@ export function Composer({
             >
               Check scheduling outcome
             </Button>
-            {recovery === "release" ? (
-              <Button onClick={() => void release()} disabled={busy}>
-                {intent.rejection_code === "media_version_conflict"
-                  ? "Refresh descriptions"
-                  : "Release and refresh"}
-              </Button>
-            ) : (
+            {recovery !== "release" &&
               intent.request_contract === "request-id-v2" &&
-              intent.uncertain &&
               !["mismatch", "legacy"].includes(recovery) && (
                 <Button
                   onClick={() => void recover(true)}
@@ -461,8 +454,18 @@ export function Composer({
                 >
                   Retry original schedule
                 </Button>
-              )
-            )}
+              )}
+            {intent.request_contract === "request-id-v2" &&
+              !["mismatch", "legacy"].includes(recovery) && (
+                <Button
+                  onClick={() => void release()}
+                  disabled={busy || !pendingSchedule.ready}
+                >
+                  {recovery === "release"
+                    ? "Refresh descriptions"
+                    : "Stop original schedule"}
+                </Button>
+              )}
           </>
         ) : (
           recovery !== "complete" && (

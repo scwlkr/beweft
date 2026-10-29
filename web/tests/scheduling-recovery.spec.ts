@@ -90,6 +90,8 @@ function receipt(f: Fixture, body: any, rows: any[]) {
       scheduled_at: body.scheduled_at ?? null,
       media_versions: body.media_versions ?? null,
     },
+    outcome: "accepted",
+    error: null,
     publications: rows,
   };
 }
@@ -263,58 +265,58 @@ test("a lost response recovers the original canceled publication after replaceme
   });
 });
 
-test("a confirmed first rejection can be released only after checking the request", async () => {
-  await withWorkspace(async (page, context, write) => {
-    const f = await setup(page, context, write);
-    let sends = 0,
-      reads = 0;
-    await page.route(
-      /\/api\/v1\/posts\/[^/]+\/schedule\?view=summary$/,
-      (route) => {
-        sends++;
-        return route.fulfill({
-          status: 400,
-          json: {
-            error: {
-              code: "invalid_request",
-              message: "Fixture rejected schedule",
+for (const status of [400, 403, 404, 422]) {
+  test(`a generic first ${status} and missing receipt remain unresolved`, async () => {
+    await withWorkspace(async (page, context, write) => {
+      const f = await setup(page, context, write);
+      let sends = 0,
+        reads = 0;
+      await page.route(
+        /\/api\/v1\/posts\/[^/]+\/schedule\?view=summary$/,
+        (route) => {
+          sends++;
+          return route.fulfill({
+            status,
+            json: {
+              error: {
+                code: "invalid_request",
+                message: "Fixture rejected schedule",
+              },
             },
-          },
+          });
+        },
+      );
+      await page.route("**/api/v1/schedule-requests/*", (route) => {
+        reads++;
+        return route.fulfill({
+          status: 404,
+          json: { error: { code: "not_found", message: "No record" } },
         });
-      },
-    );
-    await page.route("**/api/v1/schedule-requests/*", (route) => {
-      reads++;
-      return route.fulfill({
-        status: 404,
-        json: { error: { code: "not_found", message: "No record" } },
       });
+      await startSchedule(page);
+      await expect(page.getByText(/Fixture rejected schedule/)).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Retry original schedule" }),
+      ).toBeEnabled();
+      await page
+        .getByRole("button", { name: "Check scheduling outcome" })
+        .click();
+      await expect(
+        page.getByText(/No request record is visible yet/),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Stop original schedule" }),
+      ).toBeEnabled();
+      await expect(
+        page.getByLabel("Post text", { exact: true }),
+      ).toBeDisabled();
+      expect(reads).toBe(1);
+      expect(sends).toBe(1);
+      expect(f.patches()).toBe(1);
+      expect(await summaries(context, f.brand.id)).toHaveLength(0);
     });
-    await startSchedule(page);
-    await expect(page.getByText(/Fixture rejected schedule/)).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "Retry original schedule" }),
-    ).toHaveCount(0);
-    await expect(
-      page.getByRole("button", { name: "Release and refresh" }),
-    ).toHaveCount(0);
-    await page
-      .getByRole("button", { name: "Check scheduling outcome" })
-      .click();
-    await expect(
-      page.getByText(/The original request was rejected/),
-    ).toBeVisible();
-    await page.getByRole("button", { name: "Release and refresh" }).click();
-    await expect(page.getByRole("dialog")).toHaveCount(0);
-    await expect(
-      page.getByRole("button", { name: "Review pending schedule" }),
-    ).toHaveCount(0);
-    expect(reads).toBe(2);
-    expect(sends).toBe(1);
-    expect(f.patches()).toBe(1);
-    expect(await summaries(context, f.brand.id)).toHaveLength(0);
   });
-});
+}
 
 test("a later rejection cannot erase a previously uncertain request", async () => {
   await withWorkspace(async (page, context, write) => {
@@ -356,8 +358,8 @@ test("a later rejection cannot erase a previously uncertain request", async () =
       page.getByText(/No request record is visible yet/),
     ).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Release and refresh" }),
-    ).toHaveCount(0);
+      page.getByRole("button", { name: "Stop original schedule" }),
+    ).toBeEnabled();
     await expect(page.getByLabel("Post text", { exact: true })).toBeDisabled();
     expect(requests).toHaveLength(2);
     expect(requests[1]).toEqual(requests[0]);
@@ -409,7 +411,7 @@ test("partial and mismatched request receipts keep the original intent locked", 
       page.getByRole("button", { name: "Retry original schedule" }),
     ).toHaveCount(0);
     await expect(
-      page.getByRole("button", { name: "Release and refresh" }),
+      page.getByRole("button", { name: "Stop original schedule" }),
     ).toHaveCount(0);
     expect(f.patches()).toBe(1);
     expect(await summaries(context, f.brand.id)).toHaveLength(0);
@@ -480,7 +482,7 @@ test("a legacy unkeyed schedule is never retried as a new request", async () => 
   });
 });
 
-test("a late first rejection cannot clear uncertainty while a retry is in flight", async () => {
+test("a late abandoned failure cannot overwrite a newer conflict across reload", async () => {
   await withWorkspace(async (page, context, write) => {
     const f = await setup(page, context, write);
     const first = deferred(),
@@ -497,9 +499,9 @@ test("a late first rejection cannot clear uncertainty while a retry is in flight
           await releaseFirst.promise;
           await route
             .fulfill({
-              status: 400,
+              status: 503,
               json: {
-                error: { code: "invalid_request", message: "First rejected" },
+                error: { code: "unavailable", message: "Old request failed" },
               },
             })
             .catch(() => {});
@@ -510,8 +512,8 @@ test("a late first rejection cannot clear uncertainty while a retry is in flight
             status: 409,
             json: {
               error: {
-                code: "post_version_conflict",
-                message: "Retry rejected",
+                code: "schedule_request_conflict",
+                message: "Retry belongs to another schedule",
               },
             },
           });
@@ -538,17 +540,46 @@ test("a late first rejection cannot clear uncertainty while a retry is in flight
         .getByRole("button", { name: "Retry original schedule" })
         .click();
       await retry.promise;
+      releaseRetry.resolve();
+      await expect(
+        page.getByText(/server record does not match/),
+      ).toBeVisible();
+      await page.evaluate(() => {
+        const state = window as any;
+        let release!: () => void, held!: () => void;
+        const wait = new Promise<void>((resolve) => (release = resolve));
+        state.authHeld = new Promise<void>((resolve) => (held = resolve));
+        state.releaseAuth = release;
+        void navigator.locks.request("beweft:authentication", async () => {
+          held();
+          await wait;
+        });
+      });
+      await page.evaluate(() => (window as any).authHeld);
       releaseFirst.resolve();
+      await expect
+        .poll(() =>
+          page.evaluate(async () =>
+            (await navigator.locks.query()).pending.some(
+              (lock) => lock.name === "beweft:authentication",
+            ),
+          ),
+        )
+        .toBe(true);
+      await page.evaluate(async () => {
+        (window as any).releaseAuth();
+        await navigator.locks.request("beweft:authentication", () => {});
+      });
       await expect
         .poll(() =>
           page.evaluate(() => {
             const entry = Object.entries(localStorage).find(([key]) =>
               key.startsWith("beweft.pending-schedule:"),
             );
-            return entry ? JSON.parse(entry[1]).rejection : null;
+            return entry ? JSON.parse(entry[1]).rejection_code : null;
           }),
         )
-        .toContain("First rejected");
+        .toBe("schedule_request_conflict");
       const before = await page.evaluate(() =>
         JSON.parse(
           Object.entries(localStorage).find(([key]) =>
@@ -557,22 +588,94 @@ test("a late first rejection cannot clear uncertainty while a retry is in flight
         ),
       );
       expect(before.uncertain).toBe(true);
-      releaseRetry.resolve();
-      await expect(page.getByText(/Retry rejected/)).toBeVisible();
+      await page.reload();
       await page
-        .getByRole("button", { name: "Check scheduling outcome" })
+        .getByRole("button", { name: "Review pending schedule" })
         .click();
       await expect(
-        page.getByRole("button", { name: "Release and refresh" }),
+        page.getByText(/server record does not match/),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Retry original schedule" }),
       ).toHaveCount(0);
       expect(requests[1]).toEqual(requests[0]);
       expect(f.patches()).toBe(1);
     } finally {
+      await page
+        .evaluate(() => (window as any).releaseAuth?.())
+        .catch(() => {});
       releaseFirst.resolve();
       releaseRetry.resolve();
     }
   });
 });
+
+for (const changed of ["revision", "snapshot"] as const) {
+  test(`a held receipt cannot clear the same ID with a changed saved ${changed}`, async () => {
+    await withWorkspace(async (page, context, write) => {
+      const f = await setup(page, context, write);
+      const owner = (
+        await (await context.request.get("/api/v1/auth/me")).json()
+      ).data;
+      const key = `beweft.pending-schedule:${owner.id}:${f.brand.id}`;
+      const held = deferred(),
+        release = deferred();
+      await page.route(
+        /\/api\/v1\/posts\/[^/]+\/schedule\?view=summary$/,
+        async (route) => {
+          const response = await route.fetch();
+          expect(response.ok(), await response.text()).toBe(true);
+          await route.abort("failed");
+        },
+      );
+      await page.route("**/api/v1/schedule-requests/*", async (route) => {
+        const response = await route.fetch();
+        expect(response.ok(), await response.text()).toBe(true);
+        const payload = await response.json();
+        payload.data.outcome = "accepted";
+        payload.data.error = null;
+        held.resolve();
+        await release.promise;
+        await route.fulfill({ json: payload }).catch(() => {});
+      });
+      const other = await context.newPage();
+      try {
+        await other.goto("/#drafts");
+        await startSchedule(page);
+        await expect(
+          page.getByRole("button", { name: "Check scheduling outcome" }),
+        ).toBeEnabled();
+        await page
+          .getByRole("button", { name: "Check scheduling outcome" })
+          .click();
+        await held.promise;
+        const changedRecord = await other.evaluate(
+          ({ key, changed }) => {
+            const saved = JSON.parse(localStorage.getItem(key)!);
+            if (changed === "revision") saved.post.version += 1;
+            else saved.post.text = "Different saved snapshot";
+            localStorage.setItem(key, JSON.stringify(saved));
+            return saved;
+          },
+          { key, changed },
+        );
+        release.resolve();
+        await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+          "saved schedule changed",
+        );
+        const stored = await other.evaluate(
+          (key) => JSON.parse(localStorage.getItem(key)!),
+          key,
+        );
+        expect(stored).toEqual(changedRecord);
+        expect(await summaries(context, f.brand.id)).toHaveLength(1);
+      } finally {
+        release.resolve();
+        await other.close();
+      }
+    });
+  });
+}
 
 test("a schedule queued behind its lock cannot save or send after another tab signs out", async () => {
   await withWorkspace(async (old, context, write) => {
@@ -877,7 +980,7 @@ test("a receipt with different original IDs cannot replace already observed publ
     });
     await startSchedule(page);
     await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
-      "could not be fully confirmed",
+      "server record does not match",
     );
     const stored = await page.evaluate(() => {
       const entry = Object.entries(localStorage).find(([key]) =>
@@ -899,6 +1002,171 @@ test("a receipt with different original IDs cannot replace already observed publ
     expect((await summaries(context, f.brand.id)).map((row) => row.id)).toEqual(
       original.map((row) => row.id),
     );
+    expect(f.patches()).toBe(1);
+  });
+});
+
+test("a held retirement receipt cannot clear a changed same-ID snapshot", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    const owner = (await (await context.request.get("/api/v1/auth/me")).json())
+      .data;
+    const key = `beweft.pending-schedule:${owner.id}:${f.brand.id}`;
+    const held = deferred(),
+      release = deferred();
+    let sent: any;
+    await page.route(
+      /\/api\/v1\/posts\/[^/]+\/schedule\?view=summary$/,
+      (route) => {
+        sent = route.request().postDataJSON();
+        return route.abort("failed");
+      },
+    );
+    await page.route("**/api/v1/schedule-requests/*/retire", async (route) => {
+      const result = {
+        ...receipt(f, sent, []),
+        outcome: "rejected",
+        error: { code: "schedule_request_retired", message: "Stopped" },
+      };
+      held.resolve();
+      await release.promise;
+      await route.fulfill({ json: { data: result } }).catch(() => {});
+    });
+    const other = await context.newPage();
+    try {
+      await other.goto("/#drafts");
+      await startSchedule(page);
+      await page
+        .getByRole("button", { name: "Stop original schedule" })
+        .click();
+      await held.promise;
+      const updated = await other.evaluate((key) => {
+        const saved = JSON.parse(localStorage.getItem(key)!);
+        saved.post.text = "Changed during retirement";
+        localStorage.setItem(key, JSON.stringify(saved));
+        return saved;
+      }, key);
+      release.resolve();
+      await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+        "saved schedule changed",
+      );
+      expect(
+        await other.evaluate(
+          (key) => JSON.parse(localStorage.getItem(key)!),
+          key,
+        ),
+      ).toEqual(updated);
+      expect(await summaries(context, f.brand.id)).toEqual([]);
+    } finally {
+      release.resolve();
+      await other.close();
+    }
+  });
+});
+
+test("a matching rejected receipt unlocks correction and a deliberate new request", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    const sent: any[] = [];
+    await page.route(
+      /\/api\/v1\/posts\/[^/]+\/schedule\?view=summary$/,
+      (route) => {
+        sent.push(route.request().postDataJSON());
+        return sent.length === 1
+          ? route.fulfill({
+              status: 400,
+              json: {
+                error: {
+                  code: "provider_format_invalid",
+                  message: "Text is too long",
+                },
+              },
+            })
+          : route.continue();
+      },
+    );
+    await page.route("**/api/v1/schedule-requests/*", async (route) => {
+      if (route.request().url().endsWith(sent[0].request_id)) {
+        const result = {
+          ...receipt(f, sent[0], []),
+          outcome: "rejected",
+          error: {
+            code: "provider_format_invalid",
+            message: "Text is too long",
+          },
+        };
+        return route.fulfill({ json: { data: result } });
+      }
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBe(true);
+      const payload = await response.json();
+      payload.data.outcome = "accepted";
+      payload.data.error = null;
+      return route.fulfill({ json: payload });
+    });
+    await startSchedule(page);
+    await expect(page.getByLabel("Post text", { exact: true })).toBeDisabled();
+    await page
+      .getByRole("button", { name: "Check scheduling outcome" })
+      .click();
+    await expect(
+      page.getByText(/original schedule was not made: Text is too long/),
+    ).toBeVisible();
+    await expect(page.getByLabel("Post text", { exact: true })).toBeEnabled();
+    await page.getByLabel("Post text", { exact: true }).fill("Corrected text");
+    await page.getByRole("button", { name: "Schedule post" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(sent).toHaveLength(2);
+    expect(sent[1].request_id).not.toBe(sent[0].request_id);
+    expect(sent[1].version).toBe(sent[0].version + 1);
+    expect(await summaries(context, f.brand.id)).toHaveLength(1);
+    expect(f.patches()).toBe(2);
+  });
+});
+
+test("a generic 401 retains the unresolved intent through reauthentication", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    const owner = (await (await context.request.get("/api/v1/auth/me")).json())
+      .data;
+    const key = `beweft.pending-schedule:${owner.id}:${f.brand.id}`;
+    let sent: any;
+    await page.route(
+      /\/api\/v1\/posts\/[^/]+\/schedule\?view=summary$/,
+      (route) => {
+        sent = route.request().postDataJSON();
+        return route.fulfill({
+          status: 401,
+          json: { error: { code: "unauthorized", message: "Session expired" } },
+        });
+      },
+    );
+    await startSchedule(page);
+    await expect(page.getByLabel("Email address")).toBeVisible();
+    const saved = await page.evaluate(
+      (key) => JSON.parse(localStorage.getItem(key)!),
+      key,
+    );
+    expect(saved.id).toBe(sent.request_id);
+    expect(saved.uncertain).toBe(true);
+    await page.getByLabel("Email address").fill(process.env.BEWEFT_TEST_EMAIL!);
+    await page
+      .getByLabel("Password", { exact: true })
+      .fill(process.env.BEWEFT_TEST_PASSWORD!);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await page.getByRole("button", { name: "Review pending schedule" }).click();
+    await expect(page.getByLabel("Post text", { exact: true })).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: "Retry original schedule" }),
+    ).toBeEnabled();
+    expect(
+      (
+        await page.evaluate(
+          (key) => JSON.parse(localStorage.getItem(key)!),
+          key,
+        )
+      ).id,
+    ).toBe(saved.id);
     expect(f.patches()).toBe(1);
   });
 });

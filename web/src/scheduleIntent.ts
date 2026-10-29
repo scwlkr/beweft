@@ -51,6 +51,7 @@ export const ScheduleIntent = z
     rejection: z.string().optional(),
     rejection_code: z.string().optional(),
     observed_publication_ids: z.array(z.string().uuid()).optional(),
+    active_attempt_id: z.string().uuid().optional(),
   })
   .superRefine((intent, context) => {
     if (new Set(intent.channel_ids).size !== intent.channel_ids.length)
@@ -132,6 +133,8 @@ const ScheduleReceipt = z.object({
       .record(z.string(), z.number().int().positive().safe())
       .nullable(),
   }),
+  outcome: z.enum(["accepted", "rejected"]),
+  error: z.object({ code: z.string(), message: z.string() }).nullable(),
   publications: z.array(PublicationSummary),
 });
 export const scheduleEvent = "beweft-schedule-intent";
@@ -148,6 +151,7 @@ function persistScheduleIntent(key: string, intent: ScheduleIntent) {
     stored.uncertain !== intent.uncertain ||
     stored.rejection !== intent.rejection ||
     stored.rejection_code !== intent.rejection_code ||
+    stored.active_attempt_id !== intent.active_attempt_id ||
     JSON.stringify(stored.observed_publication_ids) !==
       JSON.stringify(intent.observed_publication_ids)
   )
@@ -155,34 +159,44 @@ function persistScheduleIntent(key: string, intent: ScheduleIntent) {
       "The schedule could not be saved in browser storage. Check storage before continuing.",
     );
 }
-export function writeScheduleIntent(
-  key: string,
-  intent: ScheduleIntent,
-  session: ApiSession,
-  signal?: AbortSignal,
-) {
-  return withWorkspaceSession(
-    session,
-    () => {
-      persistScheduleIntent(key, intent);
-      window.dispatchEvent(new Event(scheduleEvent));
-    },
-    signal,
-  );
-}
 export function clearScheduleIntent(
   key: string,
-  id: string,
+  intent: ScheduleIntent,
+  confirmed:
+    | { kind: "accepted"; publicationIds: string[] }
+    | { kind: "rejected" },
   session: ApiSession,
   signal?: AbortSignal,
 ) {
   return withWorkspaceSession(
     session,
     () => {
-      if (readScheduleIntent(key)?.id !== id)
+      const saved = readScheduleIntent(key);
+      if (!saved || !sameScheduleIntent(saved, intent))
         throw new Error(
           "The saved schedule changed. Reopen it before continuing.",
         );
+      if (
+        saved.rejection_code === "schedule_request_conflict" ||
+        (saved.observed_publication_ids &&
+          (confirmed.kind !== "accepted" ||
+            JSON.stringify([...saved.observed_publication_ids].sort()) !==
+              JSON.stringify([...confirmed.publicationIds].sort())))
+      ) {
+        if (!scheduleHasConflict(saved)) {
+          persistScheduleIntent(key, {
+            ...saved,
+            uncertain: true,
+            rejection:
+              "The server record does not match the observed publications.",
+            rejection_code: "schedule_request_conflict",
+          });
+          window.dispatchEvent(new Event(scheduleEvent));
+        }
+        throw new Error(
+          "The original scheduling outcome does not match the saved record. Keep it for review.",
+        );
+      }
       localStorage.removeItem(key);
       if (readScheduleIntent(key))
         throw new Error(
@@ -269,21 +283,75 @@ function sameMediaVersions(
   );
 }
 export function sameScheduleIntent(a: ScheduleIntent, b: ScheduleIntent) {
+  // Object property order in saved options is not part of the snapshot, but
+  // array order and every saved field are. Canonicalize before comparing.
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === "object")
+      return Object.fromEntries(
+        Object.entries(value)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, item]) => [key, canonical(item)]),
+      );
+    return value;
+  };
   return (
     a.id === b.id &&
     a.post.id === b.post.id &&
     a.post.brand_id === b.post.brand_id &&
     a.post.version === b.post.version &&
-    JSON.stringify(a.post) === JSON.stringify(b.post) &&
+    JSON.stringify(canonical(a.post)) === JSON.stringify(canonical(b.post)) &&
     a.owner_id === b.owner_id &&
     a.brand_id === b.brand_id &&
     a.request_contract === b.request_contract &&
     sameMediaVersions(a.media_versions, b.media_versions) &&
     a.mode === b.mode &&
-    a.scheduled_at === b.scheduled_at &&
+    (a.scheduled_at ? canonicalScheduleTime(a.scheduled_at) : null) ===
+      (b.scheduled_at ? canonicalScheduleTime(b.scheduled_at) : null) &&
     JSON.stringify([...a.channel_ids].sort()) ===
       JSON.stringify([...b.channel_ids].sort())
   );
+}
+export function scheduleHasConflict(intent: ScheduleIntent) {
+  return intent.rejection_code === "schedule_request_conflict";
+}
+export function requireSavedSchedule(
+  key: string,
+  intent: ScheduleIntent,
+  session: ApiSession,
+  signal?: AbortSignal,
+) {
+  return withWorkspaceSession(
+    session,
+    () => {
+      const saved = readScheduleIntent(key);
+      if (!saved || !sameScheduleIntent(saved, intent))
+        throw new Error(
+          "The saved schedule changed. Reopen it before continuing.",
+        );
+      if (scheduleHasConflict(saved))
+        throw new Error("The server record does not match this saved request.");
+      return saved;
+    },
+    signal,
+  );
+}
+export async function markScheduleMismatch(
+  key: string,
+  intent: ScheduleIntent,
+  session: ApiSession,
+) {
+  await withWorkspaceSession(session, () => {
+    const saved = readScheduleIntent(key);
+    if (!saved || !sameScheduleIntent(saved, intent)) return;
+    persistScheduleIntent(key, {
+      ...saved,
+      uncertain: true,
+      rejection: "The server record does not match this saved request.",
+      rejection_code: "schedule_request_conflict",
+    });
+    window.dispatchEvent(new Event(scheduleEvent));
+  });
 }
 function publicationCoverage(
   intent: ScheduleIntent,
@@ -321,7 +389,8 @@ export async function sendScheduleIntent(
       "This older schedule was sent without a request ID and cannot be retried safely.",
     );
   // Claim and persist uncertainty under both locks before crossing the network.
-  const prior = await withWorkspaceSession(
+  const attemptId = crypto.randomUUID();
+  await withWorkspaceSession(
     session,
     () => {
       const saved = readScheduleIntent(key);
@@ -329,7 +398,7 @@ export async function sendScheduleIntent(
         throw new Error(
           "The saved scheduling intent changed. Reopen it before continuing.",
         );
-      if (retry && saved?.rejection_code === "schedule_request_conflict")
+      if (retry && saved && scheduleHasConflict(saved))
         throw new ApiError(
           "The server record does not match this saved request.",
           409,
@@ -341,9 +410,9 @@ export async function sendScheduleIntent(
         uncertain: true,
         rejection: undefined,
         rejection_code: undefined,
+        active_attempt_id: attemptId,
       });
       window.dispatchEvent(new Event(scheduleEvent));
-      return priorIntent;
     },
     signal,
   );
@@ -365,7 +434,16 @@ export async function sendScheduleIntent(
     );
     requestSucceeded = true;
     requireWorkspaceSession(session);
-    if (publicationCoverage(intent, rows) !== "complete")
+    const coverage = publicationCoverage(intent, rows);
+    if (coverage === "mismatch") {
+      await markScheduleMismatch(key, intent, session);
+      throw new ApiError(
+        "The scheduling response did not match the original request.",
+        409,
+        "schedule_request_conflict",
+      );
+    }
+    if (coverage !== "complete")
       throw new Error(
         "The scheduling response was incomplete or did not match this request.",
       );
@@ -377,14 +455,22 @@ export async function sendScheduleIntent(
           throw new Error(
             "The saved schedule changed. Reopen it before continuing.",
           );
+        if (scheduleHasConflict(saved))
+          throw new ApiError(
+            "The server record does not match this saved request.",
+            409,
+            "schedule_request_conflict",
+          );
         const ids = rows.map((row) => row.id).sort();
         if (
           saved.observed_publication_ids &&
           JSON.stringify([...saved.observed_publication_ids].sort()) !==
             JSON.stringify(ids)
         )
-          throw new Error(
+          throw new ApiError(
             "The scheduling response did not match the original publications.",
+            409,
+            "schedule_request_conflict",
           );
         const updated = { ...saved, observed_publication_ids: ids };
         persistScheduleIntent(key, updated);
@@ -397,6 +483,14 @@ export async function sendScheduleIntent(
     // summary cannot establish the original time or media versions. Verify the
     // immutable receipt and require the same original identities before clearing.
     const receipt = await inspectScheduleIntent(observed, session, signal);
+    if (receipt.kind === "mismatch") {
+      await markScheduleMismatch(key, intent, session);
+      throw new ApiError(
+        "The server record does not match this saved request.",
+        409,
+        "schedule_request_conflict",
+      );
+    }
     if (
       receipt.kind !== "complete" ||
       JSON.stringify(rows.map((row) => row.id).sort()) !==
@@ -412,20 +506,21 @@ export async function sendScheduleIntent(
         await withWorkspaceSession(session, () => {
           const saved = readScheduleIntent(key);
           if (saved && sameScheduleIntent(saved, intent)) {
+            const mismatch =
+              failure instanceof ApiError &&
+              failure.code === "schedule_request_conflict";
+            // A proven mismatch dominates every later observation. A stale
+            // abandoned attempt may not overwrite a newer attempt's state.
+            if (
+              scheduleHasConflict(saved) ||
+              (!mismatch && saved.active_attempt_id !== attemptId)
+            )
+              return;
             const confirmedRejection =
               failure instanceof ApiError &&
               !requestSucceeded &&
-              ((failure.status === 409 &&
-                failure.code === "media_version_conflict") ||
-                (!prior.uncertain &&
-                  !signal?.aborted &&
-                  failure.status >= 400 &&
-                  failure.status < 500 &&
-                  ![
-                    "session_changed",
-                    "schedule_request_in_progress",
-                    "schedule_request_conflict",
-                  ].includes(failure.code)));
+              failure.status === 409 &&
+              failure.code === "media_version_conflict";
             persistScheduleIntent(key, {
               ...saved,
               uncertain: !confirmedRejection,
@@ -470,6 +565,13 @@ export async function inspectScheduleIntent(
     throw failure;
   }
   requireWorkspaceSession(session);
+  return matchScheduleReceipt(intent, receipt);
+}
+
+function matchScheduleReceipt(
+  intent: ScheduleIntent,
+  receipt: z.infer<typeof ScheduleReceipt>,
+) {
   const requested = [...intent.channel_ids].sort();
   const returned = [...receipt.request.channel_ids].sort();
   const expectedTime = intent.scheduled_at
@@ -492,6 +594,16 @@ export async function inspectScheduleIntent(
     (!!receipt.request.scheduled_at && returnedTime === null)
   )
     return { kind: "mismatch" as const };
+  if (receipt.outcome === "rejected") {
+    if (
+      !receipt.error ||
+      receipt.publications.length !== 0 ||
+      intent.observed_publication_ids
+    )
+      return { kind: "mismatch" as const };
+    return { kind: "rejected" as const, error: receipt.error };
+  }
+  if (receipt.error) return { kind: "mismatch" as const };
   const coverage = publicationCoverage(intent, receipt.publications);
   if (
     coverage === "complete" &&
@@ -501,4 +613,34 @@ export async function inspectScheduleIntent(
   )
     return { kind: "mismatch" as const };
   return { kind: coverage, publications: receipt.publications };
+}
+
+// The server serializes retirement with the original request. A successful
+// response either returns its existing result or prevents a late original POST
+// from ever accepting. Missing records and transport errors are inconclusive.
+export async function retireScheduleIntent(
+  intent: ScheduleIntent,
+  session: ApiSession,
+  signal?: AbortSignal,
+) {
+  if (intent.request_contract !== "request-id-v2" || !intent.media_versions)
+    throw new Error("This older schedule cannot be stopped safely here.");
+  signal?.throwIfAborted();
+  requireWorkspaceSession(session);
+  const receipt = await api(
+    `/schedule-requests/${intent.id}/retire`,
+    ScheduleReceipt,
+    "POST",
+    {
+      post_id: intent.post.id,
+      brand_id: intent.post.brand_id,
+      version: intent.post.version,
+      channel_ids: intent.channel_ids,
+      scheduled_at: intent.scheduled_at ?? null,
+      media_versions: intent.media_versions,
+    },
+  );
+  signal?.throwIfAborted();
+  requireWorkspaceSession(session);
+  return matchScheduleReceipt(intent, receipt);
 }

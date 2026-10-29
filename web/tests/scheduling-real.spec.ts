@@ -786,3 +786,203 @@ test("a media-conflict error from receipt lookup cannot release a committed sche
     expect(f.patches()).toBe(1);
   });
 });
+
+test("a generic 400 and 404 cannot release a transaction held before commit", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    const release = await holdLock(
+      `SELECT pg_advisory_xact_lock(hashtextextended('${f.channel.id}',0))`,
+    );
+    const forwarded = deferred();
+    let upstream: ReturnType<typeof context.request.post> | undefined;
+    await page.route(routeFor(f.post.id), async (route) => {
+      upstream = context.request.post(
+        `/api/v1/posts/${f.post.id}/schedule?view=summary`,
+        {
+          data: route.request().postDataJSON(),
+          headers: {
+            "X-Beweft-Request": "1",
+            Origin: process.env.BEWEFT_TEST_URL!,
+          },
+        },
+      );
+      await waitForLock("pg_advisory_xact_lock");
+      forwarded.resolve();
+      await route.fulfill({
+        status: 400,
+        json: {
+          error: { code: "invalid_request", message: "Proxy rejected request" },
+        },
+      });
+    });
+    try {
+      await start(page);
+      await forwarded.promise;
+      await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+        "Proxy rejected request",
+      );
+      const original = await pending(page, f.key);
+      expect(original.uncertain).toBe(true);
+      expect(
+        (
+          await context.request.get(`/api/v1/schedule-requests/${original.id}`)
+        ).status(),
+      ).toBe(404);
+      await page
+        .getByRole("button", { name: "Check scheduling outcome" })
+        .click();
+      await expect(
+        page.getByText(/No request record is visible yet/),
+      ).toBeVisible();
+      await expect(
+        page.getByLabel("Post text", { exact: true }),
+      ).toBeDisabled();
+      await page
+        .getByRole("button", { name: "Stop original schedule" })
+        .click();
+      await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+        "still in progress",
+      );
+      expect((await pending(page, f.key)).id).toBe(original.id);
+      expect(f.patches()).toBe(1);
+      await release();
+      const response = await upstream!;
+      expect(response.ok(), await response.text()).toBe(true);
+      await page
+        .getByRole("button", { name: "Check scheduling outcome" })
+        .click();
+      await expect(
+        page.getByText(/original request is confirmed/),
+      ).toBeVisible();
+      expect(
+        await read(context, `/publications?brand_id=${f.brand.id}`),
+      ).toHaveLength(1);
+      expect((await read(context, `/posts/${f.post.id}`)).version).toBe(
+        original.post.version,
+      );
+      expect(f.patches()).toBe(1);
+    } finally {
+      await release();
+      await upstream?.catch(() => {});
+    }
+  });
+});
+
+test("retirement before a delayed original POST prevents it from scheduling", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    let body: any;
+    await page.route(routeFor(f.post.id), async (route) => {
+      body = route.request().postDataJSON();
+      await route.fulfill({
+        status: 400,
+        json: { error: { code: "invalid_request", message: "Response lost" } },
+      });
+    });
+    await start(page);
+    await expect(
+      page.getByRole("button", { name: "Stop original schedule" }),
+    ).toBeEnabled();
+    const original = await pending(page, f.key);
+    await page.getByRole("button", { name: "Stop original schedule" }).click();
+    await expect(page.getByText(/original schedule was stopped/)).toBeVisible();
+    expect(await pending(page, f.key)).toBeNull();
+    const receipt = await read(context, `/schedule-requests/${original.id}`);
+    expect(receipt.outcome).toBe("rejected");
+    expect(receipt.error.code).toBe("schedule_request_retired");
+    const delayed = await context.request.post(
+      `/api/v1/posts/${f.post.id}/schedule?view=summary`,
+      {
+        data: body,
+        headers: {
+          "X-Beweft-Request": "1",
+          Origin: process.env.BEWEFT_TEST_URL!,
+        },
+      },
+    );
+    expect(delayed.status()).toBe(409);
+    expect((await delayed.json()).error.code).toBe("schedule_request_retired");
+    expect(await read(context, `/publications?brand_id=${f.brand.id}`)).toEqual(
+      [],
+    );
+    expect((await read(context, `/posts/${f.post.id}`)).version).toBe(
+      original.post.version,
+    );
+    expect(f.patches()).toBe(1);
+  });
+});
+
+test("stopping a committed request returns its original accepted publication", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    let originalRows: any[] = [];
+    await page.route(routeFor(f.post.id), async (route) => {
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBe(true);
+      originalRows = (await response.json()).data;
+      await route.abort("failed");
+    });
+    await start(page);
+    const saved = await pending(page, f.key);
+    await page.getByRole("button", { name: "Stop original schedule" }).click();
+    await expect(page.getByText(/original request is confirmed/)).toBeVisible();
+    expect(await pending(page, f.key)).toBeNull();
+    const rows = await read(
+      context,
+      `/publications?brand_id=${f.brand.id}&view=summary`,
+    );
+    expect(rows.map((row: any) => row.id)).toEqual(
+      originalRows.map((row: any) => row.id),
+    );
+    expect((await read(context, `/posts/${f.post.id}`)).version).toBe(
+      saved.post.version,
+    );
+    expect(f.patches()).toBe(1);
+  });
+});
+
+test("a lost retirement response recovers its durable rejection after reload", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    let body: any;
+    await page.route(routeFor(f.post.id), async (route) => {
+      body = route.request().postDataJSON();
+      await route.abort("failed");
+    });
+    await page.route("**/api/v1/schedule-requests/*/retire", async (route) => {
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBe(true);
+      await route.abort("failed");
+    });
+    await start(page);
+    const saved = await pending(page, f.key);
+    await page.getByRole("button", { name: "Stop original schedule" }).click();
+    await expect(page.getByRole("dialog").getByRole("alert")).toBeVisible();
+    expect((await pending(page, f.key)).id).toBe(saved.id);
+    expect(
+      (await read(context, `/schedule-requests/${saved.id}`)).outcome,
+    ).toBe("rejected");
+    await page.reload();
+    await page.getByRole("button", { name: "Review pending schedule" }).click();
+    await page
+      .getByRole("button", { name: "Check scheduling outcome" })
+      .click();
+    await expect(page.getByText(/original schedule was stopped/)).toBeVisible();
+    expect(await pending(page, f.key)).toBeNull();
+    const delayed = await context.request.post(
+      `/api/v1/posts/${f.post.id}/schedule?view=summary`,
+      {
+        data: body,
+        headers: {
+          "X-Beweft-Request": "1",
+          Origin: process.env.BEWEFT_TEST_URL!,
+        },
+      },
+    );
+    expect(delayed.status()).toBe(409);
+    expect((await delayed.json()).error.code).toBe("schedule_request_retired");
+    expect(await read(context, `/publications?brand_id=${f.brand.id}`)).toEqual(
+      [],
+    );
+  });
+});
