@@ -5,6 +5,8 @@ import {
   advanceApiSession,
   authLock,
   ApiError,
+  AuthStorageError,
+  authEpochKey,
   BrandSchema,
   ChannelSchema,
   HealthSchema,
@@ -14,7 +16,13 @@ import {
   ProviderSchema,
   PublicationSchema,
   isCurrentApiSession,
+  captureApiSession,
+  onAuthIdentityChange,
+  onAuthStorageError,
   onUnauthorized,
+  readAuthEpoch,
+  rotateAuthEpoch,
+  setApiWorkspaceEpoch,
   ok,
   type Brand,
   type Channel,
@@ -24,17 +32,30 @@ import {
   type Post,
   type Provider,
   type Publication,
+  type ApiSession,
 } from "./api";
 import { routeFromHash, type Route } from "./navigation";
 type LoadArea = "brands" | "collections" | "providers" | "health";
+const preference = (key: string, fallback: string) => {
+  try {
+    return localStorage.getItem(key) ?? fallback;
+  } catch {
+    return fallback;
+  }
+};
+const savePreference = (key: string, value: string) => {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* Auth reports unavailable storage. */
+  }
+};
 
 export function useWorkspace() {
   const [ready, setReadyState] = useState<boolean | null>(null);
   const [route, setRoute] = useState<Route>(routeFromHash);
   const [brands, setBrands] = useState<Brand[]>([]);
-  const [brandId, setBrandId] = useState(
-    localStorage.getItem("beweft.brand") ?? "",
-  );
+  const [brandId, setBrandId] = useState(preference("beweft.brand", ""));
   const [channels, setChannels] = useState<Channel[]>([]);
   const [posts, setPosts] = useState<Post[]>([]);
   const [ideas, setIdeas] = useState<Idea[]>([]);
@@ -58,11 +79,12 @@ export function useWorkspace() {
   >(undefined);
   const [brandOpen, setBrandOpen] = useState(false);
   const [search, setSearch] = useState("");
-  const [theme, setTheme] = useState(
-    localStorage.getItem("beweft.theme") ?? "system",
-  );
+  const [theme, setTheme] = useState(preference("beweft.theme", "system"));
   const readyRef = useRef<boolean | null>(null);
   const session = useRef(0);
+  const sessionEpoch = useRef<string | null>(null);
+  const verification = useRef(0);
+  const [sessionRevision, setSessionRevision] = useState(0);
   const selection = useRef(0);
   // Only an explicit choice invalidates in-flight brand-list snapshots. An
   // automatic fallback still needs newer authoritative lists to be applied.
@@ -93,13 +115,24 @@ export function useWorkspace() {
     setComposer(undefined);
   }, []);
   const setReady = useCallback(
-    (value: boolean) => {
-      if (readyRef.current === value) return;
+    (value: boolean, epoch?: string) => {
+      if (value && !epoch)
+        throw new Error("An authenticated workspace needs a session epoch.");
+      if (
+        readyRef.current === value &&
+        (!value || sessionEpoch.current === epoch)
+      )
+        return;
+      const clear =
+        !value || (readyRef.current === true && sessionEpoch.current !== epoch);
       readyRef.current = value;
+      sessionEpoch.current = value ? epoch! : null;
+      setApiWorkspaceEpoch(sessionEpoch.current);
       ++session.current;
       advanceApiSession();
+      setSessionRevision((current) => current + 1);
       if (value) setSignOutError("");
-      if (!value) {
+      if (clear) {
         ++selection.current;
         ++actionGeneration.current;
         clearBrandData();
@@ -119,48 +152,119 @@ export function useWorkspace() {
     },
     [clearBrandData],
   );
+  const verifySession = useCallback(async () => {
+    if (signingOutRef.current) return;
+    const check = ++verification.current;
+    let captured: ApiSession | undefined;
+    try {
+      captured = captureApiSession();
+      await api("/auth/me", z.object({ id: z.string(), email: z.string() }));
+      if (
+        check === verification.current &&
+        isCurrentApiSession(captured) &&
+        !signingOutRef.current
+      )
+        setReady(true, captured.epoch);
+    } catch (failure) {
+      if (
+        check !== verification.current ||
+        (captured && !isCurrentApiSession(captured))
+      )
+        return;
+      setReady(false);
+      if (failure instanceof AuthStorageError) setSignOutError(failure.message);
+      else if (!(failure instanceof ApiError && failure.status === 401))
+        setSignOutError(
+          failure instanceof Error
+            ? failure.message
+            : "Unable to check your session.",
+        );
+    }
+  }, [setReady]);
+  const identityChanged = useCallback(() => {
+    let epoch: string;
+    try {
+      epoch = readAuthEpoch();
+    } catch {
+      return;
+    }
+    if (readyRef.current === true && sessionEpoch.current === epoch) return;
+    if (readyRef.current === true) setReady(false);
+    if (!signingOutRef.current) void verifySession();
+  }, [setReady, verifySession]);
+  const acceptSession = useCallback(
+    (epoch: string) => {
+      try {
+        if (readAuthEpoch() === epoch) setReady(true, epoch);
+        else {
+          setReady(false);
+          void verifySession();
+        }
+      } catch {
+        /* The storage listener presents the error. */
+      }
+    },
+    [setReady, verifySession],
+  );
   useEffect(
     () =>
-      onUnauthorized((generation) => {
-        if (readyRef.current === true && isCurrentApiSession(generation))
+      onUnauthorized((requestSession) => {
+        if (
+          readyRef.current === true &&
+          sessionEpoch.current === requestSession.epoch &&
+          isCurrentApiSession(requestSession)
+        )
           setReady(false);
       }),
     [setReady],
   );
   useEffect(() => {
-    let active = true;
-    const sessionId = session.current;
-    api("/auth/me", z.object({ id: z.string(), email: z.string() }))
-      .then(() => {
-        if (active && session.current === sessionId) setReady(true);
-      })
-      .catch((e) => {
-        if (!active || session.current !== sessionId) return;
-        if (e instanceof ApiError && e.status === 401) setReady(false);
-        else {
-          setReady(false);
-          setError(e.message);
-        }
-      });
-    return () => {
-      active = false;
+    const removeIdentity = onAuthIdentityChange(identityChanged);
+    const removeStorageError = onAuthStorageError((failure) => {
+      setReady(false);
+      setSignOutError(failure.message);
+    });
+    const storage = (event: StorageEvent) => {
+      if (event.key === authEpochKey || event.key === null) identityChanged();
     };
-  }, [setReady]);
+    window.addEventListener("storage", storage);
+    return () => {
+      removeIdentity();
+      removeStorageError();
+      window.removeEventListener("storage", storage);
+    };
+  }, [identityChanged, setReady]);
+  useEffect(() => {
+    void verifySession();
+    return () => {
+      ++verification.current;
+    };
+  }, [verifySession]);
   const signOut = async () => {
     if (signingOutRef.current || readyRef.current !== true) return;
+    const observedEpoch = sessionEpoch.current;
     signingOutRef.current = true;
     setSigningOut(true);
     setSignOutError("");
     setReady(false);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
+    let superseded = false;
     try {
-      await authLock(
-        () => api("/auth/logout", ok, "POST", {}, controller.signal),
-        controller.signal,
-      );
+      await authLock(async () => {
+        if (!observedEpoch || readAuthEpoch() !== observedEpoch) {
+          superseded = true;
+          return;
+        }
+        try {
+          await api("/auth/logout", ok, "POST", {}, controller.signal);
+        } finally {
+          rotateAuthEpoch();
+        }
+      }, controller.signal);
     } catch (failure) {
-      if (!(failure instanceof ApiError && failure.status === 401))
+      if (failure instanceof AuthStorageError) setSignOutError(failure.message);
+      else if (!(failure instanceof ApiError && failure.status === 401))
         setSignOutError(
           "The server could not confirm sign-out. Sign in again and retry when it is reachable.",
         );
@@ -168,6 +272,7 @@ export function useWorkspace() {
       clearTimeout(timeout);
       signingOutRef.current = false;
       setSigningOut(false);
+      if (superseded) void verifySession();
     }
   };
   useEffect(() => {
@@ -181,7 +286,7 @@ export function useWorkspace() {
       (document.documentElement.dataset.theme =
         theme === "system" ? (match.matches ? "dark" : "light") : theme);
     apply();
-    localStorage.setItem("beweft.theme", theme);
+    savePreference("beweft.theme", theme);
     match.addEventListener("change", apply);
     return () => match.removeEventListener("change", apply);
   }, [theme]);
@@ -199,7 +304,7 @@ export function useWorkspace() {
       setToast("");
       clearBrandData();
       setBrandId(id);
-      localStorage.setItem("beweft.brand", id);
+      savePreference("beweft.brand", id);
       setSidebar(false);
       setSearch("");
       setLoading(true);
@@ -215,24 +320,31 @@ export function useWorkspace() {
   );
   const load = useCallback(async () => {
     if (!ready || context.current !== brandId) return;
+    let requestSession: ApiSession;
+    try {
+      requestSession = captureApiSession();
+    } catch {
+      return;
+    }
+    if (requestSession.epoch !== sessionEpoch.current) {
+      identityChanged();
+      return;
+    }
     const requestId = ++requests.current;
     const sessionId = session.current;
     const selectionId = selection.current;
     const manualSelectionId = manualSelection.current;
     const currentSession = () =>
-      readyRef.current === true && session.current === sessionId;
+      readyRef.current === true &&
+      session.current === sessionId &&
+      sessionEpoch.current === requestSession.epoch &&
+      isCurrentApiSession(requestSession);
     const currentSelection = () =>
       currentSession() &&
       selection.current === selectionId &&
       context.current === brandId;
     const currentBrandList = () =>
       currentSession() && manualSelection.current === manualSelectionId;
-    const watchAuth = <T>(promise: Promise<T>) =>
-      promise.catch((e: unknown) => {
-        if (e instanceof ApiError && e.status === 401 && currentSession())
-          setReady(false);
-        throw e;
-      });
     const report = (area: LoadArea, message: string) => {
       if (
         !(area === "brands" ? currentBrandList() : currentSelection()) ||
@@ -257,7 +369,7 @@ export function useWorkspace() {
       promise: Promise<T>,
       update: (value: T) => void,
     ) => {
-      void watchAuth(promise).then(
+      void promise.then(
         (value) => {
           apply(area, () => update(value));
           report(area, "");
@@ -274,7 +386,7 @@ export function useWorkspace() {
     metadata("health", api("/jobs/health", HealthSchema), setHealth);
     let area: LoadArea = "brands";
     try {
-      const bs = await watchAuth(api("/brands", z.array(BrandSchema)));
+      const bs = await api("/brands", z.array(BrandSchema));
       if (!apply("brands", () => setBrands(bs))) return;
       report("brands", "");
       const selected = context.current;
@@ -290,11 +402,11 @@ export function useWorkspace() {
       if (next) {
         const q = `?brand_id=${encodeURIComponent(next)}`;
         const [cs, posts, ins, ms, pubs] = await Promise.all([
-          watchAuth(api(`/channels${q}`, z.array(ChannelSchema))),
-          watchAuth(api(`/posts${q}`, z.array(PostSchema))),
-          watchAuth(api(`/ideas${q}`, z.array(IdeaSchema))),
-          watchAuth(api(`/media${q}`, z.array(MediaSchema))),
-          watchAuth(api(`/publications${q}`, z.array(PublicationSchema))),
+          api(`/channels${q}`, z.array(ChannelSchema)),
+          api(`/posts${q}`, z.array(PostSchema)),
+          api(`/ideas${q}`, z.array(IdeaSchema)),
+          api(`/media${q}`, z.array(MediaSchema)),
+          api(`/publications${q}`, z.array(PublicationSchema)),
         ]);
         apply("collections", () => {
           setChannels(cs);
@@ -315,7 +427,14 @@ export function useWorkspace() {
         setLoading(false);
       }
     }
-  }, [ready, brandId, selectBrand, clearBrandData, setReady]);
+  }, [
+    ready,
+    brandId,
+    selectBrand,
+    clearBrandData,
+    identityChanged,
+    sessionRevision,
+  ]);
   useEffect(() => {
     void load();
   }, [load]);
@@ -324,37 +443,65 @@ export function useWorkspace() {
     const timer = setInterval(() => void load(), 30000);
     return () => clearInterval(timer);
   }, [ready, load]);
-  const action = async (fn: () => Promise<unknown>, message = "Saved") => {
+  const action = async (
+    fn: () => Promise<unknown>,
+    message = "Saved",
+    guard: "selection" | "session" = "selection",
+    onCommitted?: () => void,
+  ) => {
     if (pending) return false;
+    let requestSession: ApiSession;
+    try {
+      requestSession = captureApiSession();
+    } catch {
+      return false;
+    }
+    if (requestSession.epoch !== sessionEpoch.current) {
+      identityChanged();
+      return false;
+    }
     const actionId = ++actionGeneration.current;
     const sessionId = session.current;
     const selectionId = selection.current;
     const currentAction = () =>
       readyRef.current === true &&
       session.current === sessionId &&
-      selection.current === selectionId;
+      sessionEpoch.current === requestSession.epoch &&
+      isCurrentApiSession(requestSession) &&
+      (guard === "session" || selection.current === selectionId);
     setPending(true);
     setError("");
     try {
       await fn();
       if (!currentAction()) return false;
+      onCommitted?.();
       await load();
       if (!currentAction()) return false;
       setToast(message);
       return true;
     } catch (e: unknown) {
-      if (
-        e instanceof ApiError &&
-        e.status === 401 &&
-        readyRef.current &&
-        session.current === sessionId
-      )
-        setReady(false);
-      else if (currentAction()) setError((e as Error).message);
+      if (currentAction() && !(e instanceof ApiError && e.status === 401))
+        setError((e as Error).message);
       return false;
     } finally {
       if (actionGeneration.current === actionId) setPending(false);
     }
+  };
+  const createBrand = async (name: string) => {
+    const manualSelectionId = manualSelection.current;
+    let created: Brand | undefined;
+    await action(
+      async () => {
+        created = await api("/brands", BrandSchema, "POST", { name });
+      },
+      "Brand created",
+      "session",
+      () => {
+        setBrandOpen(false);
+        if (created && manualSelection.current === manualSelectionId)
+          chooseBrand(created.id);
+      },
+    );
   };
   const go = (r: Route) => {
     location.hash = r;
@@ -364,7 +511,7 @@ export function useWorkspace() {
   };
   return {
     ready,
-    setReady,
+    acceptSession,
     signingOut,
     signOutError,
     signOut,
@@ -403,5 +550,6 @@ export function useWorkspace() {
     action,
     go,
     chooseBrand,
+    createBrand,
   };
 }

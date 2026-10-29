@@ -135,18 +135,96 @@ export class ApiError extends Error {
   }
 }
 let sessionGeneration = 0;
-const unauthorizedListeners = new Set<(generation: number) => void>();
+export const authEpochKey = "beweft.auth-epoch";
+export type ApiSession = { generation: number; epoch: string };
+export class AuthStorageError extends Error {
+  constructor() {
+    super(
+      "Browser storage is unavailable. Enable site storage for beweft, then reload before signing in.",
+    );
+  }
+}
+let workspaceEpoch: string | null = null;
+const unauthorizedListeners = new Set<(session: ApiSession) => void>();
+const identityListeners = new Set<() => void>();
+const storageListeners = new Set<(error: AuthStorageError) => void>();
+export function readAuthEpoch() {
+  try {
+    let epoch = localStorage.getItem(authEpochKey);
+    if (!epoch) {
+      epoch = crypto.randomUUID();
+      localStorage.setItem(authEpochKey, epoch);
+      epoch = localStorage.getItem(authEpochKey);
+    }
+    if (!epoch) throw new Error("Auth epoch was not saved");
+    return epoch;
+  } catch {
+    const failure = new AuthStorageError();
+    storageListeners.forEach((listener) => listener(failure));
+    throw failure;
+  }
+}
+export function rotateAuthEpoch() {
+  try {
+    const epoch = crypto.randomUUID();
+    localStorage.setItem(authEpochKey, epoch);
+    if (localStorage.getItem(authEpochKey) !== epoch)
+      throw new Error("Auth epoch was not saved");
+    return epoch;
+  } catch {
+    const failure = new AuthStorageError();
+    storageListeners.forEach((listener) => listener(failure));
+    throw failure;
+  }
+}
+export function captureApiSession(): ApiSession {
+  return { generation: sessionGeneration, epoch: readAuthEpoch() };
+}
+export function setApiWorkspaceEpoch(epoch: string | null) {
+  workspaceEpoch = epoch;
+}
 export function advanceApiSession() {
   ++sessionGeneration;
 }
-export function onUnauthorized(listener: (generation: number) => void) {
+export function onUnauthorized(listener: (session: ApiSession) => void) {
   unauthorizedListeners.add(listener);
   return () => {
     unauthorizedListeners.delete(listener);
   };
 }
-export function isCurrentApiSession(generation: number) {
-  return generation === sessionGeneration;
+export function onAuthIdentityChange(listener: () => void) {
+  identityListeners.add(listener);
+  return () => {
+    identityListeners.delete(listener);
+  };
+}
+export function onAuthStorageError(
+  listener: (error: AuthStorageError) => void,
+) {
+  storageListeners.add(listener);
+  return () => {
+    storageListeners.delete(listener);
+  };
+}
+export function isCurrentApiSession(session: ApiSession) {
+  try {
+    return (
+      session.generation === sessionGeneration &&
+      session.epoch === readAuthEpoch()
+    );
+  } catch {
+    return false;
+  }
+}
+function requireCurrentApiSession(session: ApiSession) {
+  if (isCurrentApiSession(session)) return;
+  if (workspaceEpoch !== null)
+    identityListeners.forEach((listener) => listener());
+  throw new ApiError(
+    "The browser session changed. Refreshing your workspace.",
+    401,
+    "session_changed",
+  );
 }
 export async function authLock<T>(
   work: () => Promise<T>,
@@ -162,34 +240,66 @@ export async function api<T>(
   body?: unknown,
   signal?: AbortSignal,
 ): Promise<T> {
-  const generation = sessionGeneration;
+  const session = captureApiSession();
+  if (
+    ![
+      "/auth/me",
+      "/auth/status",
+      "/auth/login",
+      "/auth/bootstrap",
+      "/auth/logout",
+    ].includes(path)
+  ) {
+    if (workspaceEpoch !== session.epoch) {
+      if (workspaceEpoch !== null)
+        identityListeners.forEach((listener) => listener());
+      throw new ApiError(
+        "The browser session changed. Refreshing your workspace.",
+        401,
+        "session_changed",
+      );
+    }
+  }
   const multipart = body instanceof FormData;
-  const response = await fetch(`/api/v1${path}`, {
-    method,
-    credentials: "same-origin",
-    signal,
-    headers: {
-      ...(method === "GET" ? {} : { "X-Beweft-Request": "1" }),
-      ...(body && !multipart ? { "Content-Type": "application/json" } : {}),
-    },
-    body:
-      body === undefined ? undefined : multipart ? body : JSON.stringify(body),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`/api/v1${path}`, {
+      method,
+      credentials: "same-origin",
+      signal,
+      headers: {
+        ...(method === "GET" ? {} : { "X-Beweft-Request": "1" }),
+        ...(body && !multipart ? { "Content-Type": "application/json" } : {}),
+      },
+      body:
+        body === undefined
+          ? undefined
+          : multipart
+            ? body
+            : JSON.stringify(body),
+    });
+  } catch (failure) {
+    requireCurrentApiSession(session);
+    throw failure;
+  }
+  requireCurrentApiSession(session);
   if (
     response.status === 401 &&
     !["/auth/login", "/auth/bootstrap", "/auth/status"].includes(path)
   )
-    unauthorizedListeners.forEach((listener) => listener(generation));
+    unauthorizedListeners.forEach((listener) => listener(session));
   let result: unknown;
   try {
     result = await response.json();
   } catch {
+    requireCurrentApiSession(session);
     throw new ApiError(
       "The server returned an unreadable response. Please try again.",
       response.status,
       "invalid_response",
     );
   }
+  requireCurrentApiSession(session);
   if (!response.ok) {
     const error = z
       .object({ error: z.object({ code: z.string(), message: z.string() }) })
