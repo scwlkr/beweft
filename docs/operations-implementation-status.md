@@ -16,14 +16,18 @@ percent-encoded values while retaining same-origin and token protections.
 The application image contains the built web UI, API, worker, CLI and ffprobe;
 it runs the application as UID 10001. Compose provides persistent PostgreSQL
 and media volumes, a loopback API port and distinct API/worker health checks.
-`./project setup`, `compose`, `backup`, `restore` and `upgrade` are documented
+`./project setup`, `build`, `image`, `compose`, `backup`, `restore`, `activate`
+and `upgrade` are documented
 in the [self-hosting guide](self-hosting.md). The commands use an explicit
 private installation directory and isolate Compose from ambient `BEWEFT_*` and
-`COMPOSE_*` overrides, except the optional CLI's `BEWEFT_TOKEN`. Restore validates a matching key and local image, an
+`COMPOSE_*` overrides, except the optional CLI's `BEWEFT_TOKEN`. Normal startup
+uses an immutable image ID selected before creating a project; only the
+backup-first upgrade changes it. Restore validates a matching key and local image, an
 empty target project, checksums and a bounded, ordinary-file-only media archive
 before creating resources. The restored API starts for verification; its worker
-stays stopped until an operator stops the old worker, reconciles uncertain work
-and explicitly enables it.
+is persistently held until an operator stops the old worker, reconciles all
+restored queued/overdue, sending and uncertain work and explicitly attests to
+that handover. A queued item in a backup may have published later at its source.
 
 `beweft-worker --healthcheck` needs an explicit PostgreSQL URL and a unique,
 stable `BEWEFT_WORKER_ID`. It checks the `public` heartbeat table with a

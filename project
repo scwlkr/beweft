@@ -7,12 +7,15 @@ case "${1:-help}" in
         printf '%s\n' \
             'Usage: ./project <command> [args...]' \
             '  setup DIRECTORY [PROJECT] [PORT]   Create a private installation configuration' \
+            '  build DIRECTORY                    Build and pin a new installation image' \
+            '  image DIRECTORY LOCAL_IMAGE        Pin an existing local image for a new installation' \
             '  compose DIRECTORY ARGS...          Run Docker Compose for an installation' \
             '  backup DIRECTORY NEW_BACKUP        Stop writes and create a consistent backup' \
             '  restore DIRECTORY BACKUP           Restore into a new, empty installation' \
+            '  activate DIRECTORY --handover-reviewed  Enable a reconciled restored worker' \
             '  upgrade DIRECTORY IMAGE BACKUP     Back up and start a different local image'
         exit 0 ;;
-    setup|compose|backup|restore|upgrade)
+    setup|build|image|compose|backup|restore|activate|upgrade)
         command=$1
         shift
         exec "$root/scripts/$command" "$@" ;;

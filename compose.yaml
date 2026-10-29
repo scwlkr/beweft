@@ -1,7 +1,6 @@
 name: ${COMPOSE_PROJECT_NAME:-beweft}
 x-app: &app
-  image: ${BEWEFT_IMAGE:-beweft:local}
-  build: .
+  image: ${BEWEFT_IMAGE:-unconfigured}
   restart: unless-stopped
   init: true
   read_only: true
@@ -50,10 +49,13 @@ services:
       retries: 6
   worker:
     <<: *app
+    profiles: [worker]
     command: [beweft-worker]
     environment:
       <<: *environment
       BEWEFT_WORKER_ID: compose-primary
+      BEWEFT_ENFORCE_WORKER_HOLD: "true"
+      BEWEFT_WORKER_ACTIVE: ${BEWEFT_WORKER_ACTIVE:-false}
     healthcheck:
       test: [CMD, container-entrypoint, beweft-worker, --healthcheck]
       interval: 10s
@@ -61,7 +63,7 @@ services:
       start_period: 30s
       retries: 6
   cli:
-    image: ${BEWEFT_IMAGE:-beweft:local}
+    image: ${BEWEFT_IMAGE:-unconfigured}
     profiles: [tools]
     user: "10001:10001"
     read_only: true

@@ -12,7 +12,8 @@ From the repository checkout:
 
 ```sh
 ./project setup <new-installation-directory> <unique-project-name> 3000
-./project compose <new-installation-directory> up -d --build --wait
+./project build <new-installation-directory>
+./project compose <new-installation-directory> up -d --wait --no-build --pull never
 ```
 
 The destination must not already exist and must be outside the checkout (or
@@ -23,6 +24,12 @@ Store a separate protected copy of that file, especially
 `BEWEFT_ENCRYPTION_KEY`, in a password manager or offline secret store. Do not
 commit it or include it in a shareable backup. Changing the encryption key makes
 stored provider credentials unreadable.
+
+`build` uses a unique local image tag and records its immutable image ID in the
+installation file before any Compose resources are created. Alternatively,
+`./project image <installation> <existing-local-image>` pins a previously built
+local image. Normal Compose startup cannot build or select a mutable tag. To
+change an existing installation's image, use the backup-first upgrade command.
 
 Open `http://127.0.0.1:3000`, create the owner with the setup secret from the
 private file, and choose an owner password. Use a unique loopback port if 3000
@@ -72,32 +79,39 @@ exist. The command stops the API first and then the worker, writes a PostgreSQL
 custom dump and a media archive, records the running image ID and encryption-key
 fingerprint, and restarts both services. Clients cannot write during this
 boundary; do not mutate the database or media directly. Worker shutdown allows
-up to six minutes for an in-flight attempt. An interrupted external publication
+up to six minutes for an in-flight attempt, subject to the chosen downtime
+budget. When the budget expires, the command may force-stop the draining
+container, waits for the original stop request to finish and verifies a newly
+accepting API before reporting recovery. An interrupted external publication
 can have an uncertain outcome: inspect its history and the provider before any
 retry. The archive contains private content but no installation credentials.
 
 The default backup downtime budget is 1800 seconds; set a different budget with
 `--max-downtime SECONDS` (1–86400). If the budget expires, the command requests
-service restart and leaves the incomplete backup directory for inspection and
-removal. This is a process deadline on a responsive Docker daemon and filesystem,
-not a guarantee against a stalled host or an unresponsive Docker daemon. Plan
-enough space and downtime for your database and media, and monitor service
-recovery. A successful backup is not proof of recovery until you restore and
-exercise it.
+service recovery and leaves the incomplete backup directory for inspection and
+removal. SIGINT and SIGTERM also cancel the command's own dump client and DB
+session before recovery. Cleanup has a separate 150-second budget. If it cannot
+confirm that the stop request and owned dump have finished, it withholds
+automatic restart and reports a failed recovery: inspect the named resources
+and finish recovery manually. SIGKILL, a stalled host, filesystem, or Docker
+daemon cannot guarantee cleanup or service availability. Plan enough space and
+downtime, and monitor service recovery. A successful backup is not proof of
+recovery until you restore and exercise it.
 
 ## Restore or roll back
 
 Restore never replaces an existing project or volume. Create a **new** empty
 installation with a unique project name and port, then privately set its
 `BEWEFT_ENCRYPTION_KEY` to the value from the original installation file and
-set `BEWEFT_IMAGE` to the original local image ID recorded in the backup’s
+pin the original local image ID recorded in the backup’s
 `image-id` file. Retain the original image before upgrading; if it is no longer
 in Docker, obtain that exact image from your own trusted archive first. The new
 installation may have its own database password and setup secret.
 
 ```sh
 ./project setup <new-empty-installation> <new-project-name> <new-port>
-# Privately set the matching encryption key and recorded image in installation.env.
+./project image <new-empty-installation> <recorded-old-image-id>
+# Privately set the matching encryption key in installation.env.
 ./project restore <new-empty-installation> <backup-directory>
 ```
 
@@ -106,18 +120,24 @@ checksums, the encryption-key fingerprint, the local image identity, the target
 project and volume names, and every media archive header. Media may contain only
 ordinary files and directories with safe relative paths; links, special files,
 parent paths, duplicate paths and tar extensions are rejected. The validated
-media is re-emitted with fixed ownership into the empty volume. Restore starts
-only the database and API; the new worker stays stopped so the original and
-restored copies cannot both publish. Verify owner login, media bytes, drafts,
-queue and publication history before switching traffic. Stop the original
-worker and resolve or reconcile any in-flight or uncertain publications before
-explicitly starting the restored worker:
+media is re-emitted with fixed ownership into the empty volume. Restore records
+a persistent worker hold and starts only the database and API. Ordinary startup,
+worker restart and host reboot do not release that hold. Verify owner login,
+media bytes, drafts, queue and publication history before switching traffic.
+Stop the original worker, then reconcile **every restored queued and overdue
+publication as well as sending and uncertain publications** against the original
+installation and the providers. A queued item in the backup may have published
+after the backup was taken. Cancel, resolve or intentionally reschedule each
+item as appropriate. Only after that handover review, explicitly activate:
 
 ```sh
-./project compose <new-empty-installation> up -d --wait --no-build --pull never worker
+./project activate <new-empty-installation> --handover-reviewed
 ```
 
-If a restore fails after target creation, leave that target isolated;
+The flag records the operator's attestation; it does not establish provider
+outcomes. Activation may publish eligible queued work. If activation fails,
+inspect the worker and publication state before retrying. If a restore fails
+after target creation, leave that target isolated;
 inspect it and explicitly remove its own project and volumes before trying again.
 
 Checksums detect accidental corruption; they do not authenticate the archive.
