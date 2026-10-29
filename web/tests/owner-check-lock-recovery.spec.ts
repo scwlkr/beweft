@@ -357,7 +357,7 @@ test("a queued schedule claim rejects a superseded session before writing", asyn
           const now = new Date().toISOString();
           const post = {
             id: crypto.randomUUID(),
-            brand_id: "brand",
+            brand_id: crypto.randomUUID(),
             title: "Fixture",
             text: "Original",
             media_ids: [],
@@ -369,9 +369,11 @@ test("a queued schedule claim rejects a superseded session before writing", asyn
           };
           const intent = api.makeScheduleIntent(
             post,
+            crypto.randomUUID(),
             [crypto.randomUUID()],
             "queue",
             "",
+            {},
           );
           state.scheduleOutcome = api
             .scheduleLock(lockKey, (session: unknown) =>
@@ -466,7 +468,7 @@ test("a schedule with an unknown response keeps its intent across sign-out", asy
           const now = new Date().toISOString();
           const post = {
             id: crypto.randomUUID(),
-            brand_id: "brand",
+            brand_id: crypto.randomUUID(),
             title: "Fixture",
             text: "Original",
             media_ids: [],
@@ -478,9 +480,11 @@ test("a schedule with an unknown response keeps its intent across sign-out", asy
           };
           state.intent = api.makeScheduleIntent(
             post,
+            crypto.randomUUID(),
             [crypto.randomUUID()],
             "queue",
             "",
+            {},
           );
           state.session = api.captureWorkspaceSession();
           state.scheduleOutcome = api

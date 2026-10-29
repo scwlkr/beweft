@@ -88,6 +88,7 @@ function receipt(f: Fixture, body: any, rows: any[]) {
       version: body.version,
       channel_ids: [...body.channel_ids].sort(),
       scheduled_at: body.scheduled_at ?? null,
+      media_versions: body.media_versions ?? null,
     },
     publications: rows,
   };
@@ -732,5 +733,125 @@ test("a stale delete confirmation cannot remove a draft with a pending schedule"
       release.resolve();
       await other.close();
     }
+  });
+});
+
+test("a silently discarded schedule storage write cannot send a request", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    let sends = 0;
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        new URL(request.url()).pathname.endsWith("/schedule")
+      )
+        sends++;
+    });
+    await page.goto("/#drafts");
+    await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+    await page.getByLabel("When should this go out?").selectOption("exact");
+    await page
+      .getByLabel(/Date and time/)
+      .fill(new Date(Date.now() + 3 * 86400_000).toISOString().slice(0, 16));
+    await expect(
+      page.getByRole("button", { name: "Schedule post" }),
+    ).toBeEnabled();
+    await page.evaluate(() => {
+      const original = Storage.prototype.setItem;
+      (window as any).restoreScheduleStorage = () => {
+        Storage.prototype.setItem = original;
+      };
+      Storage.prototype.setItem = function (key, value) {
+        if (this === localStorage && key.startsWith("beweft.pending-schedule:"))
+          return;
+        return original.call(this, key, value);
+      };
+    });
+    try {
+      await page.getByRole("button", { name: "Schedule post" }).click();
+      await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+        "could not be saved in browser storage",
+      );
+      expect(sends).toBe(0);
+      expect(await summaries(context, f.brand.id)).toEqual([]);
+    } finally {
+      await page.evaluate(() => (window as any).restoreScheduleStorage());
+    }
+  });
+});
+
+for (const mismatch of ["microseconds", "media map"] as const) {
+  test(`a receipt with mismatched ${mismatch} remains locked`, async () => {
+    await withWorkspace(async (page, context, write) => {
+      const f = await setup(page, context, write);
+      let sent: any;
+      await page.route(
+        /\/api\/v1\/posts\/[^/]+\/schedule\?view=summary$/,
+        (route) => {
+          sent = route.request().postDataJSON();
+          return route.abort("failed");
+        },
+      );
+      await page.route("**/api/v1/schedule-requests/*", (route) => {
+        const record = receipt(f, sent, []);
+        if (mismatch === "microseconds")
+          record.request.scheduled_at = sent.scheduled_at.replace(
+            /\.(\d{3})Z$/,
+            ".$1001Z",
+          );
+        else record.request.media_versions = { [crypto.randomUUID()]: 1 };
+        return route.fulfill({ json: { data: record } });
+      });
+      await startSchedule(page);
+      await page
+        .getByRole("button", { name: "Check scheduling outcome" })
+        .click();
+      await expect(
+        page.getByText(/server record does not match/),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Retry original schedule" }),
+      ).toHaveCount(0);
+      await expect(
+        page.getByLabel("Post text", { exact: true }),
+      ).toBeDisabled();
+      expect(await summaries(context, f.brand.id)).toEqual([]);
+    });
+  });
+}
+
+test("a conflicting request ID stays locked after reload without a replacement request", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    let sends = 0;
+    await page.route(
+      /\/api\/v1\/posts\/[^/]+\/schedule\?view=summary$/,
+      (route) => {
+        sends++;
+        return route.fulfill({
+          status: 409,
+          json: {
+            error: {
+              code: "schedule_request_conflict",
+              message: "The request belongs to another schedule",
+            },
+          },
+        });
+      },
+    );
+    await startSchedule(page);
+    await expect(page.getByText(/server record does not match/)).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Retry original schedule" }),
+    ).toHaveCount(0);
+    await page.reload();
+    await page.getByRole("button", { name: "Review pending schedule" }).click();
+    await expect(page.getByText(/server record does not match/)).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Retry original schedule" }),
+    ).toHaveCount(0);
+    expect(sends).toBe(1);
+    expect(f.patches()).toBe(1);
+    expect(await summaries(context, f.brand.id)).toEqual([]);
   });
 });

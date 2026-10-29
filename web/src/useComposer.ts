@@ -189,6 +189,22 @@ export function useComposer({
     }
     // Each stored intent represents an immutable post revision.
   }, [intent?.id]);
+  useEffect(() => {
+    if (intent?.rejection_code === "schedule_request_conflict") {
+      setRecovery("mismatch");
+      setRecoveryMessage(
+        "The server record does not match this saved request. The original remains locked for review.",
+      );
+    } else if (
+      intent?.rejection_code === "media_version_conflict" &&
+      !intent.uncertain
+    ) {
+      setRecovery("release");
+      setRecoveryMessage(
+        "Media descriptions changed. Refresh them and review before scheduling again.",
+      );
+    }
+  }, [intent?.id, intent?.rejection_code, intent?.uncertain]);
   const activeChannel = channels.find((c) => c.id === tab);
   const currentText = tab === "all" ? text : (variants[tab] ?? text);
   const previewChannel = activeChannel;

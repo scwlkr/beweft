@@ -127,6 +127,20 @@ export function readScheduleIntent(key: string) {
   const raw = localStorage.getItem(key);
   return raw === null ? null : ScheduleIntent.parse(JSON.parse(raw));
 }
+function persistScheduleIntent(key: string, intent: ScheduleIntent) {
+  localStorage.setItem(key, JSON.stringify(intent));
+  const stored = readScheduleIntent(key);
+  if (
+    !stored ||
+    !sameScheduleIntent(stored, intent) ||
+    stored.uncertain !== intent.uncertain ||
+    stored.rejection !== intent.rejection ||
+    stored.rejection_code !== intent.rejection_code
+  )
+    throw new Error(
+      "The schedule could not be saved in browser storage. Check storage before continuing.",
+    );
+}
 export function writeScheduleIntent(
   key: string,
   intent: ScheduleIntent,
@@ -136,7 +150,7 @@ export function writeScheduleIntent(
   return withWorkspaceSession(
     session,
     () => {
-      localStorage.setItem(key, JSON.stringify(intent));
+      persistScheduleIntent(key, intent);
       window.dispatchEvent(new Event(scheduleEvent));
     },
     signal,
@@ -151,7 +165,15 @@ export function clearScheduleIntent(
   return withWorkspaceSession(
     session,
     () => {
-      if (readScheduleIntent(key)?.id === id) localStorage.removeItem(key);
+      if (readScheduleIntent(key)?.id !== id)
+        throw new Error(
+          "The saved schedule changed. Reopen it before continuing.",
+        );
+      localStorage.removeItem(key);
+      if (readScheduleIntent(key))
+        throw new Error(
+          "The confirmed schedule could not be cleared from browser storage.",
+        );
       window.dispatchEvent(new Event(scheduleEvent));
     },
     signal,
@@ -304,15 +326,12 @@ export async function sendScheduleIntent(
           "schedule_request_conflict",
         );
       const priorIntent = saved ?? intent;
-      localStorage.setItem(
-        key,
-        JSON.stringify({
-          ...priorIntent,
-          uncertain: true,
-          rejection: undefined,
-          rejection_code: undefined,
-        }),
-      );
+      persistScheduleIntent(key, {
+        ...priorIntent,
+        uncertain: true,
+        rejection: undefined,
+        rejection_code: undefined,
+      });
       window.dispatchEvent(new Event(scheduleEvent));
       return priorIntent;
     },
@@ -358,19 +377,16 @@ export async function sendScheduleIntent(
                     "schedule_request_in_progress",
                     "schedule_request_conflict",
                   ].includes(failure.code)));
-            localStorage.setItem(
-              key,
-              JSON.stringify({
-                ...saved,
-                uncertain: !confirmedRejection,
-                rejection:
-                  failure instanceof Error
-                    ? failure.message
-                    : "Scheduling outcome is unknown",
-                rejection_code:
-                  failure instanceof ApiError ? failure.code : undefined,
-              }),
-            );
+            persistScheduleIntent(key, {
+              ...saved,
+              uncertain: !confirmedRejection,
+              rejection:
+                failure instanceof Error
+                  ? failure.message
+                  : "Scheduling outcome is unknown",
+              rejection_code:
+                failure instanceof ApiError ? failure.code : undefined,
+            });
             window.dispatchEvent(new Event(scheduleEvent));
           }
         });

@@ -63,7 +63,10 @@ test("an unresolved asset in a nonactive selected variant blocks scheduling thro
       release = deferred();
     let schedules = 0;
     page.on("request", (request) => {
-      if (request.method() === "POST" && request.url().endsWith("/schedule"))
+      if (
+        request.method() === "POST" &&
+        new URL(request.url()).pathname.endsWith("/schedule")
+      )
         schedules++;
     });
     await page.route(`**/api/v1/media/${item.id}`, async (route) => {
@@ -858,7 +861,7 @@ test("a failed refresh for another pending asset does not block unaffected media
   });
 });
 
-test("an active schedule holds the asset guard without stranding a later media edit", async () => {
+test("a committed schedule allows a later media edit while its response is held", async () => {
   await withWorkspace(async (page, context, write) => {
     const brand = await write("/brands", { name: "Schedule media lock" });
     const channel = await write("/channels", {
@@ -868,9 +871,6 @@ test("an active schedule holds the asset guard without stranding a later media e
       timezone: "UTC",
     });
     const item = await upload(context, brand.id, "locked.png");
-    const owner = (await (await context.request.get("/api/v1/auth/me")).json())
-      .data;
-    const key = `beweft.media-description:${owner.id}:${brand.id}:${item.id}`;
     const edit = await context.request.patch(`/api/v1/media/${item.id}`, {
       data: { metadata_version: 1, alt_text: "Before scheduling" },
       headers: {
@@ -892,12 +892,15 @@ test("an active schedule holds the asset guard without stranding a later media e
     );
     const committed = deferred(),
       release = deferred();
-    await page.route(`**/api/v1/posts/${post.id}/schedule`, async (route) => {
-      const response = await route.fetch();
-      committed.resolve();
-      await release.promise;
-      await route.fulfill({ response }).catch(() => {});
-    });
+    await page.route(
+      new RegExp(`/api/v1/posts/${post.id}/schedule\\?view=summary$`),
+      async (route) => {
+        const response = await route.fetch();
+        committed.resolve();
+        await release.promise;
+        await route.fulfill({ response }).catch(() => {});
+      },
+    );
     const other = await context.newPage();
     try {
       await page.goto("/#drafts");
@@ -907,37 +910,17 @@ test("an active schedule holds the asset guard without stranding a later media e
       await page.getByRole("button", { name: "Schedule post" }).click();
       await committed.promise;
       await other.goto("/#media");
-      await expect
-        .poll(() =>
-          other.evaluate(
-            async (lockKey) =>
-              (await navigator.locks.query()).held.some(
-                (lock) => lock.name === lockKey,
-              ),
-            key,
-          ),
-        )
-        .toBe(true);
       await other
         .locator(".media-grid")
         .getByRole("button", { name: /locked\.png/ })
         .click();
-      await expect(other.getByRole("dialog").getByRole("alert")).toContainText(
-        "Media is busy",
-        { timeout: 15000 },
-      );
       await expect(
         other.getByLabel("Description", { exact: true }),
-      ).toBeDisabled();
+      ).toBeEnabled();
       expect(
         (await (await context.request.get(`/api/v1/media/${item.id}`)).json())
           .data.metadata_version,
       ).toBe(2);
-      release.resolve();
-      await other.getByRole("button", { name: "Check description" }).click();
-      await expect(
-        other.getByLabel("Description", { exact: true }),
-      ).toBeEnabled();
       await expect(
         other.getByLabel("Description", { exact: true }),
       ).toHaveValue("Before scheduling");
@@ -945,12 +928,23 @@ test("an active schedule holds the asset guard without stranding a later media e
         .getByLabel("Description", { exact: true })
         .fill("After scheduling");
       await other.getByRole("button", { name: "Save description" }).click();
-      await expect(other.getByRole("dialog").getByRole("status")).toHaveText(
-        "Description saved.",
-      );
+      await expect
+        .poll(
+          async () =>
+            (
+              await (
+                await context.request.get(`/api/v1/media/${item.id}`)
+              ).json()
+            ).data.metadata_version,
+        )
+        .toBe(3);
+      await expect(
+        other.getByLabel("Description", { exact: true }),
+      ).toBeEnabled();
       expect(
         (await publications(context, brand.id))[0].payload.media_metadata,
       ).toEqual([{ id: item.id, alt_text: "Before scheduling" }]);
+      release.resolve();
     } finally {
       release.resolve();
       await other.close();

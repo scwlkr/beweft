@@ -90,6 +90,12 @@ export function Composer({
     pendingMedia,
     reconcileMedia,
   });
+  const previewDiffers =
+    !!intent?.media_versions &&
+    Object.entries(intent.media_versions).some(
+      ([id, version]) =>
+        media.find((item) => item.id === id)?.metadata_version !== version,
+    );
   return (
     <Dialog
       open
@@ -416,6 +422,12 @@ export function Composer({
                     ? "This older request has no saved media versions. Check its outcome and keep this record; it cannot be retried safely."
                     : "This older request has no recovery ID. Check its destinations and keep this record; retrying could create a duplicate.")}
             </p>
+            {previewDiffers && (
+              <p>
+                Media in the preview has changed or is unavailable. The original
+                schedule may use earlier descriptions.
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -435,7 +447,9 @@ export function Composer({
             </Button>
             {recovery === "release" ? (
               <Button onClick={() => void release()} disabled={busy}>
-                Release and refresh
+                {intent.rejection_code === "media_version_conflict"
+                  ? "Refresh descriptions"
+                  : "Release and refresh"}
               </Button>
             ) : (
               intent.request_contract === "request-id-v2" &&
