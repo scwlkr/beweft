@@ -59,7 +59,11 @@ expires; graceful shutdown removes its row. IDs must be unique per worker sharin
 a database and contain 1–128 ASCII letters, digits, `.`, `_` or `-`. A worker
 without an ID generates one for local development, but the healthcheck requires
 an explicit ID. The default Compose service uses one fixed ID and is not ready
-to scale into multiple workers without assigning a different ID to each.
+to scale into multiple workers without assigning a different ID to each. Compose
+invokes the same `container-entrypoint` for startup and health, so a configured
+`BEWEFT_DB_PASSWORD_FILE` produces the same database URL in both processes.
+The binary's probe deadline starts after the entrypoint loads its secret files;
+Compose's five-second healthcheck timeout also bounds the wrapper invocation.
 
 ## Explicit unfinished requirements
 

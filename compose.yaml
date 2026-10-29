@@ -55,7 +55,7 @@ services:
       <<: *environment
       BEWEFT_WORKER_ID: compose-primary
     healthcheck:
-      test: [CMD, beweft-worker, --healthcheck]
+      test: [CMD, container-entrypoint, beweft-worker, --healthcheck]
       interval: 10s
       timeout: 5s
       start_period: 30s

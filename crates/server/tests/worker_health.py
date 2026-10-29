@@ -181,8 +181,95 @@ def compose_contract(clean_env):
                             env=fixture_env, capture_output=True, text=True, check=True, timeout=15)
     worker = json.loads(result.stdout)["services"]["worker"]
     assert worker["environment"]["BEWEFT_WORKER_ID"] == "compose-primary"
-    assert worker["healthcheck"]["test"] == ["CMD", "beweft-worker", "--healthcheck"]
+    assert worker["command"] == ["beweft-worker"]
+    assert worker["healthcheck"]["test"] == ["CMD", "container-entrypoint", "beweft-worker", "--healthcheck"]
     assert worker["healthcheck"]["timeout"] == "5s"
+    assert 'ENTRYPOINT ["container-entrypoint"]' in (ROOT / "Dockerfile").read_text()
+    return worker["command"], worker["healthcheck"]["test"][1:]
+
+
+def entrypoint_contract(clean_env, temp, worker_command, health_command):
+    """The actual entrypoint must load identical URLs for startup and health."""
+    fake_worker = temp / "beweft-worker"
+    fake_worker.write_text("""#!/bin/sh
+set -eu
+test "$DATABASE_URL" = "$EXPECTED_DATABASE_URL" || exit 41
+if [ "$#" -eq 0 ]; then
+    touch /tmp/main-started
+    exec sleep 90
+fi
+test "$#" -eq 1 && test "$1" = --healthcheck
+""")
+    fake_worker.chmod(0o755)
+    password_file = temp / "container-db-password"
+    fake_password = "isolated-entrypoint-secret-" + RUN_ID
+    password_file.write_text(fake_password + "\n")
+    password_file.chmod(0o644)  # This test file contains a disposable value only.
+    file_url = f"postgres://fixture:{fake_password}@fixture-db:5432/fixture-db"
+    original_url = "postgres://wrong:wrong@wrong-db:5432/wrong-db"
+    explicit_url = "postgres://explicit:isolated-explicit-secret@explicit-db:5432/explicit-db"
+    secrets = (fake_password, "isolated-explicit-secret", file_url, original_url, explicit_url)
+
+    for use_file in (True, False):
+        name = "beweft-health-entrypoint-" + RUN_ID + ("-file" if use_file else "-url")
+        env = dict(clean_env, DATABASE_URL=original_url if use_file else explicit_url,
+                   EXPECTED_DATABASE_URL=file_url if use_file else explicit_url)
+        if use_file:
+            env.update(BEWEFT_DB_PASSWORD_FILE="/run/fixture-db-password",
+                       BEWEFT_DB_USER="fixture", BEWEFT_DB_HOST="fixture-db",
+                       BEWEFT_DB_NAME="fixture-db")
+        variables = ["DATABASE_URL", "EXPECTED_DATABASE_URL"]
+        if use_file:
+            variables += ["BEWEFT_DB_PASSWORD_FILE", "BEWEFT_DB_USER", "BEWEFT_DB_HOST", "BEWEFT_DB_NAME"]
+        mounts = ((ROOT / "scripts/container-entrypoint", "/usr/local/bin/container-entrypoint"),
+                  (fake_worker, "/usr/local/bin/beweft-worker"), (password_file, "/run/fixture-db-password"))
+        config = {"services": {"worker": {
+            "image": "alpine:3.22", "pull_policy": "never", "network_mode": "none",
+            "container_name": name, "user": "10001:10001", "read_only": True,
+            "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
+            "tmpfs": ["/tmp:rw,noexec,nosuid,size=4m"],
+            "entrypoint": [health_command[0]], "command": worker_command,
+            "environment": {variable: "${" + variable + "}" for variable in variables},
+            "volumes": [{"type": "bind", "source": str(source), "target": target, "read_only": True}
+                        for source, target in mounts],
+            # Use the production command unchanged, with a shorter interval for this test.
+            "healthcheck": {"test": ["CMD", *health_command], "interval": "1s", "timeout": "5s", "retries": 2},
+        }}}
+        fixture = temp / (name + ".json")
+        fixture.write_text(json.dumps(config))
+        compose = ["docker", "compose", "--env-file", "/dev/null", "-p", name, "-f", str(fixture)]
+        try:
+            result = subprocess.run(compose + ["up", "--detach", "--no-build", "--pull", "never"],
+                                    env=env, capture_output=True, text=True, timeout=30)
+            assert result.returncode == 0, "Failed to start the isolated Alpine entrypoint fixture"
+            assert not any(secret in result.stdout + result.stderr for secret in secrets)
+            def main_started():
+                return subprocess.run(["docker", "exec", name, "test", "-f", "/tmp/main-started"],
+                                      capture_output=True, timeout=5).returncode == 0
+            wait_until(main_started, "The isolated entrypoint did not start the worker with the expected URL")
+
+            def health_passed():
+                status = subprocess.run(["docker", "inspect", "--format", "{{.State.Health.Status}}", name],
+                                        capture_output=True, text=True, timeout=5)
+                return status.returncode == 0 and status.stdout.strip() == "healthy"
+            wait_until(health_passed, "Docker did not mark the rendered health command healthy")
+
+            # Docker starts health checks with the container's original environment,
+            # not the exports made by its initial entrypoint process.
+            direct = subprocess.run(["docker", "exec", name, "beweft-worker", "--healthcheck"],
+                                    capture_output=True, text=True, timeout=10)
+            assert (direct.returncode == 0) != use_file
+            wrapped = subprocess.run(["docker", "exec", name, *health_command],
+                                     capture_output=True, text=True, timeout=10)
+            assert wrapped.returncode == 0, "The rendered Compose health command did not load the expected URL"
+            assert not any(secret in direct.stdout + direct.stderr + wrapped.stdout + wrapped.stderr
+                           for secret in secrets)
+        finally:
+            removed = subprocess.run(compose + ["down", "--timeout", "1"], env=env, capture_output=True, timeout=20)
+            if removed.returncode != 0:
+                subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15)
+            exists = subprocess.run(["docker", "container", "inspect", name], capture_output=True, timeout=10)
+            assert removed.returncode == 0 and exists.returncode != 0, "The isolated Alpine fixture was not removed"
 
 
 def postgres_environment_isolation(env, temp):
@@ -285,7 +372,8 @@ def run(temp):
         check(health_env, "--healthcheck", success=False)
         assert sql("SELECT to_regclass('public._sqlx_migrations') IS NULL AND to_regclass('public.worker_heartbeats') IS NULL") == "t"
         assert not marker.exists(), "Health or invalid invocation created a media directory"
-        compose_contract(clean_env)
+        worker_command, health_command = compose_contract(clean_env)
+        entrypoint_contract(clean_env, temp, worker_command, health_command)
         connection_deadline(health_env)
         tls_certificate_deadline(health_env, temp)
 
@@ -370,7 +458,7 @@ def run(temp):
         stop(generated)
         assert generated.returncode == 0
         assert sql("SELECT count(*) FROM worker_heartbeats WHERE id LIKE 'worker-%'") == "0"
-        print("PASS: per-instance health, FIFO password-file and TLS deadlines, ambient PostgreSQL isolation, public-schema fencing, no health writes or claims, connection/query deadlines, worker restart, generated ID and Compose wiring")
+        print("PASS: per-instance health, FIFO password-file and TLS deadlines, ambient PostgreSQL isolation, public-schema fencing, no health writes or claims, connection/query deadlines, worker restart, generated ID and Compose entrypoint wiring")
     finally:
         for process in reversed(processes):
             stop(process)
