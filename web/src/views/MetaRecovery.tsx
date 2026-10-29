@@ -17,7 +17,10 @@ const Checkpoint = z.object({
   retry_allowed: z.boolean(),
   reason: z.string(),
 });
-const Status = z.object({ meta_delivery: Checkpoint.nullable().optional() });
+const Status = z.object({
+  meta_delivery: Checkpoint.nullable().optional(),
+  linkedin_delivery: Checkpoint.nullable().optional(),
+});
 type Action = (
   fn: () => Promise<unknown>,
   message?: string,
@@ -80,10 +83,11 @@ export function MetaRecovery({
       .then((value) => {
         if (!active || !isCurrentWorkspaceSession(session)) return;
         setStatus(value);
-        onRetryAllowed(
-          value.meta_delivery === null ||
-            value.meta_delivery?.retry_allowed === true,
-        );
+        const delivery =
+          publication.provider === "linkedin"
+            ? value.linkedin_delivery
+            : value.meta_delivery;
+        onRetryAllowed(delivery === null || delivery?.retry_allowed === true);
       })
       .catch((failure) => {
         if (
@@ -97,8 +101,18 @@ export function MetaRecovery({
       active = false;
       controller.abort();
     };
-  }, [publication.id, publication.updated_at, revision, onRetryAllowed]);
-  const checkpoint = status?.meta_delivery;
+  }, [
+    publication.id,
+    publication.provider,
+    publication.updated_at,
+    revision,
+    onRetryAllowed,
+  ]);
+  const label = publication.provider === "linkedin" ? "LinkedIn" : "Meta";
+  const checkpoint =
+    publication.provider === "linkedin"
+      ? status?.linkedin_delivery
+      : status?.meta_delivery;
   const observed = status !== undefined && checkpoint !== undefined;
   const needsEvidence = resolution === "not_published" && !!checkpoint;
   const canResolve =
@@ -199,13 +213,13 @@ export function MetaRecovery({
   };
   return (
     <section className="detail-section form-stack">
-      <h3>Meta delivery recovery</h3>
+      <h3>{label} delivery recovery</h3>
       {error && <ErrorNotice message={error} />}
       {!status && !error && <p>Checking delivery status…</p>}
       {status && checkpoint === undefined && (
         <p>
-          This server cannot report Meta checkpoints. Update it before recording
-          a not-published outcome or retrying.
+          This server cannot report {label} checkpoints. Update it before
+          recording a not-published outcome or retrying.
         </p>
       )}
       {checkpoint && (
@@ -233,7 +247,7 @@ export function MetaRecovery({
         </div>
       )}
       {status && checkpoint === null && (
-        <p>No Meta checkpoint is recorded for this publication.</p>
+        <p>No {label} checkpoint is recorded for this publication.</p>
       )}
       <div className="publication-actions">
         <Button
@@ -243,15 +257,16 @@ export function MetaRecovery({
         >
           Check delivery status
         </Button>
-        {publication.state === "uncertain" && (
-          <Button
-            variant="secondary"
-            disabled={busy || pending}
-            onClick={() => void checkProvider()}
-          >
-            Check provider outcome
-          </Button>
-        )}
+        {publication.state === "uncertain" &&
+          publication.provider !== "linkedin" && (
+            <Button
+              variant="secondary"
+              disabled={busy || pending}
+              onClick={() => void checkProvider()}
+            >
+              Check provider outcome
+            </Button>
+          )}
       </div>
       {notice && <p role="status">{notice}</p>}
       {canResolve && (

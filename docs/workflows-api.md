@@ -36,7 +36,7 @@ Ideas gain `status: "inbox"|"in_progress"|"ready"|"archived"` (default inbox), `
 
 ## Queue edits and priority
 
-- GET `/publications/:id/replacement-status` → `{original:PublicationSummary,replacement:PublicationSummary|null}`. The replacement, if present, is the exact audit-linked successor. Null does not prove a pending replacement ended. Access follows the original's brand; missing or inaccessible originals return 404.
+- GET `/publications/:id/replacement-status` → `{original:PublicationSummary,replacement:PublicationSummary|null}`. The replacement, if present, is the exact audit-linked successor. Null does not prove a pending replacement ended. Access follows the original's brand; missing or inaccessible originals return 404. An audit link with a missing or inconsistent target returns 409 and must be reviewed.
 - POST `/publications/:id/replace` `{post_version:number,publication_post_version:number,scheduled_at:RFC3339}` → `{previous_publication_id,publication}`. Uses current saved draft for the same post/channel. All three expected values must match locked records and the original publication must be queued. Atomically cancels the old snapshot, creates a fresh immutable snapshot, and preserves its exact time and scheduling mode. Old history remains; sending/manual-required/outcome records cannot be replaced.
 - POST `/publications/:id/prioritize` `{scheduled_at:RFC3339}` → reordered publication array. The expected timestamp must match. Moves a queued queue-slot publication to the first existing queue slot, shifting other queue-slot records; exact-date records never move. Publishing scope required.
 

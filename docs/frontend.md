@@ -8,7 +8,7 @@ Run `pnpm install`, then `pnpm build`. The Rust server serves `web/dist` at its 
 
 `pnpm test:e2e` uses an existing development PostgreSQL container (default `beweft-dev-postgres`, port 55439), built `target/debug/beweft-server` and `beweft-worker`, and `web/dist`. The Python harness creates a unique database, random owner credentials and encryption key, and temporary media/output directories. It starts private server/worker processes on an ephemeral loopback port. Its finally block stops those processes, drops that database, and removes temporary media and test output. Environment overrides match the backend integration harness's `BEWEFT_TEST_DB_*` and `BEWEFT_TEST_POSTGRES_CONTAINER` names.
 
-Pass Playwright arguments to the harness to run a focused scenario, for example `pnpm --filter @beweft/web test:e2e tests/brand-recovery.spec.ts`.
+Pass Playwright arguments to the harness to run a focused scenario, for example `pnpm --filter @beweft/web test:e2e tests/brand-recovery.spec.ts`. To include the replacement worker-claim regression, run `BEWEFT_FIXTURE_DELAY_MS=30000 pnpm --filter @beweft/web test:e2e tests/replacement-recovery.spec.ts`; the delayed fixture uses no provider network.
 
 The Playwright tests use bundled Chromium and always close it in `finally`; it does not launch installed Chrome or use a normal profile. Direct invocation refuses to mutate a server without the isolated-test environment flags. The main scenario exercises login, brand/channel creation, posting rules, idea-to-draft-to-queue, publishing details, media upload, unavailable analytics, theme choice, and phone calendar/composer. It sends no live provider calls and no public posts. Provider OAuth/publishing and metered reads require separate isolated adapter qualification and authorized account testing.
 
@@ -31,7 +31,7 @@ The following are explicit unfinished workflows, not external provider blockers:
 
 Brand settings support rename, archive, and restore. Archive pauses channels; restored channels stay paused. Owner security lists and revokes sessions, revokes other sessions, and changes the password with a return to sign-in.
 
-With the matching Meta recovery contract, the publication dialog reads the current attempt and checkpoint before a not-published attestation, requires confirmation that the sender stopped and the provider was inspected, and leaves retry as a separate action. Facebook Reel options appear only when the running channel catalog advertises Reel support; carousel selection follows ordered attachments. These controls do not establish live provider access.
+With the matching Meta and LinkedIn recovery contracts, the publication dialog reads the current attempt and checkpoint before a not-published attestation, requires confirmation that the sender stopped and the provider was inspected, and leaves retry as a separate action. Facebook Reel options appear only when the running channel catalog advertises Reel support; carousel selection follows ordered attachments. These controls do not establish live provider access.
 
 Direct provider setup, destination selection, reconnection/disconnection, metrics, inbox read/reply, and explicit metered-X sync controls are implemented in the web client against the provider slice contract. This is not a claim that any live provider account or publication has been verified.
 

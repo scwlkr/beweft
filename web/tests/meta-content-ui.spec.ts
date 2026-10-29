@@ -365,3 +365,112 @@ test("a saved Reel stays intact when an older channel omits the Reel action", as
     expect(saved.variants[0].options).not.toHaveProperty("format");
   });
 });
+
+test("LinkedIn checkpoint recovery requires its own advertised status and exact evidence", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const brand = await write("/brands", { name: "LinkedIn recovery fixture" });
+    const channel = await write("/channels", {
+      brand_id: brand.id,
+      provider: "manual",
+      name: "LinkedIn fixture",
+      timezone: "UTC",
+    });
+    const post = await write("/posts", {
+      brand_id: brand.id,
+      title: "LinkedIn post",
+      text: "Fixture",
+      variants: [],
+    });
+    const [original] = await write(`/posts/${post.id}/schedule`, {
+      version: post.version,
+      channel_ids: [channel.id],
+      scheduled_at: new Date(Date.now() + 86400000).toISOString(),
+    });
+    await context.addInitScript(
+      (id) => localStorage.setItem("beweft.brand", id),
+      brand.id,
+    );
+    let publication = { ...original, provider: "linkedin", state: "uncertain" };
+    const checkpoint = {
+      phase: "post_started",
+      attempt_id: crypto.randomUUID(),
+      checkpoint_id: crypto.randomUUID(),
+      retry_allowed: false,
+      reason: "Inspect LinkedIn",
+    };
+    let advertised = false;
+    let attempts = 0;
+    let retries = 0;
+    let body: unknown;
+    await page.route("**/publications?*", (route) =>
+      route.fulfill({ json: { data: [publication] } }),
+    );
+    await page.route(`**/publications/${original.id}/attempts`, (route) =>
+      route.fulfill({ json: { data: [] } }),
+    );
+    await page.route(
+      `**/publications/${original.id}/provider-status`,
+      (route) =>
+        route.fulfill({
+          json: {
+            data: advertised
+              ? {
+                  meta_delivery: null,
+                  linkedin_delivery: {
+                    ...checkpoint,
+                    retry_allowed: attempts > 0,
+                  },
+                }
+              : { meta_delivery: null },
+          },
+        }),
+    );
+    await page.route(`**/publications/${original.id}/reconcile`, (route) => {
+      attempts++;
+      body = route.request().postDataJSON();
+      publication = {
+        ...publication,
+        state: "failed",
+        updated_at: new Date().toISOString(),
+      };
+      return route.fulfill({ json: { data: publication } });
+    });
+    await page.route(`**/publications/${original.id}/retry`, (route) => {
+      retries++;
+      publication = { ...publication, state: "queued" };
+      return route.fulfill({ json: { data: publication } });
+    });
+    await page.goto("/#queue");
+    await page.getByRole("button", { name: "Reconcile outcome" }).click();
+    await expect(
+      page.getByText(/cannot report LinkedIn checkpoints/),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("option", { name: /not published/ }),
+    ).toHaveCount(0);
+    advertised = true;
+    await page.getByRole("button", { name: "Check delivery status" }).click();
+    await expect(page.getByText(checkpoint.checkpoint_id)).toBeVisible();
+    await page.getByLabel("Verified outcome").selectOption("not_published");
+    await page.getByLabel("Verification note").fill("Checked LinkedIn");
+    await page
+      .getByRole("checkbox", { name: /original sender has stopped/ })
+      .check();
+    await page.getByRole("checkbox", { name: /inspected the network/ }).check();
+    await page.getByRole("button", { name: "Record outcome" }).click();
+    await expect(
+      page.getByRole("button", { name: "Retry publication" }),
+    ).toBeEnabled();
+    expect(body).toEqual({
+      resolution: "not_published",
+      note: "Checked LinkedIn",
+      observed_attempt_id: checkpoint.attempt_id,
+      observed_checkpoint_id: checkpoint.checkpoint_id,
+      sender_stopped: true,
+      provider_inspected: true,
+    });
+    expect(retries).toBe(0);
+    await page.getByRole("button", { name: "Retry publication" }).click();
+    expect(retries).toBe(1);
+  });
+});

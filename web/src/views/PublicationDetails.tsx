@@ -81,7 +81,9 @@ export function PublicationDetails({
       : null;
   const destination = safeDestination(guidance?.compose_url);
   const [retryAllowed, setRetryAllowed] = useState(
-    !["youtube", "x", "facebook", "instagram", "threads"].includes(p.provider),
+    !["youtube", "x", "facebook", "instagram", "threads", "linkedin"].includes(
+      p.provider,
+    ),
   );
   const [copyStatus, setCopyStatus] = useState("");
   const [url, setUrl] = useState("");
@@ -265,7 +267,9 @@ export function PublicationDetails({
           </form>
         )}
         {p.state === "uncertain" &&
-          !["x", "facebook", "instagram", "threads"].includes(p.provider) && (
+          !["x", "facebook", "instagram", "threads", "linkedin"].includes(
+            p.provider,
+          ) && (
             <form
               className="form-stack"
               onSubmit={(e) => {
@@ -354,7 +358,9 @@ export function PublicationDetails({
             pending={pending}
           />
         )}
-        {["facebook", "instagram", "threads"].includes(p.provider) &&
+        {["facebook", "instagram", "threads", "linkedin"].includes(
+          p.provider,
+        ) &&
           ["uncertain", "failed"].includes(p.state) && (
             <MetaRecovery
               publication={p}
