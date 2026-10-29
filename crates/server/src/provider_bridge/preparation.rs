@@ -4,6 +4,17 @@ pub(super) async fn load_publication_on(
     db: &mut sqlx::PgConnection,
     value: &Value,
 ) -> Result<Publication> {
+    prepare_publication_on(state, db, value, true).await
+}
+
+/// Scheduling performs the same local checks without creating a capability or
+/// contacting a provider. The delivery path alone creates temporary URLs.
+pub(super) async fn prepare_publication_on(
+    state: &AppState,
+    db: &mut sqlx::PgConnection,
+    value: &Value,
+    delivery: bool,
+) -> Result<Publication> {
     let id = value["id"]
         .as_str()
         .ok_or_else(|| ApiError::bad("Publication identity is missing"))?;
@@ -16,7 +27,7 @@ pub(super) async fn load_publication_on(
             .parse()
             .map_err(|_| ApiError::bad("Invalid publication media"))?;
         let row =
-            sqlx::query("SELECT name,mime,storage_key FROM media WHERE id=$1 AND brand_id=$2")
+            sqlx::query("SELECT name,mime,size,storage_key FROM media WHERE id=$1 AND brand_id=$2")
                 .bind(media_id)
                 .bind(
                     value["brand_id"]
@@ -29,13 +40,29 @@ pub(super) async fn load_publication_on(
                 .await?;
         let key: String = row.get("storage_key");
         if key.contains('/') || key.contains('\\') || key == "." || key == ".." {
-            return Err(ApiError::bad("Invalid media storage key"));
+            return Err(ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "provider_format_check_unavailable",
+                "Publication media storage is unavailable".into(),
+            ));
         }
         let path = state.config.media_dir.join(key);
-        let metadata = tokio::fs::metadata(&path)
-            .await
-            .map_err(|_| ApiError::bad("Publication media file is unavailable"))?;
-        let public_url = if state.config.public_url.starts_with("https://") {
+        let metadata = tokio::fs::metadata(&path).await.map_err(|_| {
+            ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "provider_format_check_unavailable",
+                "Publication media file is unavailable".into(),
+            )
+        })?;
+        let expected_size: i64 = row.get("size");
+        if !metadata.is_file() || metadata.len() != expected_size as u64 {
+            return Err(ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "provider_format_check_unavailable",
+                "Publication media file is unavailable or incomplete".into(),
+            ));
+        }
+        let public_url = if delivery && state.config.public_url.starts_with("https://") {
             let token = crypto::random_secret();
             sqlx::query("INSERT INTO provider_media_tokens(token_hash,media_id,expires_at) VALUES($1,$2,now()+interval '2 hours')").bind(crypto::digest(&token)).bind(media_id).execute(&mut *db).await?;
             Some(format!(
@@ -66,9 +93,11 @@ pub(super) async fn load_publication_on(
                 .into(),
         });
     }
-    sqlx::query("DELETE FROM provider_media_tokens WHERE expires_at<now()")
-        .execute(&mut *db)
-        .await?;
+    if delivery {
+        sqlx::query("DELETE FROM provider_media_tokens WHERE expires_at<now()")
+            .execute(&mut *db)
+            .await?;
+    }
     Ok(Publication {
         key: id.into(),
         text: payload["text"].as_str().unwrap_or("").into(),

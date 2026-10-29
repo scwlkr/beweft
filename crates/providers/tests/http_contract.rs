@@ -146,6 +146,14 @@ fn picture() -> Media {
 }
 #[tokio::test]
 async fn direct_adapters_preserve_http_shapes_stages_and_ambiguous_outcomes() {
+    assert_eq!(
+        std::env::var("BEWEFT_REQUIRE_PROVIDER_FIXTURES").as_deref(),
+        Ok("true")
+    );
+    assert_eq!(
+        std::env::var("BEWEFT_PROVIDER_TEST_SANDBOX").as_deref(),
+        Ok("1")
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let state = Arc::new(Mutex::new(Fixture {

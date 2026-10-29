@@ -59,12 +59,12 @@ async fn bluesky_connection_obeys_provider_and_brand_fences(h: &Harness) {
             .header(header::COOKIE, &session)
             .header("x-beweft-request", "1")
     };
-    let ack = || {
+    let ack = |revocation_id: Uuid| {
         client
             .post(format!("{base}/ack/bluesky"))
             .header(header::COOKIE, &session)
             .header("x-beweft-request", "1")
-            .json(&json!({"access_removed":true}))
+            .json(&json!({"access_removed":true,"revocation_id":revocation_id}))
     };
     let archive = |value: bool| {
         client
@@ -112,7 +112,7 @@ async fn bluesky_connection_obeys_provider_and_brand_fences(h: &Harness) {
         .await
         .unwrap();
     assert_eq!(count, 1);
-    assert_eq!(ack().send().await.unwrap().status(), StatusCode::OK);
+    assert_eq!(ack(h.revocation_marker("bluesky").await).send().await.unwrap().status(), StatusCode::OK);
 
     // Validate the reconnect target and brand scope before the provider write.
     assert_eq!(
@@ -142,7 +142,7 @@ async fn bluesky_connection_obeys_provider_and_brand_fences(h: &Harness) {
         disconnect().send().await.unwrap().status(),
         StatusCode::CONFLICT
     );
-    assert_eq!(ack().send().await.unwrap().status(), StatusCode::CONFLICT);
+    assert_eq!(ack(h.revocation_marker("bluesky").await).send().await.unwrap().status(), StatusCode::CONFLICT);
     assert_eq!(
         h.provider.bluesky_session_requests.load(Ordering::SeqCst),
         before + 1
@@ -275,6 +275,18 @@ async fn bluesky_connection_obeys_provider_and_brand_fences(h: &Harness) {
         app("https://bsky.social").send().await.unwrap().status(),
         StatusCode::OK
     );
+
+    // A near-expiry browser session cannot begin a remote session creation.
+    sqlx::query("UPDATE sessions SET expires_at=clock_timestamp()+interval '0.9 seconds' WHERE token_hash=$1")
+        .bind(crypto::digest(&h.session)).execute(&h.state.db).await.unwrap();
+    let before_near = h.provider.bluesky_session_requests.load(Ordering::SeqCst);
+    let near = connect(Some(connected)).send().await.unwrap();
+    assert_eq!(near.status(), StatusCode::CONFLICT);
+    let message = near.text().await.unwrap();
+    assert!(message.contains("before the provider request") && message.contains("First inspect your connected channels"));
+    assert_eq!(h.provider.bluesky_session_requests.load(Ordering::SeqCst), before_near);
+    sqlx::query("UPDATE sessions SET expires_at=clock_timestamp()+interval '1 hour' WHERE token_hash=$1")
+        .bind(crypto::digest(&h.session)).execute(&h.state.db).await.unwrap();
 
     // If the originating browser session expires or is revoked during the
     // external call, the stored grant update rolls back in both cases.

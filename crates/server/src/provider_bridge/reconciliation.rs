@@ -87,10 +87,12 @@ pub async fn reconcile(
             ));
         }
     };
-    let row:Value=sqlx::query_scalar("UPDATE publications SET state=$2,scheduled_at=CASE WHEN $2='queued' THEN now() ELSE scheduled_at END,last_error=NULL,updated_at=now() WHERE id=$1 RETURNING to_jsonb(publications.*)").bind(id).bind(target).fetch_one(&mut *tx).await?;
+    sqlx::query("UPDATE publications SET state=$2,scheduled_at=CASE WHEN $2='queued' THEN now() ELSE scheduled_at END,last_error=NULL,updated_at=now() WHERE id=$1").bind(id).bind(target).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO publication_attempts(id,publication_id,state,provider,finished_at,receipt) VALUES($1,$2,'reconciled',$3,now(),$4)").bind(Uuid::new_v4()).bind(id).bind(&channel.app.provider).bind(receipt).execute(&mut *tx).await?;
     tx.commit().await?;
-    Ok(data(row))
+    Ok(data(
+        crate::publications::get_publication(&state.db, id).await?,
+    ))
 }
 
 /// Deliberate new upload only after an expired-session probe AND a later owner outcome attestation.

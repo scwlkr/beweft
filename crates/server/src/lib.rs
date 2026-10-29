@@ -32,7 +32,7 @@ use axum::{
     http::header,
     middleware::{self, Next},
     response::Response,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use state::AppState;
 use tower_http::{
@@ -63,12 +63,41 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/brands/{id}", patch(brand_admin::update))
         .route("/manual-platforms", get(manual_channels::list))
-        .route("/providers", get(catalog::providers))
+        .route("/providers", get(connections::descriptors))
+        .route("/provider-apps", get(connections::list_apps))
+        .route("/provider-apps/{provider}", put(connections::save_app))
+        .route("/connections/bluesky", post(connections::bluesky))
+        .route("/connections/{provider}/start", post(connections::start))
+        .route(
+            "/connections/{provider}/callback",
+            get(connections::callback),
+        )
+        .route(
+            "/connections/{provider}/acknowledge-revocation",
+            post(connections::acknowledge_revocation),
+        )
+        .route(
+            "/connections/{provider}/removal-status",
+            get(connections::removal_status),
+        )
+        .route(
+            "/connection-flows/{id}",
+            get(connections::flow_destinations),
+        )
+        .route(
+            "/connection-flows/{id}/complete",
+            post(connections::complete),
+        )
         .route(
             "/channels",
             get(catalog::channels).post(catalog::create_channel),
         )
         .route("/channels/{id}", patch(catalog::update_channel))
+        .route(
+            "/channels/{id}/disconnect",
+            post(connections::disconnect_confirmed),
+        )
+        .route("/channels/{id}/sync", post(provider_bridge::sync))
         .route("/ideas", get(ideas::list).post(ideas::create))
         .route("/ideas/{id}", patch(ideas::update).delete(ideas::delete))
         .route(
@@ -97,6 +126,10 @@ pub fn router(state: AppState) -> Router {
             get(schedules::get_schedule_request),
         )
         .route(
+            "/schedule-requests/{request_id}/retire",
+            post(schedules::retire_schedule_request),
+        )
+        .route(
             "/media",
             get(media::list)
                 .post(media::upload)
@@ -108,10 +141,23 @@ pub fn router(state: AppState) -> Router {
             get(media::get).delete(media::delete).patch(media::update),
         )
         .route("/media/{id}/file", get(media::file))
+        .route("/provider-media/{id}", get(provider_bridge::media_file))
         .route("/schedules", get(schedules::list).post(schedules::create))
         .route("/schedules/{id}", delete(schedules::delete))
         .route("/publications", get(publications::list))
         .route("/publications/{id}/attempts", get(publications::attempts))
+        .route(
+            "/publications/{id}/provider-status",
+            get(provider_bridge::provider_status),
+        )
+        .route(
+            "/publications/{id}/provider-reconcile",
+            post(provider_bridge::reconcile),
+        )
+        .route(
+            "/publications/{id}/reset-expired-session",
+            post(provider_bridge::reset_expired_session),
+        )
         .route("/publications/{id}/cancel", post(publications::cancel))
         .route("/publications/{id}/retry", post(publications::retry))
         .route(
@@ -133,8 +179,15 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/queue/reorder", post(publications::reorder))
         .route("/jobs/health", get(health::jobs))
-        .route("/analytics", get(health::analytics))
-        .route("/inbox", get(health::inbox))
+        .route("/analytics", get(provider_bridge::analytics))
+        .route("/inbox", get(provider_bridge::inbox))
+        .route("/inbox/{id}/read", post(provider_bridge::mark_read))
+        .route("/inbox/{id}/reply", post(provider_bridge::reply))
+        .route("/inbox/{id}/replies", get(provider_bridge::replies))
+        .route(
+            "/inbox/{id}/replies/{request_id}/resolve",
+            post(provider_bridge::resolve_reply),
+        )
         .fallback(|| async { error::ApiError::missing() });
     let web_dir = std::env::var("BEWEFT_WEB_DIR").unwrap_or_else(|_| "web/dist".into());
     Router::new()

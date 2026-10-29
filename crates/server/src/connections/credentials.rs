@@ -1,4 +1,13 @@
 use super::*;
+
+/// Keep grant-derived state in sync without changing adapter implementation
+/// flags or treating an unreported scope as a verified grant.
+fn update_grant_capabilities(caps: &mut Value, channel: &Channel) {
+    let permissions = providers::grant_permissions(channel);
+    caps["publishing"] = json!(permissions["actions"]["publish"]["status"] != "missing");
+    caps["permissions"] = permissions;
+}
+
 pub(super) async fn store_channel(
     state: &AppState,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -31,10 +40,9 @@ pub(super) async fn store_channel(
     .map_err(ApiError::internal)?;
     caps["execution"] = json!("direct");
     caps["verification"] = json!("identity_verified_publishing_unverified");
-    caps["permissions"] = providers::grant_permissions(channel);
-    caps["publishing"] = json!(caps["permissions"]["actions"]["publish"]["status"] != "missing");
+    update_grant_capabilities(&mut caps, channel);
     let row:Value=sqlx::query_scalar("INSERT INTO channels(id,brand_id,name,provider,timezone,capabilities,encrypted_credentials,connection_identity,connection_status,connected_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'connected',now()) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,capabilities=EXCLUDED.capabilities,encrypted_credentials=EXCLUDED.encrypted_credentials,connection_status='connected',connection_error=NULL,connected_at=now() RETURNING to_jsonb(channels.*)-'encrypted_credentials'").bind(id).bind(brand).bind(&channel.identity.name).bind(&channel.app.provider).bind(timezone).bind(caps).bind(encrypted).bind(channel.destination_key()).fetch_one(&mut **tx).await?;
-    Ok(row)
+    Ok(crate::manual_channels::decorate(row))
 }
 
 async fn check_bluesky_reconnect(
@@ -77,13 +85,7 @@ pub async fn bluesky(
     if identifier.len() > 512 || password.len() > 512 {
         return Err(ApiError::bad("Credentials are too long"));
     }
-    let reconnect = body["reconnect_channel_id"]
-        .as_str()
-        .map(|s| {
-            s.parse()
-                .map_err(|_| ApiError::bad("Invalid reconnect channel"))
-        })
-        .transpose()?;
+    let reconnect = optional_reconnect_channel(&body)?;
     let timezone = body["timezone"].as_str().unwrap_or("UTC");
     catalog::validate_timezone(timezone)?;
     let browser_session = session_hash(&headers)?;
@@ -99,20 +101,26 @@ pub async fn bluesky(
     if let Some(id) = reconnect {
         check_bluesky_reconnect(&mut tx, id, brand, false).await?;
     }
-    let channel = tokio::time::timeout(std::time::Duration::from_secs(60), async {
-        adapter_for(&app)
-            .await?
-            .connect_bluesky(&app, &identifier, &password)
-            .await
-            .map_err(provider_error)
-    })
-    .await
-    .map_err(|_| {
-        ApiError::conflict(super::flows::recovery(
-            "Bluesky session creation timed out and its outcome is unknown.",
-        ))
-    })?
-    .map_err(super::flows::post_grant_error)?;
+    let started = providers::SuspendInstant::now();
+    let remaining: Option<f64> = sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM (expires_at-clock_timestamp()))::double precision FROM sessions WHERE token_hash=$1 AND owner_id=$2")
+        .bind(&browser_session).bind(auth.owner_id).fetch_optional(&mut *tx).await?;
+    let deadline = super::flows::authorization_deadline(started, remaining)?;
+    let channel = deadline
+        .run(async {
+            adapter_for(&app)
+                .await?
+                .with_deadline(deadline)
+                .connect_bluesky(&app, &identifier, &password)
+                .await
+                .map_err(provider_error)
+        })
+        .await
+        .map_err(|_| {
+            ApiError::conflict(super::flows::recovery(
+                "Bluesky session creation timed out and its outcome is unknown.",
+            ))
+        })?
+        .map_err(super::flows::post_grant_error)?;
     lock_active_brand(&mut tx, brand)
         .await
         .map_err(super::flows::post_grant_error)?;
@@ -157,7 +165,7 @@ pub async fn load_channel_tx(
     state: &AppState,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: Uuid,
-    deadline: Option<chrono::DateTime<chrono::Utc>>,
+    deadline: Option<providers::Deadline>,
 ) -> Result<Channel> {
     load_channel_inner(state, tx, id, deadline, true).await
 }
@@ -173,10 +181,10 @@ async fn load_channel_inner(
     state: &AppState,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: Uuid,
-    deadline: Option<chrono::DateTime<chrono::Utc>>,
+    deadline: Option<providers::Deadline>,
     refresh: bool,
 ) -> Result<Channel> {
-    let row=sqlx::query("SELECT provider,encrypted_credentials,connection_status FROM channels WHERE id=$1 FOR UPDATE").bind(id).fetch_one(&mut **tx).await?;
+    let row=sqlx::query("SELECT provider,encrypted_credentials,connection_status,capabilities FROM channels WHERE id=$1 FOR UPDATE").bind(id).fetch_one(&mut **tx).await?;
     if row.get::<String, _>("connection_status") != "connected" {
         return Err(ApiError::bad("Channel needs reconnection"));
     }
@@ -203,7 +211,19 @@ async fn load_channel_inner(
             .expires_at
             .is_some_and(|t| t < chrono::Utc::now().timestamp() + 300)
     {
-        let mut adapter = adapter_for(&channel.app).await?;
+        let mut adapter = if let Some(deadline) = deadline {
+            if deadline.remaining().is_none() {
+                return Err(ApiError::conflict(
+                    "Delivery lease expired before provider setup",
+                ));
+            }
+            deadline
+                .run(adapter_for(&channel.app))
+                .await
+                .map_err(|_| ApiError::conflict("Delivery lease expired during provider setup"))??
+        } else {
+            adapter_for(&channel.app).await?
+        };
         if let Some(deadline) = deadline {
             adapter = adapter.with_deadline(deadline);
         }
@@ -216,7 +236,9 @@ async fn load_channel_inner(
                     &serde_json::to_string(&channel).map_err(ApiError::internal)?,
                 )
                 .map_err(ApiError::internal)?;
-                sqlx::query("UPDATE channels SET encrypted_credentials=$2,connection_error=NULL,capabilities=jsonb_set(capabilities,'{permissions}',$3) WHERE id=$1").bind(id).bind(encrypted).bind(providers::grant_permissions(&channel)).execute(&mut **tx).await?;
+                let mut capabilities: Value = row.get("capabilities");
+                update_grant_capabilities(&mut capabilities, &channel);
+                sqlx::query("UPDATE channels SET encrypted_credentials=$2,connection_error=NULL,capabilities=$3 WHERE id=$1").bind(id).bind(encrypted).bind(capabilities).execute(&mut **tx).await?;
             }
             Err(e) => {
                 if e.kind == providers::FailureKind::Authentication
@@ -230,6 +252,23 @@ async fn load_channel_inner(
     }
     Ok(channel)
 }
+/// The public route requires explicit acknowledgment before any disconnect mutation.
+pub async fn disconnect_confirmed(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<Uuid>,
+    Json(body): Json<crate::contracts::DisconnectRequest>,
+) -> Result<Json<Value>> {
+    auth.owner_session()?;
+    if !body.confirm_shared_impact {
+        return Err(ApiError::bad_code(
+            "disconnect_confirmation_required",
+            "Confirm that this channel's queued deliveries will be canceled and other channels for this provider, including unrelated accounts, may need reconnection after manual access removal.",
+        ));
+    }
+    disconnect(State(state), auth, Path(id)).await
+}
+
 pub async fn disconnect(
     State(state): State<AppState>,
     auth: Auth,
@@ -266,6 +305,7 @@ pub async fn disconnect(
             "disconnected":true,
             "provider_revoked":false,
             "channels_requiring_reconnection":0,
+            "revocation_id":null,
             "next_action":"This channel is already disconnected. No new provider access removal was started."
         })));
     }
@@ -297,9 +337,14 @@ pub async fn disconnect(
             "Channel access changed during disconnect; try again",
         ));
     }
-    // Provider HTTP calls have a 60-second timeout. A crashed reply remains uncertain,
-    // never retried automatically; it must not block disconnect forever.
-    sqlx::query("UPDATE provider_replies r SET state='uncertain',error='Reply process stopped; inspect the network before a new reply',updated_at=now() FROM provider_inbox i WHERE i.id=r.inbox_id AND i.channel_id=ANY($1) AND r.state='sending' AND r.delivery_deadline<clock_timestamp()").bind(&affected).execute(&mut *tx).await?;
+    // Expiry alone does not prove the original sender stopped. Never queue a
+    // disconnect behind an active executor or treat its elapsed claim as proof.
+    let reply_inboxes: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT r.inbox_id FROM provider_replies r JOIN provider_inbox i ON i.id=r.inbox_id WHERE i.channel_id=ANY($1) AND r.state IN ('sending','uncertain') ORDER BY r.inbox_id")
+        .bind(&affected).fetch_all(&mut *tx).await?;
+    for inbox in reply_inboxes {
+        crate::provider_bridge::try_reply_execution_tx(&mut tx, inbox).await?;
+    }
+    sqlx::query("UPDATE provider_replies r SET state='uncertain',error='Reply outcome is unknown; ensure the sender has stopped and inspect the network before a new reply',updated_at=clock_timestamp() FROM provider_inbox i WHERE i.id=r.inbox_id AND i.channel_id=ANY($1) AND r.state='sending' AND r.delivery_deadline<clock_timestamp()").bind(&affected).execute(&mut *tx).await?;
     let sending: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM publications WHERE channel_id=ANY($1) AND state='sending') OR EXISTS(SELECT 1 FROM provider_replies r JOIN provider_inbox i ON i.id=r.inbox_id WHERE i.channel_id=ANY($1) AND r.state='sending')",
     )
@@ -343,7 +388,7 @@ pub async fn disconnect(
         }
     };
     Ok(data(
-        json!({"disconnected":true,"provider_revoked":false,"channels_requiring_reconnection":affected_channels,"next_action":next_action}),
+        json!({"disconnected":true,"provider_revoked":false,"channels_requiring_reconnection":affected_channels,"revocation_id":revocation_id,"next_action":next_action}),
     ))
 }
 
@@ -362,13 +407,16 @@ pub async fn acknowledge_revocation(
     }
     let mut tx = state.db.begin().await?;
     let gate = super::apps::oauth_gate(&mut tx, &provider).await?;
-    if !gate.is_some_and(|(_, pending)| pending.is_some()) {
-        return Err(ApiError::conflict(
-            "There is no unresolved provider revocation",
+    let expected = uuid(&body, "revocation_id")?;
+    if !gate.is_some_and(|(_, pending)| pending == Some(expected)) {
+        return Err(ApiError::conflict_code(
+            "revocation_id_conflict",
+            "The provider removal changed or is no longer pending. Reload provider status before confirming removal.",
         ));
     }
-    sqlx::query("UPDATE provider_oauth_fences SET oauth_generation=oauth_generation+1,revocation_id=NULL WHERE provider=$1")
+    sqlx::query("UPDATE provider_oauth_fences SET oauth_generation=oauth_generation+1,revocation_id=NULL WHERE provider=$1 AND revocation_id=$2")
         .bind(&provider)
+        .bind(expected)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;

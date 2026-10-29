@@ -10,7 +10,7 @@ pub async fn sync(
     // A sync keeps one connection through refresh and network reads. Reserve at
     // least one pool slot for other work and reject excess before acquiring one.
     let _permit = state
-        .sync_slots
+        .provider_slots
         .try_acquire()
         .map_err(|_| ApiError::conflict("Sync capacity is busy; try again shortly"))?;
     auth.brand(catalog::channel_brand(&state, id).await?)?;
@@ -123,7 +123,7 @@ pub async fn analytics(
         auth.brand(brand)?;
     }
     let rows:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('publication_id',p.id,'channel_id',p.channel_id,'provider',c.provider,'text',p.payload->>'text','external_url',p.external_url,'observed_at',m.observed_at,'metrics',m.metrics) FROM publications p JOIN channels c ON c.id=p.channel_id JOIN LATERAL (SELECT * FROM provider_metrics WHERE publication_id=p.id ORDER BY observed_at DESC LIMIT 1) m ON true WHERE ($1::uuid IS NULL OR p.brand_id=$1) AND (cardinality($2::uuid[])=0 OR p.brand_id=ANY($2)) ORDER BY m.observed_at DESC LIMIT 200").bind(filter.brand_id).bind(&auth.brand_ids).fetch_all(&state.db).await?;
-    let summary:Value=sqlx::query_scalar("SELECT jsonb_build_object('scheduled',count(*) FILTER(WHERE state='queued'),'published',count(*) FILTER(WHERE state='published'),'attention',count(*) FILTER(WHERE state IN ('failed','uncertain','manual_required'))) FROM publications WHERE ($1::uuid IS NULL OR brand_id=$1) AND (cardinality($2::uuid[])=0 OR brand_id=ANY($2))").bind(filter.brand_id).bind(&auth.brand_ids).fetch_one(&state.db).await?;
+    let summary:Value=sqlx::query_scalar("SELECT jsonb_build_object('scheduled',count(*) FILTER(WHERE state IN ('queued','sending')),'published',count(*) FILTER(WHERE state='published'),'attention',count(*) FILTER(WHERE state IN ('failed','uncertain','manual_required'))) FROM publications WHERE ($1::uuid IS NULL OR brand_id=$1) AND (cardinality($2::uuid[])=0 OR brand_id=ANY($2))").bind(filter.brand_id).bind(&auth.brand_ids).fetch_one(&state.db).await?;
     Ok(data(
         json!({"availability":if rows.is_empty(){"unavailable"}else{"partial"},"reason":"Metrics are fetched on demand from supported connected channels. Missing observations are not zero. Summary counts describe local workflow only.","summary":summary,"metrics":rows}),
     ))

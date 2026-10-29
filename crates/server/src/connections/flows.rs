@@ -6,6 +6,27 @@ pub(super) fn recovery(message: &str) -> String {
     format!("{message} {RECOVERY_GUIDANCE}")
 }
 
+/// Bound an authorization operation by PostgreSQL's flow/session lifetime,
+/// accounting for query latency without consulting the application host clock.
+pub(super) fn authorization_deadline(
+    started: Option<providers::SuspendInstant>,
+    remaining: Option<f64>,
+) -> Result<providers::Deadline> {
+    remaining
+        .filter(|seconds| seconds.is_finite() && *seconds > 1.0)
+        .and_then(|seconds| {
+            started?.deadline(std::time::Duration::from_secs_f64(
+                (seconds - 1.0).min(60.0),
+            ))
+        })
+        .filter(|deadline| deadline.remaining().is_some())
+        .ok_or_else(|| {
+            ApiError::conflict(recovery(
+                "Authorization or its browser session expired before the provider request.",
+            ))
+        })
+}
+
 // After provider consent, even a local validation or database failure can
 // leave remote access behind. Preserve the original status and safe message.
 pub(super) fn post_grant_error(error: ApiError) -> ApiError {
@@ -48,13 +69,7 @@ pub async fn start(
     auth.owner_session()?;
     let brand = uuid(&body, "brand_id")?;
     auth.brand(brand)?;
-    let reconnect = body["reconnect_channel_id"]
-        .as_str()
-        .map(|v| {
-            v.parse::<Uuid>()
-                .map_err(|_| ApiError::bad("Invalid reconnect channel"))
-        })
-        .transpose()?;
+    let reconnect = optional_reconnect_channel(&body)?;
     if let Some(id) = reconnect {
         let row = sqlx::query("SELECT brand_id,provider FROM channels WHERE id=$1")
             .bind(id)
@@ -228,8 +243,12 @@ pub async fn callback(
         ));
     }
 
-    let candidates = tokio::time::timeout(std::time::Duration::from_secs(60), async {
-        let adapter = adapter_for(&app).await?;
+    let started = providers::SuspendInstant::now();
+    let remaining: Option<f64> = sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM (LEAST(f.expires_at,s.expires_at)-clock_timestamp()))::double precision FROM connection_flows f JOIN sessions s ON s.token_hash=f.session_hash AND s.owner_id=f.owner_id WHERE f.id=$1 AND f.consumed_at IS NOT NULL AND f.completed_at IS NULL AND f.oauth_generation=$2")
+        .bind(id).bind(generation).fetch_optional(&mut *tx).await?;
+    let deadline = authorization_deadline(started, remaining)?;
+    let candidates = deadline.run(async {
+        let adapter = adapter_for(&app).await?.with_deadline(deadline);
         let tokens = adapter
             .exchange(
                 &app,

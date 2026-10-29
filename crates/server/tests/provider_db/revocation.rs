@@ -71,8 +71,8 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
     sqlx::query("INSERT INTO publications(id,post_id,brand_id,channel_id,post_version,scheduled_at,state,payload) VALUES($1,$2,$3,$4,1,now(),'sending','{}')")
         .bind(publication).bind(post_id).bind(other_brand).bind(other_channel).execute(&h.state.db).await.unwrap();
 
-    // The production router has not yet wired provider endpoints. Exercise the real
-    // handlers, authentication, PostgreSQL and loopback provider over HTTP here.
+    // Exercise the handlers and gate ordering through a focused HTTP harness;
+    // the production router and separate worker have end-to-end coverage too.
     let api = Router::new()
         .route("/start/{provider}", post(connections::start))
         .route("/callback/{provider}", get(connections::callback))
@@ -104,12 +104,12 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
             .header("x-beweft-request", "1")
             .json(&json!({"destination_id":"destination"}))
     };
-    let ack = |removed: bool| {
+    let ack = |removed: bool, revocation_id: Uuid| {
         client
             .post(format!("{base}/ack/youtube"))
             .header(header::COOKIE, &session)
             .header("x-beweft-request", "1")
-            .json(&json!({"access_removed":removed}))
+            .json(&json!({"access_removed":removed,"revocation_id":revocation_id}))
     };
 
     async fn authorize(
@@ -398,7 +398,7 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
     let body: Value = blocked_start.json().await.unwrap();
     assert_eq!(body["error"]["message"], message);
     assert_eq!(
-        ack(false).send().await.unwrap().status(),
+        ack(false, h.revocation_marker("youtube").await).send().await.unwrap().status(),
         StatusCode::BAD_REQUEST
     );
     let status: (String, bool) = sqlx::query_as(
@@ -480,7 +480,7 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
     assert_eq!(queued, "queued");
     assert_eq!(h.provider.refreshes.load(Ordering::SeqCst), refreshes);
     assert_eq!(h.provider.sync_requests.load(Ordering::SeqCst), syncs);
-    assert_eq!(ack(true).send().await.unwrap().status(), StatusCode::OK);
+    assert_eq!(ack(true, h.revocation_marker("youtube").await).send().await.unwrap().status(), StatusCode::OK);
     assert_eq!(
         complete(&stale).send().await.unwrap().status(),
         StatusCode::CONFLICT
@@ -618,7 +618,7 @@ async fn oauth_revocation_fences_reconnects(h: &Harness) {
         start(request.clone()).send().await.unwrap().status(),
         StatusCode::CONFLICT
     );
-    assert_eq!(ack(true).send().await.unwrap().status(), StatusCode::OK);
+    assert_eq!(ack(true, h.revocation_marker("youtube").await).send().await.unwrap().status(), StatusCode::OK);
     let recovered = authorize(&client, &base, start(request).send().await.unwrap()).await;
     assert_eq!(
         complete(&recovered).send().await.unwrap().status(),

@@ -145,12 +145,12 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
             .header(header::COOKIE, &session)
             .header("x-beweft-request", "1")
     };
-    let ack = || {
+    let ack = |revocation_id: Uuid| {
         client
             .post(format!("{base}/ack/youtube"))
             .header(header::COOKIE, &session)
             .header("x-beweft-request", "1")
-            .json(&json!({"access_removed":true}))
+            .json(&json!({"access_removed":true,"revocation_id":revocation_id}))
     };
     let complete = |flow: &str| {
         client
@@ -237,7 +237,7 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
         disconnect().send().await.unwrap().status(),
         StatusCode::CONFLICT
     );
-    assert_eq!(ack().send().await.unwrap().status(), StatusCode::CONFLICT);
+    assert_eq!(ack(h.revocation_marker("youtube").await).send().await.unwrap().status(), StatusCode::CONFLICT);
     h.provider.exchange_release.notify_one();
     tokio::time::timeout(
         Duration::from_secs(3),
@@ -249,7 +249,7 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
         disconnect().send().await.unwrap().status(),
         StatusCode::CONFLICT
     );
-    assert_eq!(ack().send().await.unwrap().status(), StatusCode::CONFLICT);
+    assert_eq!(ack(h.revocation_marker("youtube").await).send().await.unwrap().status(), StatusCode::CONFLICT);
     h.provider.identity_release.notify_one();
     assert_eq!(
         active.await.unwrap().unwrap().status(),
@@ -278,7 +278,7 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
         h.provider.exchange_requests.load(Ordering::SeqCst),
         before + 1
     );
-    assert_eq!(ack().send().await.unwrap().status(), StatusCode::OK);
+    assert_eq!(ack(h.revocation_marker("youtube").await).send().await.unwrap().status(), StatusCode::OK);
     assert_eq!(
         callback(&after_state, &after_cookie)
             .send()
@@ -458,6 +458,19 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
             .status(),
         StatusCode::CONFLICT
     );
+    // A consumed callback with less than the safety margin remaining must
+    // stop before token exchange, based on PostgreSQL's clock.
+    let (short, short_state, short_cookie) = start(&client, &base, &session, brand, channel).await;
+    sqlx::query("UPDATE connection_flows SET expires_at=clock_timestamp()+interval '0.9 seconds' WHERE id=$1")
+        .bind(Uuid::parse_str(&short).unwrap()).execute(&h.state.db).await.unwrap();
+    let response = callback(&short_state, &short_cookie).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let text = response.text().await.unwrap();
+    assert!(text.contains("before the provider request") && text.contains("First inspect your connected channels"));
+    assert_eq!(h.provider.exchange_requests.load(Ordering::SeqCst), exchanges);
+    let stored: (bool, bool) = sqlx::query_as("SELECT consumed_at IS NOT NULL,encrypted_candidates IS NULL FROM connection_flows WHERE id=$1")
+        .bind(Uuid::parse_str(&short).unwrap()).fetch_one(&h.state.db).await.unwrap();
+    assert_eq!(stored, (true, true));
     let (expired, expired_state, expired_cookie) =
         start(&client, &base, &session, brand, channel).await;
     sqlx::query("UPDATE connection_flows SET expires_at=now()-interval '1 second' WHERE id=$1")
@@ -764,7 +777,7 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
     )
     .await;
     assert_eq!(disconnect().send().await.unwrap().status(), StatusCode::OK);
-    assert_eq!(ack().send().await.unwrap().status(), StatusCode::OK);
+    assert_eq!(ack(h.revocation_marker("youtube").await).send().await.unwrap().status(), StatusCode::OK);
     assert_eq!(
         complete(&canceled).send().await.unwrap().status(),
         StatusCode::BAD_REQUEST
