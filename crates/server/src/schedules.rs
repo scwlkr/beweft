@@ -170,7 +170,8 @@ pub async fn schedule_post(
             "Draft changed; reload before scheduling",
         ));
     }
-    let variants: Value = post.get("variants");
+    crate::brand_admin::lock(&mut tx, brand).await?;
+    crate::brand_admin::active(&mut tx, brand).await?;
     let mut ids = Vec::new();
     for channel in channels {
         lock_channel(&mut tx, channel).await?;
@@ -189,25 +190,7 @@ pub async fn schedule_post(
             Some(t) => t,
             None => next_slot(&mut tx, channel).await?,
         };
-        let variant = variants.as_array().and_then(|v| {
-            v.iter()
-                .find(|v| v["channel_id"].as_str() == Some(&channel.to_string()))
-        });
-        let text = variant
-            .and_then(|v| v["text"].as_str())
-            .unwrap_or(post.get("text"));
-        let media: Value = variant
-            .and_then(|v| v.get("media_ids"))
-            .cloned()
-            .unwrap_or(post.get("media_ids"));
-        if text.trim().is_empty() && media.as_array().is_none_or(|m| m.is_empty()) {
-            return Err(ApiError::bad("A scheduled post needs text or media"));
-        }
-        let options = variant
-            .and_then(|v| v.get("options"))
-            .cloned()
-            .unwrap_or(post.get("options"));
-        let payload = json!({"title":post.get::<String,_>("title"),"text":text,"media_ids":media,"options":options});
+        let payload = crate::snapshot::from_post(&mut tx, &post, channel).await?;
         let publication = Uuid::new_v4();
         sqlx::query("INSERT INTO publications(id,post_id,brand_id,channel_id,post_version,scheduled_at,state,payload,scheduling_mode) VALUES($1,$2,$3,$4,$5,$6,'queued',$7,$8)").bind(publication).bind(id).bind(brand).bind(channel).bind(post.get::<i32,_>("version")).bind(scheduled_at).bind(payload).bind(if exact.is_some() { "exact" } else { "queue" }).execute(&mut *tx).await?;
         ids.push(publication);

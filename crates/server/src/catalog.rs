@@ -15,10 +15,6 @@ pub struct Filter {
     pub brand_id: Option<Uuid>,
     pub channel_id: Option<Uuid>,
 }
-pub async fn brands(State(state): State<AppState>, auth: Auth) -> Result<Json<Value>> {
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(b) FROM brands b WHERE cardinality($1::uuid[])=0 OR id=ANY($1) ORDER BY created_at").bind(&auth.brand_ids).fetch_all(&state.db).await?;
-    Ok(data(rows))
-}
 pub async fn create_brand(
     State(state): State<AppState>,
     auth: Auth,
@@ -85,7 +81,11 @@ pub async fn channels(
         auth.brand(id)?;
     }
     let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(c)-'encrypted_credentials' FROM channels c WHERE ($1::uuid IS NULL OR brand_id=$1) AND (cardinality($2::uuid[])=0 OR brand_id=ANY($2)) ORDER BY created_at").bind(filter.brand_id).bind(&auth.brand_ids).fetch_all(&state.db).await?;
-    Ok(data(rows))
+    Ok(data(
+        rows.into_iter()
+            .map(crate::manual_channels::decorate)
+            .collect::<Vec<_>>(),
+    ))
 }
 pub async fn create_channel(
     State(state): State<AppState>,
@@ -113,8 +113,22 @@ pub async fn create_channel(
     } else {
         json!({"execution":"fixture","verification":"fixture_only","formats":["text","image","video"],"publishing":false,"analytics":false,"inbox":false})
     };
-    let row:Value=sqlx::query_scalar("INSERT INTO channels(id,brand_id,name,provider,timezone,capabilities) VALUES($1,$2,$3,$4,$5,$6) RETURNING to_jsonb(channels.*)-'encrypted_credentials'").bind(Uuid::new_v4()).bind(brand).bind(name).bind(provider).bind(timezone).bind(caps).fetch_one(&state.db).await?;
-    Ok(data(row))
+    let target = if provider == "manual" {
+        let target = body["target_platform"].as_str().unwrap_or("generic");
+        crate::manual_channels::guidance(target)?;
+        Some(target)
+    } else {
+        if body.get("target_platform").is_some() {
+            return Err(ApiError::bad("target_platform is for manual channels only"));
+        }
+        None
+    };
+    let mut tx = state.db.begin().await?;
+    crate::brand_admin::lock(&mut tx, brand).await?;
+    crate::brand_admin::active(&mut tx, brand).await?;
+    let row:Value=sqlx::query_scalar("INSERT INTO channels(id,brand_id,name,provider,timezone,capabilities,target_platform) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING to_jsonb(channels.*)-'encrypted_credentials'").bind(Uuid::new_v4()).bind(brand).bind(name).bind(provider).bind(timezone).bind(caps).bind(target).fetch_one(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(data(crate::manual_channels::decorate(row)))
 }
 pub async fn update_channel(
     State(state): State<AppState>,
@@ -124,7 +138,8 @@ pub async fn update_channel(
 ) -> Result<Json<Value>> {
     let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     auth.scope("admin")?;
-    auth.brand(channel_brand(&state, id).await?)?;
+    let brand = channel_brand(&state, id).await?;
+    auth.brand(brand)?;
     let name = body.get("name").and_then(Value::as_str);
     if name.is_some_and(|s| s.trim().is_empty() || s.len() > 100) {
         return Err(ApiError::bad("Invalid channel name"));
@@ -135,9 +150,24 @@ pub async fn update_channel(
     }
     let mut tx = state.db.begin().await?;
     crate::schedules::lock_channel(&mut tx, id).await?;
-    let row:Value=sqlx::query_scalar("UPDATE channels SET name=COALESCE($2,name),paused=COALESCE($3,paused),timezone=COALESCE($4,timezone) WHERE id=$1 RETURNING to_jsonb(channels.*)-'encrypted_credentials'").bind(id).bind(name).bind(body.get("paused").and_then(Value::as_bool)).bind(timezone).fetch_one(&mut *tx).await?;
+    if body["paused"].as_bool() == Some(false) {
+        crate::brand_admin::active(&mut tx, brand).await?;
+    }
+    let target = body["target_platform"].as_str();
+    if let Some(target) = target {
+        crate::manual_channels::guidance(target)?;
+        let provider: String = sqlx::query_scalar("SELECT provider FROM channels WHERE id=$1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if provider != "manual" {
+            return Err(ApiError::bad("target_platform is for manual channels only"));
+        }
+    }
+
+    let row:Value=sqlx::query_scalar("UPDATE channels SET name=COALESCE($2,name),paused=COALESCE($3,paused),timezone=COALESCE($4,timezone),target_platform=COALESCE($5,target_platform) WHERE id=$1 RETURNING to_jsonb(channels.*)-'encrypted_credentials'").bind(id).bind(name).bind(body.get("paused").and_then(Value::as_bool)).bind(timezone).bind(target).fetch_one(&mut *tx).await?;
     tx.commit().await?;
-    Ok(data(row))
+    Ok(data(crate::manual_channels::decorate(row)))
 }
 pub fn validate_timezone(t: &str) -> Result<chrono_tz::Tz> {
     t.parse()
@@ -150,63 +180,4 @@ pub async fn channel_brand(state: &AppState, id: Uuid) -> Result<Uuid> {
             .fetch_one(&state.db)
             .await?,
     )
-}
-pub async fn ideas(
-    State(state): State<AppState>,
-    auth: Auth,
-    Query(filter): Query<Filter>,
-) -> Result<Json<Value>> {
-    if let Some(id) = filter.brand_id {
-        auth.brand(id)?;
-    }
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(i) FROM ideas i WHERE ($1::uuid IS NULL OR brand_id=$1) AND (cardinality($2::uuid[])=0 OR brand_id=ANY($2)) ORDER BY updated_at DESC").bind(filter.brand_id).bind(&auth.brand_ids).fetch_all(&state.db).await?;
-    Ok(data(rows))
-}
-pub async fn create_idea(
-    State(state): State<AppState>,
-    auth: Auth,
-    Json(input): Json<crate::contracts::CreateIdeaRequest>,
-) -> Result<Json<Value>> {
-    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
-    auth.scope("drafts:write")?;
-    let brand = uuid(&body, "brand_id")?;
-    auth.brand(brand)?;
-    let row:Value=sqlx::query_scalar("INSERT INTO ideas(id,brand_id,title,text,color) VALUES($1,$2,$3,$4,$5) RETURNING to_jsonb(ideas.*)").bind(Uuid::new_v4()).bind(brand).bind(required(&body,"title")?).bind(body["text"].as_str().unwrap_or("")).bind(body["color"].as_str().unwrap_or("lavender")).fetch_one(&state.db).await?;
-    Ok(data(row))
-}
-pub async fn update_idea(
-    State(state): State<AppState>,
-    auth: Auth,
-    Path(id): Path<Uuid>,
-    Json(input): Json<crate::contracts::UpdateIdeaRequest>,
-) -> Result<Json<Value>> {
-    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
-    auth.scope("drafts:write")?;
-    let brand: Uuid = sqlx::query_scalar("SELECT brand_id FROM ideas WHERE id=$1")
-        .bind(id)
-        .fetch_one(&state.db)
-        .await?;
-    auth.brand(brand)?;
-    if body.get("title").is_some() {
-        required(&body, "title")?;
-    }
-    let row:Value=sqlx::query_scalar("UPDATE ideas SET title=COALESCE($2,title),text=COALESCE($3,text),color=COALESCE($4,color),updated_at=now() WHERE id=$1 RETURNING to_jsonb(ideas.*)").bind(id).bind(body["title"].as_str()).bind(body["text"].as_str()).bind(body["color"].as_str()).fetch_one(&state.db).await?;
-    Ok(data(row))
-}
-pub async fn delete_idea(
-    State(state): State<AppState>,
-    auth: Auth,
-    Path(id): Path<Uuid>,
-) -> Result<Json<Value>> {
-    auth.scope("drafts:write")?;
-    let brand: Uuid = sqlx::query_scalar("SELECT brand_id FROM ideas WHERE id=$1")
-        .bind(id)
-        .fetch_one(&state.db)
-        .await?;
-    auth.brand(brand)?;
-    sqlx::query("DELETE FROM ideas WHERE id=$1")
-        .bind(id)
-        .execute(&state.db)
-        .await?;
-    Ok(data(json!({"ok":true})))
 }

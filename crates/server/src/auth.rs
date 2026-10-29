@@ -48,7 +48,7 @@ impl Auth {
         }
     }
 }
-fn cookie_token(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn cookie_token(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::COOKIE)?
         .to_str()
@@ -108,7 +108,7 @@ impl FromRequestParts<AppState> for Auth {
         })
     }
 }
-async fn limit(state: &AppState, key: String, max: i32) -> Result<()> {
+pub(crate) async fn limit(state: &AppState, key: String, max: i32) -> Result<()> {
     let attempts:i32=sqlx::query_scalar("INSERT INTO auth_limits(key,attempts) VALUES($1,1) ON CONFLICT(key) DO UPDATE SET attempts=CASE WHEN auth_limits.window_started<now()-interval '15 minutes' THEN 1 ELSE auth_limits.attempts+1 END, window_started=CASE WHEN auth_limits.window_started<now()-interval '15 minutes' THEN now() ELSE auth_limits.window_started END RETURNING attempts").bind(key).fetch_one(&state.db).await?;
     if attempts > max {
         return Err(ApiError(
@@ -125,14 +125,31 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<Value>> {
         .await?;
     Ok(data(json!({"initialized":initialized})))
 }
-async fn session_response(state: &AppState, id: Uuid, email: String) -> Result<Response> {
+async fn session_response(
+    state: &AppState,
+    id: Uuid,
+    email: String,
+    verified_hash: &str,
+) -> Result<Response> {
+    let mut tx = state.db.begin().await?;
+    // Serialize session creation with password rotation and its session revocation.
+    // Argon2 verification happens outside the transaction, so recheck its credential.
+    let current: String =
+        sqlx::query_scalar("SELECT password_hash FROM owners WHERE id=$1 FOR UPDATE")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if current != verified_hash {
+        return Err(ApiError::unauthorized());
+    }
     let token = crypto::random_secret();
     sqlx::query("INSERT INTO sessions(token_hash,owner_id,expires_at) VALUES($1,$2,$3)")
         .bind(crypto::digest(&token))
         .bind(id)
         .bind(Utc::now() + Duration::days(7))
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     let mut response = data(json!({"id":id,"email":email})).into_response();
     let cookie = format!(
         "beweft_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800{}",
@@ -169,9 +186,14 @@ pub async fn bootstrap(
     if !email.contains('@') || email.len() > 254 {
         return Err(ApiError::bad("A valid email address is required"));
     }
-    let password = required(&body, "password")?;
-    if password.len() < 12 || password.len() > 1024 {
-        return Err(ApiError::bad("Password must contain 12–1024 bytes"));
+    let password = body["password"]
+        .as_str()
+        .ok_or_else(|| ApiError::bad("password is required"))?
+        .to_string();
+    if password.chars().count() < 12 || password.len() > 1024 {
+        return Err(ApiError::bad(
+            "Password must contain at least 12 characters and at most 1,024 bytes",
+        ));
     }
     let hash = tokio::task::spawn_blocking(move || {
         Argon2::default()
@@ -196,11 +218,11 @@ pub async fn bootstrap(
     sqlx::query("INSERT INTO owners(id,email,password_hash) VALUES($1,$2,$3)")
         .bind(id)
         .bind(&email)
-        .bind(hash)
+        .bind(&hash)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    session_response(&state, id, email).await
+    session_response(&state, id, email, &hash).await
 }
 pub async fn login(
     State(state): State<AppState>,
@@ -210,7 +232,10 @@ pub async fn login(
     let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     check_origin(&headers, &state, true)?;
     let email = required(&body, "email")?.to_lowercase();
-    let password = required(&body, "password")?;
+    let password = body["password"]
+        .as_str()
+        .ok_or_else(|| ApiError::bad("password is required"))?
+        .to_string();
     if password.len() > 1024 {
         return Err(ApiError::unauthorized());
     }
@@ -222,6 +247,7 @@ pub async fn login(
         .await?
         .ok_or_else(ApiError::unauthorized)?;
     let hash: String = row.get("password_hash");
+    let verified_hash = hash.clone();
     let valid = tokio::task::spawn_blocking(move || {
         PasswordHash::new(&hash).ok().is_some_and(|h| {
             Argon2::default()
@@ -234,7 +260,7 @@ pub async fn login(
     if !valid {
         return Err(ApiError::unauthorized());
     }
-    session_response(&state, row.get("id"), row.get("email")).await
+    session_response(&state, row.get("id"), row.get("email"), &verified_hash).await
 }
 pub async fn me(auth: Auth) -> Json<Value> {
     data(json!({"id":auth.owner_id,"email":auth.email}))

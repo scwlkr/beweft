@@ -17,6 +17,9 @@ import socket
 import subprocess
 import tempfile
 import time
+import sys
+sys.dont_write_bytecode = True
+from workflows import exercise
 import urllib.error
 import urllib.request
 import uuid
@@ -41,7 +44,7 @@ def run():
         port = sock.getsockname()[1]
     origin = f"http://127.0.0.1:{port}"
     with tempfile.TemporaryDirectory(prefix="beweft-integration-") as temporary:
-        env = dict(os.environ, DATABASE_URL=f"postgres://{DB_USER}:{DB_PASSWORD}@localhost:{DB_PORT}/{DB}", BEWEFT_PUBLIC_URL=origin, BEWEFT_BIND=f"127.0.0.1:{port}", BEWEFT_MEDIA_DIR=temporary, BEWEFT_SETUP_SECRET="isolated-integration-setup-secret", BEWEFT_ENABLE_FIXTURES="true", BEWEFT_MAX_UPLOAD_BYTES=str(32*1024*1024), BEWEFT_MEDIA_QUOTA_BYTES=str(33*1024*1024))
+        env = dict(os.environ, DATABASE_URL=f"postgres://{DB_USER}:{DB_PASSWORD}@localhost:{DB_PORT}/{DB}", BEWEFT_PUBLIC_URL=origin, BEWEFT_BIND=f"127.0.0.1:{port}", BEWEFT_MEDIA_DIR=temporary, BEWEFT_SETUP_SECRET="isolated-integration-setup-secret", BEWEFT_ENABLE_FIXTURES="true", BEWEFT_MAX_UPLOAD_BYTES=str(32*1024*1024), BEWEFT_MEDIA_QUOTA_BYTES=str(33*1024*1024), BEWEFT_FIXTURE_DELAY_MS="15000" if "--workflows-only" in sys.argv else "0")
         for name in ["beweft-server", "beweft-worker"]:
             processes.append(subprocess.Popen([str(ROOT / "target/debug" / name)], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
@@ -129,6 +132,9 @@ def run():
         assert "version" in schema_document["components"]["schemas"]["SchedulePostRequest"]["required"]
         assert "video/mp4" in schema_document["paths"]["/api/v1/media/{id}/file"]["get"]["responses"]["200"]["content"]
         call("/auth/bootstrap", {"setup_secret": env["BEWEFT_SETUP_SECRET"], "email": "test@example.com", "password": "Isolated-integration-password!"})
+        if "--workflows-only" in sys.argv:
+            exercise(call, client, origin, sql)
+            return
         call("/auth/bootstrap", {"setup_secret": env["BEWEFT_SETUP_SECRET"], "email": "second@example.com", "password": "Isolated-integration-password!"}, expected=409)
         call("/brands", {"name": "Rejected"}, headers={"Origin": "https://evil.example"}, expected=403)
         call("/brands", {"name": "Rejected"}, headers={"X-Beweft-Request": ""}, expected=400)
@@ -384,12 +390,15 @@ def run():
         assert call("/jobs/health")["worker_healthy"]
         assert call("/analytics")["availability"] == "unavailable"
         assert call("/inbox")["availability"] == "unavailable"
+        exercise(call, client, origin, sql)
         # Apply the additive migration to the previous schema and populated records, then roll back the isolated schema.
         upgrade_schema = "upgrade_" + uuid.uuid4().hex[:12]
         old_brand, old_channel, old_post, old_publication = [str(uuid.uuid4()) for _ in range(4)]
         upgrade_sql = f"BEGIN; CREATE SCHEMA {upgrade_schema}; SET LOCAL search_path TO {upgrade_schema};\n" + (ROOT / "migrations/0001_foundation.sql").read_text()
         upgrade_sql += f"\nINSERT INTO brands(id,name) VALUES('{old_brand}','Upgrade fixture'); INSERT INTO channels(id,brand_id,name,provider) VALUES('{old_channel}','{old_brand}','Old channel','manual'); INSERT INTO posts(id,brand_id,text) VALUES('{old_post}','{old_brand}','Existing draft'); INSERT INTO publications(id,post_id,brand_id,channel_id,post_version,scheduled_at,state,payload) VALUES('{old_publication}','{old_post}','{old_brand}','{old_channel}',1,'2030-01-02T12:34:00Z','queued','{{\"text\":\"Existing snapshot\",\"media_ids\":[]}}');\n"
         upgrade_sql += (ROOT / "migrations/0003_scheduling_mode.sql").read_text()
+        upgrade_sql += (ROOT / "migrations/0005_workflows.sql").read_text()
+        upgrade_sql += f"\nDO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM channels WHERE id='{old_channel}' AND target_platform='generic') OR NOT EXISTS(SELECT 1 FROM brands WHERE id='{old_brand}' AND archived_at IS NULL) THEN RAISE EXCEPTION 'Workflow migration changed old brand/channel semantics'; END IF; END $$;"
         upgrade_sql += f"\nDO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM publications WHERE id='{old_publication}' AND scheduling_mode='exact' AND scheduled_at='2030-01-02T12:34:00Z' AND payload->>'text'='Existing snapshot') THEN RAISE EXCEPTION 'Upgrade changed existing publication'; END IF; END $$; ROLLBACK;"
         subprocess.run(["docker", "exec", "-i", CONTAINER, "psql", "-U", DB_USER, "-d", DB, "-v", "ON_ERROR_STOP=1"], input=upgrade_sql, text=True, capture_output=True, check=True)
         print("PASS: real HTTP, PostgreSQL and worker auth/CSRF/scoped access, immutable revisions, concurrent reservation, manual handoff, exact-date preservation, real stop/crash/restart, two workers, live heartbeat during slow work, stored-rule DST, streamed26MiB upload, quota/admission/cancellation cleanup, typed OpenAPI response validation, populated-schema migration upgrade, old-attempt ABA fencing, ordered pause/claim, session-only admin-token rejection")

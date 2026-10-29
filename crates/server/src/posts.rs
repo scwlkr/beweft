@@ -40,6 +40,12 @@ pub async fn get(
 }
 pub async fn validate_content(db: &PgPool, brand: Uuid, body: &Value) -> Result<()> {
     validate_options(body)?;
+    if body["title"]
+        .as_str()
+        .is_some_and(|s| s.chars().count() > 1000)
+    {
+        return Err(ApiError::bad("Title must be at most 1,000 characters"));
+    }
     for key in ["title", "text"] {
         if body.get(key).is_some_and(|v| !v.is_string()) {
             return Err(ApiError::bad(format!("{key} must be a string")));

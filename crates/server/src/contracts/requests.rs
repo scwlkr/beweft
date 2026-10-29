@@ -45,6 +45,8 @@ pub struct CreateBrandRequest {
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateChannelRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_platform: Option<String>,
     pub brand_id: Uuid,
     pub name: String,
     pub provider: String,
@@ -55,6 +57,8 @@ pub struct CreateChannelRequest {
 #[serde(deny_unknown_fields)]
 pub struct UpdateChannelRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_platform: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paused: Option<bool>,
@@ -64,6 +68,17 @@ pub struct UpdateChannelRequest {
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateIdeaRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<super::IdeaStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(
+        default,
+        deserialize_with = "super::present_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub group_id: Option<Option<Uuid>>,
+
     pub brand_id: Uuid,
     pub title: String,
     #[serde(default)]
@@ -74,6 +89,17 @@ pub struct CreateIdeaRequest {
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateIdeaRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<super::IdeaStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(
+        default,
+        deserialize_with = "super::present_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub group_id: Option<Option<Uuid>>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

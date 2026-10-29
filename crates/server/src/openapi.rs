@@ -1,4 +1,5 @@
 use crate::contracts::*;
+use crate::openapi_operations::OPERATIONS;
 use axum::Json;
 use serde_json::{Value, json};
 #[derive(utoipa::OpenApi)]
@@ -52,128 +53,28 @@ use serde_json::{Value, json};
         WorkflowSummary,
         Analytics,
         Inbox,
-        ProviderDescriptor
+        ProviderDescriptor,
+        IdeaStatus,
+        UpdateBrandRequest,
+        CreateIdeaGroupRequest,
+        UpdateIdeaGroupRequest,
+        CreateTemplateRequest,
+        UpdateTemplateRequest,
+        ApplyTemplateRequest,
+        UpdateMediaRequest,
+        ReplacePublicationRequest,
+        PrioritizeRequest,
+        PasswordRequest,
+        IdeaGroup,
+        Template,
+        TemplateStarter,
+        ManualGuidance,
+        MediaMetadata,
+        ReplacedPublication,
+        SessionInfo
     ))
 )]
 struct ApiDoc;
-// method, route, typed request (empty means no JSON body), typed response, list response.
-const OPERATIONS: &[(&str, &str, &str, &str, bool)] = &[
-    ("get", "/auth/status", "", "AuthStatus", false),
-    (
-        "post",
-        "/auth/bootstrap",
-        "BootstrapRequest",
-        "Owner",
-        false,
-    ),
-    ("post", "/auth/login", "LoginRequest", "Owner", false),
-    ("get", "/auth/me", "", "Owner", false),
-    ("post", "/auth/logout", "", "OkResponse", false),
-    ("get", "/tokens", "", "TokenMetadata", true),
-    (
-        "post",
-        "/tokens",
-        "CreateTokenRequest",
-        "CreatedToken",
-        false,
-    ),
-    ("delete", "/tokens/{id}", "", "OkResponse", false),
-    ("get", "/brands", "", "Brand", true),
-    ("post", "/brands", "CreateBrandRequest", "Brand", false),
-    ("get", "/providers", "", "ProviderDescriptor", true),
-    ("get", "/channels", "", "Channel", true),
-    (
-        "post",
-        "/channels",
-        "CreateChannelRequest",
-        "Channel",
-        false,
-    ),
-    (
-        "patch",
-        "/channels/{id}",
-        "UpdateChannelRequest",
-        "Channel",
-        false,
-    ),
-    ("get", "/ideas", "", "Idea", true),
-    ("post", "/ideas", "CreateIdeaRequest", "Idea", false),
-    ("patch", "/ideas/{id}", "UpdateIdeaRequest", "Idea", false),
-    ("delete", "/ideas/{id}", "", "OkResponse", false),
-    ("get", "/posts", "", "Post", true),
-    ("post", "/posts", "CreatePostRequest", "Post", false),
-    ("get", "/posts/{id}", "", "Post", false),
-    ("patch", "/posts/{id}", "UpdatePostRequest", "Post", false),
-    ("delete", "/posts/{id}", "", "OkResponse", false),
-    (
-        "post",
-        "/posts/{id}/schedule",
-        "SchedulePostRequest",
-        "Publication",
-        true,
-    ),
-    ("get", "/media", "", "Media", true),
-    ("post", "/media", "multipart", "Media", false),
-    ("get", "/media/limits", "", "MediaLimits", false),
-    ("delete", "/media/{id}", "", "OkResponse", false),
-    ("get", "/media/{id}/file", "", "binary", false),
-    ("get", "/schedules", "", "ScheduleRule", true),
-    (
-        "post",
-        "/schedules",
-        "CreateScheduleRequest",
-        "ScheduleRule",
-        false,
-    ),
-    ("delete", "/schedules/{id}", "", "OkResponse", false),
-    ("get", "/publications", "", "Publication", true),
-    (
-        "get",
-        "/publications/{id}/attempts",
-        "",
-        "PublicationAttempt",
-        true,
-    ),
-    (
-        "post",
-        "/publications/{id}/cancel",
-        "",
-        "Publication",
-        false,
-    ),
-    ("post", "/publications/{id}/retry", "", "Publication", false),
-    (
-        "post",
-        "/publications/{id}/manual-complete",
-        "ManualCompleteRequest",
-        "Publication",
-        false,
-    ),
-    (
-        "post",
-        "/publications/{id}/reconcile",
-        "ReconcileRequest",
-        "Publication",
-        false,
-    ),
-    (
-        "post",
-        "/publications/{id}/reschedule",
-        "RescheduleRequest",
-        "Publication",
-        false,
-    ),
-    (
-        "post",
-        "/queue/reorder",
-        "ReorderQueueRequest",
-        "Publication",
-        true,
-    ),
-    ("get", "/jobs/health", "", "JobHealth", false),
-    ("get", "/analytics", "", "Analytics", false),
-    ("get", "/inbox", "", "Inbox", false),
-];
 fn reference(name: &str) -> Value {
     json!({"$ref":format!("#/components/schemas/{name}")})
 }
@@ -228,6 +129,8 @@ pub fn build_document() -> Value {
             && [
                 "/channels",
                 "/ideas",
+                "/idea-groups",
+                "/templates",
                 "/posts",
                 "/media",
                 "/publications",
@@ -242,13 +145,27 @@ pub fn build_document() -> Value {
         if method == "get" && ["/schedules", "/publications"].contains(&path) {
             parameters.push(json!({"name":"channel_id","in":"query","required":path=="/schedules","schema":{"type":"string","format":"uuid"}}));
         }
+        if method == "get" && path == "/brands" {
+            parameters.push(json!({"name":"include_archived","in":"query","required":false,"schema":{"type":"boolean","default":false}}));
+        }
+        if method == "get" && path == "/ideas" {
+            for (name, schema) in [
+                ("group_id", json!({"type":"string","format":"uuid"})),
+                ("status", reference("IdeaStatus")),
+                ("tag", json!({"type":"string"})),
+            ] {
+                parameters.push(json!({"name":name,"in":"query","required":false,"schema":schema}));
+            }
+        }
         if method != "get" {
             parameters.push(json!({"name":"X-Beweft-Request","in":"header","required":false,"description":"Must equal 1 for cookie-authenticated mutations and bootstrap/login. Bearer requests do not require it.","schema":{"type":"string","enum":["1"]}}));
         }
         if !parameters.is_empty() {
             operation["parameters"] = json!(parameters);
         }
-        if ["/auth/logout", "/tokens", "/tokens/{id}"].contains(&path) {
+        if ["/auth/logout", "/auth/password", "/tokens", "/tokens/{id}"].contains(&path)
+            || path.starts_with("/auth/sessions")
+        {
             operation["security"] = json!([{"session":[]}]);
             operation["description"] = json!(
                 "Requires an owner cookie session. API bearer tokens are rejected even with admin scope."
