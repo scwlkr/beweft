@@ -10,7 +10,6 @@ import {
   makeScheduleIntent,
   scheduleLock,
   sendScheduleIntent,
-  writeScheduleIntent,
 } from "../../src/scheduleIntent";
 import { usePendingSchedule } from "../../src/usePendingSchedule";
 
@@ -61,6 +60,5 @@ setApiWorkspaceEpoch(readAuthEpoch());
   makeScheduleIntent,
   scheduleLock,
   sendScheduleIntent,
-  writeScheduleIntent,
 };
 createRoot(document.getElementById("root")!).render(<Fixture />);

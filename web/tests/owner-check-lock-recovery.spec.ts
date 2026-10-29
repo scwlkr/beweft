@@ -4,6 +4,12 @@ import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import { build } from "vite";
 import { withWorkspace } from "./helpers";
 
+type StalledOwnerRequest = {
+  id: string;
+  startedAt: number;
+  closedAt: number | null;
+  beforeLogout: boolean;
+};
 async function withStalledOwner(
   page: Page,
   context: BrowserContext,
@@ -15,6 +21,7 @@ async function withStalledOwner(
     logouts: () => number;
     sends: () => number;
     stall: (value: boolean) => void;
+    ownerRequests: () => StalledOwnerRequest[];
   }) => Promise<void>,
 ) {
   const brand = await write("/brands", { name: "Owner lock fixture" });
@@ -54,6 +61,7 @@ async function withStalledOwner(
   });
   const upstream = new URL(process.env.BEWEFT_TEST_URL!);
   const held = new Set<ServerResponse>();
+  const ownerRequests: StalledOwnerRequest[] = [];
   let stall = false,
     starts = 0,
     logouts = 0;
@@ -69,7 +77,19 @@ async function withStalledOwner(
     if (stall && path === "/api/v1/auth/me") {
       starts++;
       held.add(outgoing);
-      outgoing.on("close", () => held.delete(outgoing));
+      const observed: StalledOwnerRequest = {
+        id: String(
+          incoming.headers["x-beweft-test-owner"] ?? `request-${starts}`,
+        ),
+        startedAt: Date.now(),
+        closedAt: null,
+        beforeLogout: logouts === 0,
+      };
+      ownerRequests.push(observed);
+      outgoing.on("close", () => {
+        observed.closedAt = Date.now();
+        held.delete(outgoing);
+      });
       outgoing.writeHead(200, {
         "Content-Type": "application/json",
         "Cache-Control": "no-store",
@@ -120,6 +140,7 @@ async function withStalledOwner(
       logouts: () => logouts,
       sends: () => sends,
       stall: (value) => (stall = value),
+      ownerRequests: () => ownerRequests,
     });
   } finally {
     for (const tab of pages) {
@@ -169,6 +190,24 @@ test("two stalled reply owner checks cannot starve a third tab's sign-out", asyn
   await withWorkspace(async (page, context, write) => {
     await withStalledOwner(page, context, write, async (fixture) => {
       const [first, second, signingOut] = fixture.pages;
+      for (const [index, tab] of fixture.pages.entries()) {
+        await tab.evaluate((label) => {
+          const original = window.fetch;
+          let sequence = 0;
+          window.fetch = (input, init) => {
+            const path =
+              typeof input === "string"
+                ? input
+                : input instanceof URL
+                  ? input.href
+                  : input.url;
+            if (!path.includes("/auth/me")) return original(input, init);
+            const headers = new Headers(init?.headers);
+            headers.set("x-beweft-test-owner", `${label}:${++sequence}`);
+            return original(input, { ...init, headers });
+          };
+        }, ["first", "second", "signout"][index]);
+      }
       fixture.stall(true);
       await first.getByRole("button", { name: "Reply", exact: true }).click();
       await expect.poll(fixture.starts).toBe(1);
@@ -188,7 +227,52 @@ test("two stalled reply owner checks cannot starve a third tab's sign-out", asyn
         .toBeGreaterThanOrEqual(2);
       await expect.poll(fixture.logouts, { timeout: 9_000 }).toBe(1);
       expect((await logoutResponse).status()).toBe(200);
-      await expect.poll(() => fixture.held.size).toBe(0);
+      // The original and queued reply checks must have released before logout.
+      // A fresh workspace verification may start after logout, with its own
+      // five-second budget; it is not one of those old checks.
+      await expect
+        .poll(() =>
+          fixture
+            .ownerRequests()
+            .filter((row) => row.beforeLogout && row.closedAt === null)
+            .map((row) => row.id),
+        )
+        .toEqual([]);
+      expect(
+        fixture
+          .ownerRequests()
+          .some((row) => row.id === "first:1" && row.beforeLogout),
+      ).toBe(true);
+      await expect(first.getByLabel("Email address")).toBeVisible({
+        timeout: 10_000,
+      });
+      await expect(second.getByLabel("Email address")).toBeVisible({
+        timeout: 10_000,
+      });
+      await expect
+        .poll(
+          () =>
+            first.evaluate(async () => {
+              const locks = await navigator.locks.query();
+              return [...(locks.held ?? []), ...(locks.pending ?? [])].filter(
+                (lock) => lock.name === "beweft:authentication",
+              ).length;
+            }),
+          { timeout: 10_000 },
+        )
+        .toBe(0);
+      await expect.poll(() => fixture.held.size, { timeout: 3_000 }).toBe(0);
+      for (const row of fixture.ownerRequests()) {
+        expect(
+          row.closedAt,
+          `owner request ${row.id} did not close`,
+        ).not.toBeNull();
+        // Allow scheduling/observation overhead around the configured 5s cap.
+        expect(
+          row.closedAt! - row.startedAt,
+          `owner request ${row.id} exceeded its own deadline`,
+        ).toBeLessThan(7_000);
+      }
       expect((await context.request.get("/api/v1/auth/me")).status()).toBe(401);
       expect(fixture.sends()).toBe(0);
 
@@ -200,7 +284,9 @@ test("two stalled reply owner checks cannot starve a third tab's sign-out", asyn
       await signingOut
         .getByRole("button", { name: "Sign in", exact: true })
         .click();
-      await expect(signingOut.getByLabel("Current brand")).toBeVisible();
+      await expect(signingOut.getByLabel("Current brand")).toBeVisible({
+        timeout: 10_000,
+      });
       for (const tab of [first, second]) {
         await expect(
           tab.getByRole("button", { name: "Reply", exact: true }),
@@ -355,7 +441,7 @@ test("a queued schedule claim rejects a superseded session before writing", asyn
           const now = new Date().toISOString();
           const post = {
             id: crypto.randomUUID(),
-            brand_id: "brand",
+            brand_id: crypto.randomUUID(),
             title: "Fixture",
             text: "Original",
             media_ids: [],
@@ -367,13 +453,15 @@ test("a queued schedule claim rejects a superseded session before writing", asyn
           };
           const intent = api.makeScheduleIntent(
             post,
+            crypto.randomUUID(),
             [crypto.randomUUID()],
             "queue",
             "",
+            {},
           );
           state.scheduleOutcome = api
             .scheduleLock(lockKey, (session: unknown) =>
-              api.writeScheduleIntent(lockKey, intent, session),
+              api.sendScheduleIntent(lockKey, intent, session),
             )
             .then(
               () => "saved",
@@ -445,12 +533,15 @@ test("a schedule with an unknown response keeps its intent across sign-out", asy
         sends = 0;
       const posted = new Promise<void>((resolve) => (started = resolve));
       const held = new Promise<void>((resolve) => (release = resolve));
-      await context.route("**/api/v1/posts/*/schedule", async (route) => {
-        sends++;
-        started();
-        await held;
-        await route.abort("failed").catch(() => {});
-      });
+      await context.route(
+        /\/api\/v1\/posts\/[^/]+\/schedule\?view=summary$/,
+        async (route) => {
+          sends++;
+          started();
+          await held;
+          await route.abort("failed").catch(() => {});
+        },
+      );
       try {
         await pending.goto(new URL("/pending-fixture", pending.url()).href);
         await pending.addScriptTag({ content: script });
@@ -461,7 +552,7 @@ test("a schedule with an unknown response keeps its intent across sign-out", asy
           const now = new Date().toISOString();
           const post = {
             id: crypto.randomUUID(),
-            brand_id: "brand",
+            brand_id: crypto.randomUUID(),
             title: "Fixture",
             text: "Original",
             media_ids: [],
@@ -473,9 +564,11 @@ test("a schedule with an unknown response keeps its intent across sign-out", asy
           };
           state.intent = api.makeScheduleIntent(
             post,
+            crypto.randomUUID(),
             [crypto.randomUUID()],
             "queue",
             "",
+            {},
           );
           state.session = api.captureWorkspaceSession();
           state.scheduleOutcome = api
@@ -509,7 +602,8 @@ test("a schedule with an unknown response keeps its intent across sign-out", asy
           try {
             await state.scheduleFixture.clearScheduleIntent(
               lockKey,
-              state.intent.id,
+              state.intent,
+              { kind: "rejected" },
               state.session,
             );
             return "cleared";

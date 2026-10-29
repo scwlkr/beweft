@@ -126,7 +126,7 @@ export async function withMediaScheduleGuard<T>(
   session: ApiSession,
   signal: AbortSignal,
   reconcile: (media: Media, session: ApiSession) => void,
-  work: () => Promise<T>,
+  work: (latest: Media[]) => Promise<T>,
 ): Promise<T> {
   if (!navigator.locks)
     throw new Error("Scheduling media safely requires HTTPS or localhost.");
@@ -197,7 +197,7 @@ export async function withMediaScheduleGuard<T>(
       throw new Error(
         "Media descriptions changed. Review the updated descriptions, then schedule again.",
       );
-    return work();
+    return work(latest);
   };
   try {
     return await run(0);

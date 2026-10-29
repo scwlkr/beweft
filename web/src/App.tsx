@@ -18,6 +18,7 @@ import { Button } from "./components/ui/button";
 import { Composer } from "./Composer";
 import { titles, zone } from "./navigation";
 import { useWorkspace } from "./useWorkspace";
+import { usePendingSchedule } from "./usePendingSchedule";
 import { usePendingMedia } from "./usePendingMedia";
 import { Calendar } from "./views/Calendar";
 import { ConnectionFlow } from "./views/ConnectionFlow";
@@ -69,6 +70,7 @@ export default function App() {
     go,
     createBrand,
   } = workspace;
+  const pendingSchedule = usePendingSchedule(brandId, ready === true);
   const pendingMedia = usePendingMedia(ready ? brandId : "", reconcileMedia);
   const [reviewMediaId, setReviewMediaId] = useState<string | null>(null);
   useEffect(() => setReviewMediaId(null), [brandId]);
@@ -162,6 +164,20 @@ export default function App() {
               )}
             </header>
             {error && <ErrorNotice message={error} />}
+            {pendingSchedule.intent && (
+              <div className="notice" role="status">
+                <span>
+                  A schedule needs review before another post can be saved for
+                  this brand.
+                </span>
+                <Button
+                  variant="secondary"
+                  onClick={() => setComposer(pendingSchedule.intent!.post)}
+                >
+                  Review pending schedule
+                </Button>
+              </div>
+            )}
             {brand &&
               pendingMedia.brand === brand.id &&
               Object.keys(pendingMedia.intents).length > 0 && (
@@ -283,6 +299,8 @@ export default function App() {
                       )}
                       action={action}
                       pending={pending}
+                      protectedPostId={pendingSchedule.intent?.post.id}
+                      pendingSchedule={pendingSchedule}
                       onEdit={setComposer}
                       onDuplicate={(post) =>
                         setComposer({
@@ -396,6 +414,7 @@ export default function App() {
             initialDate={composer?.composeDate}
             onClose={() => setComposer(undefined)}
             onSaved={load}
+            pendingSchedule={pendingSchedule}
             pendingMedia={pendingMedia}
             reconcileMedia={reconcileMedia}
             onReviewMedia={setReviewMediaId}

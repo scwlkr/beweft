@@ -117,9 +117,9 @@ export function Submit({
     </Button>
   );
 }
-export const localDateTime = (value?: string) => {
+export const localDateTime = (value?: string, includeMilliseconds = false) => {
   const d = value ? new Date(value) : new Date(Date.now() + 3600000);
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
     .toISOString()
-    .slice(0, 16);
+    .slice(0, includeMilliseconds ? 23 : 16);
 };
