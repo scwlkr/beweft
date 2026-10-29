@@ -1,5 +1,15 @@
 #!/bin/sh
 set -eu
+# A restored copy must not publish until an operator explicitly releases its
+# persistent hold, even if someone manually selects the worker Compose profile.
+case "${1:-}" in
+    beweft-worker|/usr/local/bin/beweft-worker)
+        if [ "${BEWEFT_ENFORCE_WORKER_HOLD:-false}" = true ] && [ "${BEWEFT_WORKER_ACTIVE:-}" != true ]; then
+            if [ "${2:-}" = --healthcheck ]; then exit 1; fi
+            printf '%s\n' 'Worker held for recovery; reconcile the queue before activation.' >&2
+            exec sleep 2147483647
+        fi ;;
+esac
 # Docker secrets remain files at rest. Do not log their values.
 if [ -n "${BEWEFT_DB_PASSWORD_FILE:-}" ]; then
     database_password=$(cat "$BEWEFT_DB_PASSWORD_FILE")

@@ -176,7 +176,7 @@ def tls_certificate_deadline(env, temp):
 def compose_contract(clean_env):
     fixture_env = dict(clean_env, BEWEFT_DB_PASSWORD="isolated-compose-password",
                        BEWEFT_SETUP_SECRET="isolated-compose-setup", BEWEFT_ENCRYPTION_KEY="1" * 64)
-    result = subprocess.run(["docker", "compose", "--env-file", "/dev/null", "-p", "beweft-health-config-" + RUN_ID,
+    result = subprocess.run(["docker", "compose", "--env-file", "/dev/null", "-p", "beweft-health-config-" + RUN_ID, "--profile", "worker",
                              "-f", str(ROOT / "compose.yaml"), "config", "--format", "json"], cwd=ROOT,
                             env=fixture_env, capture_output=True, text=True, check=True, timeout=15)
     worker = json.loads(result.stdout)["services"]["worker"]

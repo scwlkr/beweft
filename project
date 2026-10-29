@@ -2,6 +2,26 @@
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$root"
+case "${1:-help}" in
+    help|--help|-h)
+        printf '%s\n' \
+            'Usage: ./project <command> [args...]' \
+            '  setup DIRECTORY [PROJECT] [PORT] [--postgres-image LOCAL_IMAGE] [--worker-held]  Reserve an installation' \
+            '  build DIRECTORY                    Build and pin a new installation image' \
+            '  image DIRECTORY LOCAL_IMAGE        Pin an existing local image for a new installation' \
+            '  compose DIRECTORY ARGS...          Run Docker Compose for an installation' \
+            '  cli DIRECTORY ARGS...              Run the scoped CLI against the installation' \
+            '  backup DIRECTORY NEW_BACKUP        Stop writes and create a consistent backup' \
+            '  restore DIRECTORY BACKUP           Restore into a new, empty installation' \
+            '  activate DIRECTORY --handover-reviewed  Enable a reconciled restored worker' \
+            '  upgrade DIRECTORY IMAGE BACKUP     Back up and start a different local image' \
+            '  release DIRECTORY                  Release an empty project reservation'
+        exit 0 ;;
+    setup|build|image|compose|cli|backup|restore|activate|upgrade|release)
+        command=$1
+        shift
+        exec "$root/scripts/$command" "$@" ;;
+esac
 if ! command -v rustc >/dev/null 2>&1; then
     case "${1:-help}" in
         help|--help|-h)
