@@ -2556,3 +2556,9 @@ code {
   overflow: auto;
   font-size: 12px;
 }
+
+fieldset.composer-editor {
+  margin: 0;
+  border: 0;
+  min-width: 0;
+}

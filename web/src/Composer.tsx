@@ -74,7 +74,12 @@ export function Composer({
       wide
     >
       <div className="composer-grid">
-        <section className="composer-editor">
+        <fieldset
+          className="composer-editor"
+          disabled={busy}
+          aria-label="Post editor"
+          aria-busy={busy}
+        >
           <div className="channel-picker" aria-label="Choose channels">
             {channels.map((c) => (
               <button
@@ -309,7 +314,7 @@ export function Composer({
             )}
           </div>
           {error && <ErrorNotice message={error} />}
-        </section>
+        </fieldset>
         <PostPreview
           brand={brand}
           channel={previewChannel}

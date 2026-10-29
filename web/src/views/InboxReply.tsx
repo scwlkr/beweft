@@ -29,6 +29,9 @@ export function Reply({
     send,
     another,
     resolve,
+    historyChanged,
+    latest,
+    acknowledgeHistory,
     locked,
   } = useReply(brandId, item);
   const unresolved =
@@ -115,6 +118,31 @@ export function Reply({
             server outcome is available yet. Checking never sends a reply.
           </p>
         )}
+        {historyChanged && pending && (
+          <section className="notice">
+            <div>
+              <strong>Another reply changed this conversation</strong>
+              {latest && (
+                <p>
+                  Latest server reply: {latest.state} · {latest.text}
+                </p>
+              )}
+              <p>
+                Your original intent is still preserved. Review the newer
+                outcome before choosing whether that original reply is still
+                needed.
+              </p>
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={busy || !ready || !!unresolved}
+                onClick={() => void acknowledgeHistory()}
+              >
+                I reviewed the newer outcome; keep my original intent
+              </Button>
+            </div>
+          </section>
+        )}
         <div className="inline-actions">
           <Button
             type="button"
@@ -148,7 +176,9 @@ export function Reply({
             </>
           ) : (
             !unresolved && (
-              <Button disabled={busy || !ready || !text.trim()}>
+              <Button
+                disabled={busy || !ready || historyChanged || !text.trim()}
+              >
                 <Send size={16} />
                 {pending ? "Retry original reply" : "Send reply"}
               </Button>

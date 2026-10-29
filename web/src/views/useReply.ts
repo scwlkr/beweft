@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
-import { api } from "../api";
+import { api, ApiError } from "../api";
+import {
+  readIntent,
+  forgetIntent,
+  lockIntent,
+  type Pending,
+} from "./replyIntent";
 import { ItemSchema } from "./insight-contracts";
 const Attempt = z.object({
   id: z.string().uuid(),
@@ -12,9 +18,7 @@ const Attempt = z.object({
   created_at: z.string(),
   updated_at: z.string(),
 });
-const Pending = z.object({ request_id: z.string().uuid(), text: z.string() });
 type Attempt = z.infer<typeof Attempt>;
-type Pending = z.infer<typeof Pending>;
 const unresolved = (attempt: Attempt) =>
   ["sending", "uncertain"].includes(attempt.state);
 
@@ -23,6 +27,9 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
   const [text, setText] = useState("");
   const [attempt, setAttempt] = useState<Attempt | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
+  const [historyChanged, setHistoryChanged] = useState(false);
+  const [latest, setLatest] = useState<Attempt | null>(null);
+  const lastSeen = useRef<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
@@ -43,11 +50,8 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
       throw new Error(
         "Reply recovery returned a different conversation. Sending is blocked.",
       );
-    const saved = localStorage.getItem(storageKey);
-    const remembered = saved ? Pending.parse(JSON.parse(saved)) : null;
-    const ordered = [...rows].sort((a, b) =>
-      b.created_at.localeCompare(a.created_at),
-    );
+    const remembered = readIntent(storageKey);
+    const ordered = rows;
     const outstanding = ordered.find(unresolved);
     const recorded =
       outstanding ??
@@ -56,6 +60,13 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
         : (ordered[0] ?? null));
     if (!current()) return null;
     key.current = storageKey;
+    lastSeen.current = ordered[0]?.id ?? null;
+    setLatest(ordered[0] ?? null);
+    setHistoryChanged(
+      !!remembered &&
+        remembered.expected_last_request_id !== lastSeen.current &&
+        !ordered.some((row) => row.id === remembered.request_id),
+    );
     setAttempt(recorded);
     setPending(remembered);
     if (recorded || remembered) setText(recorded?.text ?? remembered!.text);
@@ -64,7 +75,7 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
       !unresolved(recorded) &&
       recorded.id === remembered?.request_id
     ) {
-      localStorage.removeItem(storageKey);
+      await lockIntent(storageKey, () => forgetIntent(storageKey, recorded.id));
       setPending(null);
     }
     setReady(true);
@@ -102,22 +113,65 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
     running.current = true;
     setBusy(true);
     setError("");
-    const outgoing = pending ?? { request_id: crypto.randomUUID(), text };
+    const intentAtClick = pending;
+    const textAtClick = text;
+    const headAtClick = lastSeen.current;
     try {
       // Recheck durable attempts immediately before sending. The server also guards
       // concurrent tabs, which can race between this read and the POST.
       const recovered = await recover();
       if (!recovered || !current()) return;
       if (recovered.rows.some(unresolved)) return;
-      const prior = recovered.rows.find(
-        (row) => row.id === outgoing.request_id,
-      );
-      if (prior) {
-        setAttempt(prior);
-        setText(prior.text);
-        return;
-      }
-      localStorage.setItem(key.current, JSON.stringify(outgoing));
+      const head = recovered.rows[0]?.id ?? null;
+      // Claim only the intent the user actually saw. Another tab may have written
+      // an intent while this tab's GET was in flight; do not overwrite or send it.
+      const outgoing = await lockIntent(key.current, () => {
+        const remembered = readIntent(key.current) ?? recovered.remembered;
+        if (
+          remembered &&
+          (!intentAtClick ||
+            remembered.request_id !== intentAtClick.request_id ||
+            remembered.text !== intentAtClick.text ||
+            remembered.expected_last_request_id !==
+              intentAtClick.expected_last_request_id)
+        ) {
+          setPending(remembered);
+          setAttempt(null);
+          setText(remembered.text);
+          setHistoryChanged(remembered.expected_last_request_id !== head);
+          setError(
+            "Another tab has an existing reply intent. Review it, then explicitly retry the original reply if needed.",
+          );
+          return null;
+        }
+        const candidate = remembered ?? intentAtClick;
+        const prior =
+          candidate &&
+          recovered.rows.find((row) => row.id === candidate.request_id);
+        if (prior) {
+          setAttempt(prior);
+          setText(prior.text);
+          return null;
+        }
+        if (
+          head !==
+          (candidate ? candidate.expected_last_request_id : headAtClick)
+        ) {
+          setHistoryChanged(!!candidate);
+          setError(
+            "Reply history changed. Review the latest server outcome before confirming another send.",
+          );
+          return null;
+        }
+        const claimed = candidate ?? {
+          request_id: crypto.randomUUID(),
+          text: textAtClick,
+          expected_last_request_id: headAtClick,
+        };
+        localStorage.setItem(key.current, JSON.stringify(claimed));
+        return claimed;
+      });
+      if (!outgoing || !current()) return;
       setPending(outgoing);
       setText(outgoing.text);
       setAttempt(null);
@@ -135,19 +189,49 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
       setAttempt(result);
       setError(result.error ?? "");
       if (!unresolved(result)) {
-        localStorage.removeItem(key.current);
+        await lockIntent(key.current, () =>
+          forgetIntent(key.current, result.id),
+        );
         setPending(null);
       }
     } catch (failure) {
       if (current()) {
         setReady(false);
         setError(
-          `${(failure as Error).message} The reply outcome is unconfirmed. Check the existing attempt before sending again.`,
+          failure instanceof ApiError &&
+            failure.code === "reply_history_changed"
+            ? "Another reply changed the server history. Check the existing reply outcome and explicitly review it before retrying this intent."
+            : `${(failure as Error).message} The reply outcome is unconfirmed. Check the existing attempt before sending again.`,
         );
       }
     } finally {
       running.current = false;
       if (current()) setBusy(false);
+    }
+  };
+  const acknowledgeHistory = async () => {
+    if (!pending || !ready || busy || (latest && unresolved(latest))) return;
+    try {
+      const updated = await lockIntent(key.current, () => {
+        const stored = readIntent(key.current);
+        if (stored?.request_id !== pending.request_id) return null;
+        const acknowledged = {
+          ...stored,
+          expected_last_request_id: latest?.id ?? null,
+        };
+        localStorage.setItem(key.current, JSON.stringify(acknowledged));
+        return acknowledged;
+      });
+      if (updated && current()) {
+        setPending(updated);
+        setHistoryChanged(false);
+        setError(
+          "History acknowledged. Retry the original reply explicitly only if it is still needed.",
+        );
+      } else await check();
+    } catch (failure) {
+      setReady(false);
+      setError((failure as Error).message);
     }
   };
   const resolve = async (body: {
@@ -202,6 +286,9 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
     send,
     another,
     resolve,
+    historyChanged,
+    latest,
+    acknowledgeHistory,
     locked: !ready || busy || !!pending || !!attempt,
   };
 }

@@ -4,6 +4,9 @@ import {
   type Page,
   type BrowserContext,
 } from "@playwright/test";
+let sessionCookies: Awaited<ReturnType<BrowserContext["cookies"]>> | null =
+  null;
+
 export function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => {
@@ -35,10 +38,16 @@ export async function withWorkspace(
       expect(response.ok(), await response.text()).toBe(true);
       return (await response.json()).data;
     };
-    await write("/auth/login", {
-      email: process.env.BEWEFT_TEST_EMAIL,
-      password: process.env.BEWEFT_TEST_PASSWORD,
-    });
+    // Reuse this isolated owner's session across regression contexts. The main
+    // workspace scenario still exercises sign-in through the UI independently.
+    if (sessionCookies) await context.addCookies(sessionCookies);
+    else {
+      await write("/auth/login", {
+        email: process.env.BEWEFT_TEST_EMAIL,
+        password: process.env.BEWEFT_TEST_PASSWORD,
+      });
+      sessionCookies = await context.cookies();
+    }
     const page = await context.newPage();
     page.setDefaultTimeout(10000);
     await run(page, context, write);
