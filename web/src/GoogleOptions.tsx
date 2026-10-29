@@ -1,5 +1,14 @@
 import { Field } from "./components/shared";
 
+export function GooglePhotoDescriptionNotice() {
+  return (
+    <div className="notice google-photo-notice" role="status">
+      Photo descriptions stay in beweft and are not sent to Google. Other
+      selected channels can use descriptions where supported.
+    </div>
+  );
+}
+
 function object(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -38,9 +47,8 @@ export function GoogleOptions({
       <p className="muted">
         Posts can include up to 1,500 characters of text and at most one JPEG or
         PNG photo. Photos must be 10 KiB–5 MiB and at least 250 pixels on each
-        side; Google needs a reachable public HTTPS URL to fetch them. Photo
-        descriptions stay in beweft and are not sent to Google. Google project
-        approval, account access, and location eligibility still apply;
+        side; Google needs a reachable public HTTPS URL to fetch them. Google
+        project approval, account access, and location eligibility still apply;
         connecting a location does not verify permission to publish.
       </p>
       <Field label="Post type">

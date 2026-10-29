@@ -27,9 +27,6 @@ test("Google post options keep local times and remove incompatible fields", asyn
     await page.getByRole("button", { name: "Location fixture" }).click();
     await page.getByRole("tab", { name: "Location fixture" }).click();
     const dialog = page.getByRole("dialog");
-    await expect(dialog).toContainText(
-      "Photo descriptions stay in beweft and are not sent to Google.",
-    );
     await dialog.getByLabel("Location fixture text").fill("Local event");
     await dialog.getByLabel("Post type").selectOption("EVENT");
     await expect(dialog).toContainText(

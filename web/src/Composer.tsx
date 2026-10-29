@@ -13,6 +13,7 @@ import { ErrorNotice, Field } from "./components/shared";
 import { Button } from "./components/ui/button";
 import { Dialog } from "./components/ui/dialog";
 import { ProviderOptions } from "./ProviderOptions";
+import { GooglePhotoDescriptionNotice } from "./GoogleOptions";
 import type { PendingMedia } from "./usePendingMedia";
 import type { usePendingSchedule } from "./usePendingSchedule";
 export function Composer({
@@ -47,6 +48,7 @@ export function Composer({
     setText,
     selected,
     setSelected,
+    mediaIds,
     variants,
     setVariants,
     variantMedia,
@@ -103,6 +105,19 @@ export function Composer({
       ([id, version]) =>
         media.find((item) => item.id === id)?.metadata_version !== version,
     );
+  const googleHasDescribedPhoto = channels.some(
+    (channel) =>
+      channel.provider === "google_business" &&
+      selected.includes(channel.id) &&
+      (variantMedia[channel.id] ?? mediaIds).some((id) =>
+        media.some(
+          (item) =>
+            item.id === id &&
+            item.mime.startsWith("image/") &&
+            item.alt_text.length > 0,
+        ),
+      ),
+  );
   return (
     <Dialog
       open
@@ -495,7 +510,8 @@ export function Composer({
         </div>
       )}
       {error && <ErrorNotice message={error} />}
-      <footer className="dialog-footer">
+      <footer className="dialog-footer composer-footer">
+        {googleHasDescribedPhoto && <GooglePhotoDescriptionNotice />}
         <Button variant="ghost" onClick={onClose} disabled={busy && !intent}>
           {intent || recovery === "complete" ? "Close" : "Cancel"}
         </Button>
