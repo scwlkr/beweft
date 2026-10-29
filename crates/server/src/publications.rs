@@ -100,6 +100,9 @@ async fn change(
     crate::schedules::lock_channel(&mut tx, channel).await?;
     let row=sqlx::query("SELECT p.*,c.provider FROM publications p JOIN channels c ON c.id=p.channel_id WHERE p.id=$1 FOR UPDATE OF p").bind(id).fetch_one(&mut *tx).await?;
     auth.brand(row.get("brand_id"))?;
+    if ["retry", "reschedule"].contains(&action) {
+        crate::brand_admin::active(&mut tx, row.get("brand_id")).await?;
+    }
     let current: String = row.get("state");
     let provider: String = row.get("provider");
     let mut scheduled_at = row.get::<chrono::DateTime<Utc>, _>("scheduled_at");

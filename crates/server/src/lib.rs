@@ -1,17 +1,26 @@
+pub mod account;
 pub mod auth;
+pub mod brand_admin;
 pub mod catalog;
 pub mod contract_export;
 pub mod contracts;
 pub mod crypto;
 pub mod error;
 pub mod health;
+pub mod idea_groups;
+pub mod ideas;
+pub mod manual_channels;
 pub mod media;
 pub mod media_storage;
 pub mod openapi;
+mod openapi_operations;
 pub mod posts;
 pub mod publications;
+pub mod queue_actions;
 pub mod schedules;
+pub mod snapshot;
 pub mod state;
+pub mod templates;
 pub mod tokens;
 pub mod worker;
 use axum::{
@@ -39,20 +48,41 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login", post(auth::login))
         .route("/auth/me", get(auth::me))
         .route("/auth/logout", post(auth::logout))
+        .route("/auth/password", post(account::password))
+        .route("/auth/sessions", get(account::sessions))
+        .route("/auth/sessions/{id}", delete(account::revoke))
+        .route("/auth/sessions/revoke-others", post(account::revoke_others))
         .route("/tokens", get(tokens::list).post(tokens::create))
         .route("/tokens/{id}", delete(tokens::delete))
-        .route("/brands", get(catalog::brands).post(catalog::create_brand))
+        .route(
+            "/brands",
+            get(brand_admin::list).post(catalog::create_brand),
+        )
+        .route("/brands/{id}", patch(brand_admin::update))
+        .route("/manual-platforms", get(manual_channels::list))
         .route("/providers", get(catalog::providers))
         .route(
             "/channels",
             get(catalog::channels).post(catalog::create_channel),
         )
         .route("/channels/{id}", patch(catalog::update_channel))
-        .route("/ideas", get(catalog::ideas).post(catalog::create_idea))
+        .route("/ideas", get(ideas::list).post(ideas::create))
+        .route("/ideas/{id}", patch(ideas::update).delete(ideas::delete))
         .route(
-            "/ideas/{id}",
-            patch(catalog::update_idea).delete(catalog::delete_idea),
+            "/idea-groups",
+            get(idea_groups::list).post(idea_groups::create),
         )
+        .route(
+            "/idea-groups/{id}",
+            patch(idea_groups::update).delete(idea_groups::delete),
+        )
+        .route("/template-starters", get(templates::starters))
+        .route("/templates", get(templates::list).post(templates::create))
+        .route(
+            "/templates/{id}",
+            patch(templates::update).delete(templates::delete),
+        )
+        .route("/templates/{id}/apply", post(templates::apply))
         .route("/posts", get(posts::list).post(posts::create))
         .route(
             "/posts/{id}",
@@ -66,7 +96,7 @@ pub fn router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(upload_limit)),
         )
         .route("/media/limits", get(media::limits))
-        .route("/media/{id}", delete(media::delete))
+        .route("/media/{id}", delete(media::delete).patch(media::update))
         .route("/media/{id}/file", get(media::file))
         .route("/schedules", get(schedules::list).post(schedules::create))
         .route("/schedules/{id}", delete(schedules::delete))
@@ -85,6 +115,11 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/publications/{id}/reschedule",
             post(publications::reschedule),
+        )
+        .route("/publications/{id}/replace", post(queue_actions::replace))
+        .route(
+            "/publications/{id}/prioritize",
+            post(queue_actions::prioritize),
         )
         .route("/queue/reorder", post(publications::reorder))
         .route("/jobs/health", get(health::jobs))

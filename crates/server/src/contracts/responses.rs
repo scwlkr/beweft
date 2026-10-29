@@ -45,6 +45,8 @@ pub struct CreatedToken {
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct Brand {
+    #[schema(required = true)]
+    pub archived_at: Option<DateTime<Utc>>,
     pub id: Uuid,
     pub name: String,
     pub color: String,
@@ -52,6 +54,10 @@ pub struct Brand {
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct Channel {
+    #[schema(required = true)]
+    pub target_platform: Option<String>,
+    #[schema(required = true)]
+    pub manual_guidance: Option<super::ManualGuidance>,
     pub id: Uuid,
     pub brand_id: Uuid,
     pub name: String,
@@ -63,6 +69,10 @@ pub struct Channel {
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct Idea {
+    pub status: super::IdeaStatus,
+    #[schema(required = true)]
+    pub group_id: Option<Uuid>,
+    pub tags: Vec<String>,
     pub id: Uuid,
     pub brand_id: Uuid,
     pub title: String,
@@ -95,6 +105,7 @@ pub struct Post {
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct Media {
+    pub alt_text: String,
     pub id: Uuid,
     pub brand_id: Uuid,
     pub name: String,
@@ -140,6 +151,8 @@ pub enum SchedulingMode {
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct PublicationPayload {
+    #[serde(default)]
+    pub media_metadata: Vec<super::MediaMetadata>,
     pub title: String,
     pub text: String,
     pub media_ids: Vec<Uuid>,

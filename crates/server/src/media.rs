@@ -214,13 +214,13 @@ pub async fn delete(
         .await?;
     auth.brand(row.get("brand_id"))?;
     let referenced: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM media_references WHERE media_id=$1)")
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM media_references WHERE media_id=$1 UNION ALL SELECT 1 FROM template_media_references WHERE media_id=$1)")
             .bind(id)
             .fetch_one(&mut *tx)
             .await?;
     if referenced {
         return Err(ApiError::conflict(
-            "Media is referenced by a draft or publication",
+            "Media is referenced by a draft, publication or template",
         ));
     }
     let key: String = row.get("storage_key");
@@ -235,4 +235,23 @@ pub async fn delete(
         tracing::error!(media_id=%id,error=%e,"orphan media file requires cleanup");
     }
     Ok(data(json!({"ok":true})))
+}
+
+pub async fn update(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<Uuid>,
+    Json(body): Json<crate::contracts::UpdateMediaRequest>,
+) -> Result<Json<Value>> {
+    auth.scope("drafts:write")?;
+    if body.alt_text.chars().count() > 2000 {
+        return Err(ApiError::bad("Alt text must be at most 2,000 characters"));
+    }
+    let brand: Uuid = sqlx::query_scalar("SELECT brand_id FROM media WHERE id=$1")
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
+    auth.brand(brand)?;
+    let row:Value=sqlx::query_scalar("UPDATE media SET alt_text=$2 WHERE id=$1 RETURNING (to_jsonb(media.*)-'storage_key')||jsonb_build_object('url','/api/v1/media/'||id||'/file')").bind(id).bind(body.alt_text).fetch_one(&state.db).await?;
+    Ok(data(row))
 }
