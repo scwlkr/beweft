@@ -64,6 +64,9 @@ test("media descriptions remain distinct and scheduled snapshots keep their save
     expect(patches).toBe(0);
     await description.fill("A bright star over a blue field.");
     await page.getByRole("button", { name: "Save description" }).click();
+    await expect(page.getByRole("dialog").getByRole("status")).toHaveText(
+      "Description saved.",
+    );
     await expect(
       page.getByRole("button", { name: "Save description" }),
     ).toBeDisabled();
@@ -78,6 +81,9 @@ test("media descriptions remain distinct and scheduled snapshots keep their save
       .getByLabel("Description", { exact: true })
       .fill("A small white pixel.");
     await page.getByRole("button", { name: "Save description" }).click();
+    await expect(page.getByRole("dialog").getByRole("status")).toHaveText(
+      "Description saved.",
+    );
     await expect(
       page.getByRole("button", { name: "Save description" }),
     ).toBeDisabled();
@@ -127,6 +133,9 @@ test("media descriptions remain distinct and scheduled snapshots keep their save
       .getByLabel("Description", { exact: true })
       .fill("A later edit to the description.");
     await page.getByRole("button", { name: "Save description" }).click();
+    await expect(page.getByRole("dialog").getByRole("status")).toHaveText(
+      "Description saved.",
+    );
     await expect(
       page.getByRole("button", { name: "Save description" }),
     ).toBeDisabled();
@@ -158,6 +167,7 @@ test("a completed description save cannot reopen another brand's media dialog", 
     const held = new Promise<void>((resolve) => (release = resolve));
     const saved = new Promise<void>((resolve) => (started = resolve));
     await page.route(`**/api/v1/media/${alphaMedia.id}`, async (route) => {
+      if (route.request().method() !== "PATCH") return route.continue();
       const response = await route.fetch();
       started();
       await held;
@@ -207,6 +217,7 @@ test("reopening the same media during a save shows the confirmed description", a
     const held = new Promise<void>((resolve) => (release = resolve));
     const saved = new Promise<void>((resolve) => (started = resolve));
     await page.route(`**/api/v1/media/${asset.id}`, async (route) => {
+      if (route.request().method() !== "PATCH") return route.continue();
       const response = await route.fetch();
       started();
       await held;
@@ -222,9 +233,13 @@ test("reopening the same media during a save shows the confirmed description", a
       await saved;
       await page.getByRole("button", { name: "Close dialog" }).click();
       await page.getByRole("button", { name: /reopen\.png/ }).click();
+      // The authoritative later version fences the response still held above.
+      await expect(page.getByLabel("Description", { exact: true })).toHaveValue(
+        "A confirmed description",
+      );
       await expect(
         page.getByLabel("Description", { exact: true }),
-      ).toBeDisabled();
+      ).toBeEnabled();
       release();
       await expect(page.getByLabel("Description", { exact: true })).toHaveValue(
         "A confirmed description",

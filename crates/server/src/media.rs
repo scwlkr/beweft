@@ -76,6 +76,18 @@ pub async fn limits(State(state): State<AppState>, _auth: Auth) -> Result<Json<V
         json!({"max_upload_bytes":state.config.max_upload_bytes,"quota_bytes":state.config.media_quota_bytes,"used_bytes":used,"reserved_bytes":reserved,"available_bytes":state.config.media_quota_bytes.saturating_sub((used+reserved) as u64)}),
     ))
 }
+pub async fn get(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>> {
+    let (row, brand): (Value, Uuid) = sqlx::query_as("SELECT (to_jsonb(m)-'storage_key')||jsonb_build_object('url','/api/v1/media/'||m.id||'/file'),m.brand_id FROM media m WHERE m.id=$1")
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
+    auth.brand(brand)?;
+    Ok(data(row))
+}
 pub async fn upload(
     State(state): State<AppState>,
     auth: Auth,
@@ -337,11 +349,25 @@ pub async fn update(
     if body.alt_text.chars().count() > 2000 {
         return Err(ApiError::bad("Alt text must be at most 2,000 characters"));
     }
+    if body.metadata_version < 1 {
+        return Err(ApiError::bad("Invalid media metadata version"));
+    }
     let brand: Uuid = sqlx::query_scalar("SELECT brand_id FROM media WHERE id=$1")
         .bind(id)
         .fetch_one(&state.db)
         .await?;
     auth.brand(brand)?;
-    let row:Value=sqlx::query_scalar("UPDATE media SET alt_text=$2 WHERE id=$1 RETURNING (to_jsonb(media.*)-'storage_key')||jsonb_build_object('url','/api/v1/media/'||id||'/file')").bind(id).bind(body.alt_text).fetch_one(&state.db).await?;
+    let row: Option<Value> = sqlx::query_scalar("UPDATE media SET alt_text=$2,metadata_version=metadata_version+1 WHERE id=$1 AND metadata_version=$3 RETURNING (to_jsonb(media.*)-'storage_key')||jsonb_build_object('url','/api/v1/media/'||id||'/file')")
+        .bind(id)
+        .bind(body.alt_text)
+        .bind(body.metadata_version)
+        .fetch_optional(&state.db)
+        .await?;
+    let row = row.ok_or_else(|| {
+        ApiError::conflict_code(
+            "media_version_changed",
+            "Media description changed. Refresh before editing.",
+        )
+    })?;
     Ok(data(row))
 }

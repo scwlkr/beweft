@@ -92,6 +92,7 @@ pub struct ApplyTemplateRequest {
 #[serde(deny_unknown_fields)]
 pub struct UpdateMediaRequest {
     pub alt_text: String,
+    pub metadata_version: i32,
 }
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]

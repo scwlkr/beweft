@@ -63,6 +63,7 @@ export default function App() {
     brand,
     load,
     action,
+    reconcileMedia,
     go,
     createBrand,
   } = workspace;
@@ -251,6 +252,7 @@ export default function App() {
                       media={media.filter((m) => matching(m.name))}
                       action={action}
                       pending={pending}
+                      reconcileMedia={reconcileMedia}
                     />
                   )}
                   {route === "connections" && (
