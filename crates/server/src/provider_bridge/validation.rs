@@ -49,6 +49,7 @@ impl ScheduleFormatValidator {
                 provider.as_str(),
                 "facebook" | "instagram" | "threads" | "pinterest"
             )
+            && !(provider == "facebook" && p.options["format"] == "reel")
             && !state.config.public_url.starts_with("https://")
         {
             return Err(ApiError::bad_code(

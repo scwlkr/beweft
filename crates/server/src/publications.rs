@@ -178,6 +178,37 @@ async fn change(
     } else {
         None
     };
+    let mut meta_checkpoint = if matches!(provider.as_str(), "facebook" | "instagram" | "threads")
+        && ["retry", "reconcile"].contains(&action)
+    {
+        crate::provider_bridge::meta_checkpoint_on(state, &mut tx, id).await?
+    } else {
+        None
+    };
+    if action == "retry"
+        && let Some(cp) = meta_checkpoint.as_ref()
+    {
+        let (attempt, checkpoint) = crate::provider_bridge::meta_identity(cp)?;
+        if crate::provider_bridge::meta_public_boundary(cp)
+            && !crate::provider_bridge::meta_attested(cp, attempt, checkpoint)
+        {
+            return Err(ApiError::conflict(
+                "Stop the sender, inspect the provider, and record not-published for the current Meta attempt and checkpoint before retrying",
+            ));
+        }
+        if current == "failed" {
+            // This is an explicit retry, never a timeout-driven replacement. Keep
+            // provider identifiers and the attested checkpoint in the audit trail.
+            sqlx::query("INSERT INTO audit_events(id,owner_id,action,subject_id,detail) VALUES($1,$2,'retry_meta_delivery',$3,$4)")
+                .bind(Uuid::new_v4()).bind(auth.owner_id).bind(id)
+                .bind(json!({"provider":provider,"attempt_id":attempt,"checkpoint_id":checkpoint,"stage":cp["stage"],"container_id":cp["container_id"],"children":cp["children"],"video_id":cp["video_id"],"owner_attestation":cp["not_published_attestation"]}))
+                .execute(&mut *tx).await?;
+            sqlx::query("DELETE FROM provider_delivery_checkpoints WHERE publication_id=$1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
     if action == "retry"
         && x_checkpoint.as_ref().is_some_and(|cp| {
             cp["stage"]
@@ -203,14 +234,32 @@ async fn change(
             if current == "uncertain"
                 || (current == "failed"
                     && body["resolution"] == "not_published"
-                    && x_checkpoint
+                    && (x_checkpoint
                         .as_ref()
-                        .is_some_and(crate::provider_bridge::x_public_boundary)) =>
+                        .is_some_and(crate::provider_bridge::x_public_boundary)
+                        || meta_checkpoint.is_some())) =>
         {
             required(&body, "note")?;
             match body["resolution"].as_str() {
                 Some("published") => "published",
                 Some("not_published") => {
+                    if let Some(cp) = meta_checkpoint.as_mut() {
+                        auth.owner_session()?;
+                        let (attempt, checkpoint) = crate::provider_bridge::meta_identity(cp)?;
+                        if body["observed_attempt_id"] != json!(attempt)
+                            || body["observed_checkpoint_id"] != json!(checkpoint)
+                            || body["sender_stopped"] != true
+                            || body["provider_inspected"] != true
+                        {
+                            return Err(ApiError::conflict(
+                                "Stop the original sender, inspect the provider, and attest not-published using the current Meta attempt and checkpoint IDs",
+                            ));
+                        }
+                        cp["not_published_attestation"] =
+                            json!({"attempt_id":attempt,"checkpoint_id":checkpoint});
+                        crate::provider_bridge::save_recovery_checkpoint_tx(&mut tx, state, id, cp)
+                            .await?;
+                    }
                     if let Some(cp) = x_checkpoint
                         .as_mut()
                         .filter(|cp| crate::provider_bridge::x_public_boundary(cp))

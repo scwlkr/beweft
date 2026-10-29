@@ -48,6 +48,35 @@ impl Adapter {
                     json!({"id":id,"reconciled":true}),
                 )))
             }
+            "facebook"
+                if matches!(
+                    checkpoint_stage(cp),
+                    "fb_reel_public" | "fb_reel_processing"
+                ) =>
+            {
+                let id = field(cp, "video_id")?;
+                if id.len() > 32 || !id.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(error(
+                        FailureKind::Uncertain,
+                        "Invalid Facebook Reel checkpoint",
+                    ));
+                }
+                match self.facebook_reel_status(c, &id, cp).await? {
+                    Step::Published {
+                        external_id,
+                        external_url,
+                        mut receipt,
+                    } => {
+                        receipt["reconciled"] = json!(true);
+                        Ok(Some(Step::Published {
+                            external_id,
+                            external_url,
+                            receipt,
+                        }))
+                    }
+                    _ => Ok(None),
+                }
+            }
             "bluesky" => {
                 let rkey = field(cp, "rkey")?;
                 let origin = instance_origin(&c.app)?;
