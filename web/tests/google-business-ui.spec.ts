@@ -27,6 +27,9 @@ test("Google post options keep local times and remove incompatible fields", asyn
     await page.getByRole("button", { name: "Location fixture" }).click();
     await page.getByRole("tab", { name: "Location fixture" }).click();
     const dialog = page.getByRole("dialog");
+    await expect(dialog).toContainText(
+      "Photo descriptions stay in beweft and are not sent to Google.",
+    );
     await dialog.getByLabel("Location fixture text").fill("Local event");
     await dialog.getByLabel("Post type").selectOption("EVENT");
     await expect(dialog).toContainText(
@@ -172,6 +175,11 @@ test("Google recovery fences both owner outcomes and never retries automatically
       `**/publications/${original.id}/provider-reconcile`,
       (route) => {
         providerChecks++;
+        if (providerChecks === 1)
+          return route.fulfill({
+            status: 404,
+            json: { error: { code: "not_found", message: "Post not found" } },
+          });
         return route.fulfill({
           json: { data: { state: "uncertain", reason: "Still processing." } },
         });
@@ -207,6 +215,14 @@ test("Google recovery fences both owner outcomes and never retries automatically
     await expect(
       dialog.getByRole("button", { name: "Cancel publication" }),
     ).toHaveCount(0);
+    await expect(
+      dialog.getByRole("button", { name: "Retry publication" }),
+    ).toHaveCount(0);
+    await dialog
+      .getByRole("button", { name: "Check provider outcome" })
+      .click();
+    await expect(dialog).toContainText("provider check was not confirmed");
+    await expect(dialog).toContainText(first.checkpoint_id);
     await expect(
       dialog.getByRole("button", { name: "Retry publication" }),
     ).toHaveCount(0);
@@ -250,7 +266,7 @@ test("Google recovery fences both owner outcomes and never retries automatically
       dialog.getByRole("button", { name: "Retry publication" }),
     ).toBeEnabled();
     expect(retries).toBe(0);
-    expect(providerChecks).toBe(1);
+    expect(providerChecks).toBe(2);
     expect(reconciles).toEqual([
       {
         resolution: "published",
@@ -311,7 +327,15 @@ test("missing Google status never invents a safe retry or cancellation", async (
     let status: any = {};
     await page.route(
       `**/publications/${original.id}/provider-status`,
-      (route) => route.fulfill({ json: { data: status } }),
+      (route) =>
+        status === "error"
+          ? route.fulfill({
+              status: 503,
+              json: {
+                error: { code: "unavailable", message: "Status unavailable" },
+              },
+            })
+          : route.fulfill({ json: { data: status } }),
     );
     await page.goto("/#queue");
     await page.getByRole("button", { name: "View details" }).click();
@@ -326,6 +350,12 @@ test("missing Google status never invents a safe retry or cancellation", async (
     await expect(
       dialog.getByRole("button", { name: "Record outcome" }),
     ).toHaveCount(0);
+    status = { google_delivery: null };
+    await dialog.getByRole("button", { name: "Check delivery status" }).click();
+    await expect(dialog).toContainText("No current Google delivery checkpoint");
+    await expect(
+      dialog.getByRole("button", { name: "Retry publication" }),
+    ).toBeDisabled();
     status = {
       google_delivery: {
         phase: "rejected",
@@ -346,6 +376,15 @@ test("missing Google status never invents a safe retry or cancellation", async (
     await expect(
       dialog.getByRole("button", { name: "Retry publication" }),
     ).toBeEnabled();
+    status = "error";
+    await dialog.getByRole("button", { name: "Check delivery status" }).click();
+    await expect(dialog).toContainText("Status unavailable");
+    await expect(
+      dialog.getByRole("button", { name: "Retry publication" }),
+    ).toBeDisabled();
+    await expect(
+      dialog.getByRole("button", { name: "Cancel publication" }),
+    ).toHaveCount(0);
   });
 });
 

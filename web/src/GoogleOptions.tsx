@@ -38,11 +38,10 @@ export function GoogleOptions({
       <p className="muted">
         Posts can include up to 1,500 characters of text and at most one JPEG or
         PNG photo. Photos must be 10 KiB–5 MiB and at least 250 pixels on each
-        side; Google needs a reachable public HTTPS URL to fetch them. This
-        adapter does not send photo descriptions and rejects photos with a
-        description. Google project approval, account access, and location
-        eligibility still apply; connecting a location does not verify
-        permission to publish.
+        side; Google needs a reachable public HTTPS URL to fetch them. Photo
+        descriptions stay in beweft and are not sent to Google. Google project
+        approval, account access, and location eligibility still apply;
+        connecting a location does not verify permission to publish.
       </p>
       <Field label="Post type">
         <select

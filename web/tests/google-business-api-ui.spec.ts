@@ -72,7 +72,7 @@ test("Google composer and exact-ID recovery work with the real API", async () =>
     if (!/^[0-9a-f-]{36}$/.test(channel.id))
       throw new Error("Invalid fixture channel");
     sql(
-      `UPDATE channels SET provider='google_business', connection_status='connected' WHERE id='${channel.id}'`,
+      `UPDATE channels SET provider='google_business', target_platform=NULL, connection_status='connected' WHERE id='${channel.id}'`,
     );
     await context.addInitScript(
       (id) => localStorage.setItem("beweft.brand", id),
@@ -132,7 +132,14 @@ test("Google composer and exact-ID recovery work with the real API", async () =>
     sql(
       `UPDATE publications SET state='uncertain' WHERE id='${publication.id}'; INSERT INTO publication_attempts(id,publication_id,state,provider,finished_at) VALUES('${attempt}','${publication.id}','uncertain','google_business',now()); INSERT INTO provider_delivery_checkpoints(publication_id,encrypted_checkpoint,attempt_id,checkpoint_id) VALUES('${publication.id}','${encrypted}','${attempt}','${checkpointId}')`,
     );
+    const uncertain = await context.request.get(
+      `/api/v1/publications?brand_id=${brand.id}`,
+    );
+    expect((await uncertain.json()).data[0].state).toBe("uncertain");
     await page.goto("/#queue");
+    await page.reload();
+    await page.getByRole("button", { name: "Needs attention" }).click();
+    await expect(page.locator("main")).toContainText("Isolated event");
     await page.getByRole("button", { name: "Reconcile outcome" }).click();
     await expect(dialog).toContainText(attempt);
     await expect(dialog).toContainText(checkpointId);
