@@ -15,9 +15,11 @@ use url::Url;
 
 mod catalog;
 mod client;
+mod deadline;
 mod types;
 pub use catalog::*;
 pub use client::*;
+pub use deadline::*;
 pub use types::*;
 pub fn instance_origin(app: &AppConfig) -> Result<String> {
     let value = app

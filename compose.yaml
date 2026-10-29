@@ -1,7 +1,8 @@
 name: ${COMPOSE_PROJECT_NAME:-beweft}
 x-app: &app
-  image: ${BEWEFT_IMAGE:-beweft:local}
-  build: .
+  image: ${BEWEFT_IMAGE:-unconfigured}
+  labels:
+    org.beweft.installation: ${BEWEFT_INSTALLATION_ID:-unconfigured}
   restart: unless-stopped
   init: true
   read_only: true
@@ -25,7 +26,9 @@ x-app: &app
       condition: service_healthy
 services:
   db:
-    image: postgres:17-alpine
+    image: ${BEWEFT_POSTGRES_IMAGE:-unconfigured}
+    labels:
+      org.beweft.installation: ${BEWEFT_INSTALLATION_ID:-unconfigured}
     restart: unless-stopped
     environment:
       POSTGRES_DB: beweft
@@ -50,20 +53,23 @@ services:
       retries: 6
   worker:
     <<: *app
+    profiles: [worker]
     command: [beweft-worker]
     environment:
       <<: *environment
       BEWEFT_WORKER_ID: compose-primary
+      BEWEFT_ENFORCE_WORKER_HOLD: "true"
+      BEWEFT_WORKER_ACTIVE: ${BEWEFT_WORKER_ACTIVE:-false}
     healthcheck:
-      # WIP: fail closed until per-instance worker healthcheck is implemented.
-      # Never invoke an unsupported flag: it would start another scheduler.
-      test: [CMD-SHELL, "exit 1"]
+      test: [CMD, container-entrypoint, beweft-worker, --healthcheck]
       interval: 10s
       timeout: 5s
       start_period: 30s
       retries: 6
   cli:
-    image: ${BEWEFT_IMAGE:-beweft:local}
+    image: ${BEWEFT_IMAGE:-unconfigured}
+    labels:
+      org.beweft.installation: ${BEWEFT_INSTALLATION_ID:-unconfigured}
     profiles: [tools]
     user: "10001:10001"
     read_only: true
@@ -77,4 +83,12 @@ services:
     command: [help]
 volumes:
   database:
+    labels:
+      org.beweft.installation: ${BEWEFT_INSTALLATION_ID:-unconfigured}
   media:
+    labels:
+      org.beweft.installation: ${BEWEFT_INSTALLATION_ID:-unconfigured}
+networks:
+  default:
+    labels:
+      org.beweft.installation: ${BEWEFT_INSTALLATION_ID:-unconfigured}

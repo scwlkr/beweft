@@ -10,12 +10,14 @@ export function ReplyResolution({
     resolution: "published" | "not_published";
     note: string;
     external_url?: string;
+    sender_stopped?: true;
   }) => Promise<void>;
 }) {
   const [resolution, setResolution] = useState("");
   const [note, setNote] = useState("");
   const [url, setUrl] = useState("");
   const [checked, setChecked] = useState(false);
+  const [senderStopped, setSenderStopped] = useState(false);
   return (
     <fieldset className="form-stack detail-section" disabled={disabled}>
       <legend>Resolve the uncertain reply</legend>
@@ -26,7 +28,11 @@ export function ReplyResolution({
       <Field label="Verified reply outcome">
         <select
           value={resolution}
-          onChange={(event) => setResolution(event.target.value)}
+          onChange={(event) => {
+            setResolution(event.target.value);
+            setChecked(false);
+            setSenderStopped(false);
+          }}
         >
           <option value="">Choose the outcome you verified</option>
           <option value="published">The reply exists on the network</option>
@@ -57,14 +63,34 @@ export function ReplyResolution({
         />
         I checked the network and verified this outcome.
       </label>
+      {resolution === "not_published" && (
+        <label className="checkbox-label">
+          <input
+            type="checkbox"
+            checked={senderStopped}
+            onChange={(event) => setSenderStopped(event.target.checked)}
+          />
+          I confirmed the original sender has stopped. A lost connection or
+          elapsed deadline alone does not prove this.
+        </label>
+      )}
       <Button
         type="button"
         variant="secondary"
-        disabled={disabled || !checked || !note.trim() || !resolution}
+        disabled={
+          disabled ||
+          !checked ||
+          !note.trim() ||
+          !resolution ||
+          (resolution === "not_published" && !senderStopped)
+        }
         onClick={() =>
           void onResolve({
             resolution: resolution as "published" | "not_published",
             note,
+            ...(resolution === "not_published"
+              ? { sender_stopped: true as const }
+              : {}),
             ...(url ? { external_url: url } : {}),
           })
         }

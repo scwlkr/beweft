@@ -13,6 +13,9 @@ local operation must not require public DNS or access to a social provider.
   port is published by default; PostgreSQL stays on the internal network.
 - API and worker restart after host reboot. API database readiness and worker
   heartbeat are separate health signals; a working login page is insufficient.
+  Each worker sharing a database needs a unique, stable `BEWEFT_WORKER_ID`;
+  the default Compose worker uses `compose-primary` and is not a scalable ID
+  template for additional replicas.
 - A reverse proxy supplies HTTPS in production. Operators set the actual public
   origin before OAuth; example hostnames are never treated as deployment targets.
 

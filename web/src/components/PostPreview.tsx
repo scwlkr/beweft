@@ -32,7 +32,7 @@ export function PostPreview({
             <img
               className="preview-media"
               src={m.url}
-              alt={m.name}
+              alt={m.alt_text || m.name}
               key={m.id}
             />
           ) : (
@@ -54,7 +54,7 @@ export function PostPreview({
         <p>
           {channel?.provider === "manual"
             ? "Manual channels become a handoff task when due. You publish in the network app, then record the outcome here."
-            : "Publishing capabilities and media requirements vary by channel. The server checks your selected formats before scheduling."}
+            : "Publishing formats and account requirements vary by channel."}
         </p>
       </div>
     </aside>

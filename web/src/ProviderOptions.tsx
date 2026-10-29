@@ -9,6 +9,20 @@ export function ProviderOptions({
   onChange: (v: Record<string, unknown>) => void;
 }) {
   const set = (key: string, v: unknown) => onChange({ ...value, [key]: v });
+  if (provider === "x")
+    return (
+      <section className="provider-options form-stack">
+        <h3>X video requirements</h3>
+        <p className="muted">
+          The current beweft adapter accepts one MP4 video with H.264,
+          progressive yuv420p, at most 60 fps and 256 MiB. The longer side must
+          be at most 1,280 pixels, the shorter side at most 1,024 pixels, and
+          the aspect ratio between 1:3 and 3:1. These are this adapter’s limits.
+          X video descriptions are not supported; the adapter rejects a video
+          that has a description instead of dropping it.
+        </p>
+      </section>
+    );
   if (provider === "youtube")
     return (
       <section className="provider-options form-stack">

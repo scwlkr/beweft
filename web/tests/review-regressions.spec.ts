@@ -319,6 +319,8 @@ test("partial provider sync errors and reconnect/disconnect are visible (control
           data: {
             disconnected: true,
             provider_revoked: false,
+            channels_requiring_reconnection: 0,
+            revocation_id: crypto.randomUUID(),
             next_action: "Revoke in provider account settings.",
           },
         },
@@ -369,6 +371,9 @@ test("partial provider sync errors and reconnect/disconnect are visible (control
     ).toBeVisible();
     await page.getByRole("button", { name: "Close dialog" }).click();
     await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+    await page
+      .getByRole("checkbox", { name: /I understand the selected queue/ })
+      .check();
     await page
       .getByRole("button", { name: "Disconnect channel", exact: true })
       .click();

@@ -9,19 +9,46 @@ struct Provider {
     post_writes: AtomicUsize,
     post_started: Notify,
     post_release: Notify,
+    media_block: AtomicUsize,
+    media_started: Notify,
+    media_release: Notify,
     writes: AtomicUsize,
     reply_started: Notify,
     reply_release: Notify,
     probe_started: Notify,
     probe_release: Notify,
+    revoke_requests: AtomicUsize,
+    masto_revoke_requests: AtomicUsize,
+    sync_mode: AtomicUsize,
+    sync_requests: AtomicUsize,
+    sync_started: Notify,
+    sync_release: Notify,
+    exchange_block: AtomicUsize,
+    exchange_requests: AtomicUsize,
+    exchange_started: Notify,
+    exchange_release: Notify,
+    identity_block: AtomicUsize,
+    identity_started: Notify,
+    identity_release: Notify,
+    bluesky_session_requests: AtomicUsize,
+    bluesky_session_block: AtomicUsize,
+    bluesky_session_started: Notify,
+    bluesky_session_release: Notify,
 }
 async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
     let path = r.uri().path().to_owned();
     match path.as_str() {
-        "/2/oauth2/token" | "/token" => {
+        "/2/oauth2/token" | "/token" | "/oauth/token" | "/oauth/v2/accessToken" => {
             let body = to_bytes(r.into_body(), 10000).await.unwrap();
             let form: std::collections::HashMap<String, String> =
                 url::form_urlencoded::parse(&body).into_owned().collect();
+            if form.get("grant_type").map(String::as_str) == Some("authorization_code") {
+                s.exchange_requests.fetch_add(1, Ordering::SeqCst);
+                if s.exchange_block.load(Ordering::SeqCst) != 0 {
+                    s.exchange_started.notify_one();
+                    s.exchange_release.notified().await;
+                }
+            }
             if s.strict_refresh.load(Ordering::SeqCst)
                 && form.get("grant_type").map(String::as_str) == Some("refresh_token")
             {
@@ -66,10 +93,18 @@ async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
                 }
                 2 => {
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    Json(json!({"data":{"id":"late-post"}})).into_response()
+                    Json(json!({"data":{"id":"987654321"}})).into_response()
                 }
-                _ => Json(json!({"data":{"id":"fixture-post"}})).into_response(),
+                _ => Json(json!({"data":{"id":"987654321"}})).into_response(),
             }
+        }
+        "/2/media/upload" => {
+            let _ = to_bytes(r.into_body(), 5 * 1024 * 1024).await.unwrap();
+            if s.media_block.load(Ordering::SeqCst) != 0 {
+                s.media_started.notify_one();
+                s.media_release.notified().await;
+            }
+            Json(json!({"data":{"id":"123456789","expires_after_secs":86400}})).into_response()
         }
         "/fastsession" => {
             let mut r = StatusCode::PERMANENT_REDIRECT.into_response();
@@ -79,6 +114,10 @@ async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
         }
         "/2/users/me" => {
             Json(json!({"data":{"id":"destination","name":"Fixture"}})).into_response()
+        }
+        "/v2/userinfo" => Json(json!({"sub":"shared-account","name":"Fixture"})).into_response(),
+        "/api/v1/accounts/verify_credentials" => {
+            Json(json!({"id":"masto-destination","display_name":"Fixture"})).into_response()
         }
         "/api/v1/statuses" => {
             s.writes.fetch_add(1, Ordering::SeqCst);
@@ -95,7 +134,42 @@ async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
                 .insert(header::RANGE, "bytes=0-4".parse().unwrap());
             r
         }
-        "/oauth/revoke" => Json(json!({})).into_response(),
+        "/revoke"
+        | "/2/oauth2/revoke"
+        | "/v23.0/me/permissions"
+        | "/xrpc/com.atproto.server.deleteSession" => {
+            s.revoke_requests.fetch_add(1, Ordering::SeqCst);
+            StatusCode::OK.into_response()
+        }
+        "/youtube/v3/channels" => {
+            if s.identity_block.load(Ordering::SeqCst) != 0 {
+                s.identity_started.notify_one();
+                s.identity_release.notified().await;
+            }
+            Json(json!({"items":[{"id":"destination","snippet":{"title":"Fixture"}}]}))
+                .into_response()
+        }
+        "/xrpc/com.atproto.server.createSession" => {
+            s.bluesky_session_requests.fetch_add(1, Ordering::SeqCst);
+            if s.bluesky_session_block.load(Ordering::SeqCst) != 0 {
+                s.bluesky_session_started.notify_one();
+                s.bluesky_session_release.notified().await;
+            }
+            Json(json!({"did":"did:plc:fixture", "handle":"fixture.bsky.social", "accessJwt":"bluesky-access-fixture", "refreshJwt":"bluesky-refresh-fixture"})).into_response()
+        }
+        "/youtube/v3/commentThreads" => {
+            s.sync_requests.fetch_add(1, Ordering::SeqCst);
+            if s.sync_mode.load(Ordering::SeqCst) != 0 {
+                s.sync_started.notify_one();
+                s.sync_release.notified().await;
+            }
+            Json(json!({"items":[]})).into_response()
+        }
+        "/oauth/revoke" => {
+            s.revoke_requests.fetch_add(1, Ordering::SeqCst);
+            s.masto_revoke_requests.fetch_add(1, Ordering::SeqCst);
+            Json(json!({})).into_response()
+        }
         _ => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -115,6 +189,8 @@ impl Drop for Harness {
 }
 impl Harness {
     async fn new() -> Self {
+        assert_eq!(std::env::var("BEWEFT_REQUIRE_PROVIDER_FIXTURES").as_deref(), Ok("true"));
+        assert_eq!(std::env::var("BEWEFT_PROVIDER_TEST_SANDBOX").as_deref(), Ok("1"));
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(2)
             .acquire_timeout(std::time::Duration::from_secs(5))
@@ -125,6 +201,7 @@ impl Harness {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         // Single test, current-thread runtime; fixture env read only during this process.
         unsafe {
+            std::env::set_var("BEWEFT_ENABLE_FIXTURES", "true");
             std::env::set_var(
                 "BEWEFT_PROVIDER_FIXTURE_ORIGIN",
                 format!("http://{}", listener.local_addr().unwrap()),
@@ -153,9 +230,9 @@ impl Harness {
         let dir = std::env::temp_dir().join(format!("beweft-provider-db-{owner}"));
         std::fs::create_dir(&dir).unwrap();
         Self {
-            state: AppState {
-                db: pool,
-                config: Arc::new(Config {
+            state: AppState::new(
+                pool,
+                Arc::new(Config {
                     public_url: "http://localhost:3000".into(),
                     secure_cookie: false,
                     setup_secret: String::new(),
@@ -166,7 +243,7 @@ impl Harness {
                     fixture_delay_ms: 0,
                     encryption_key: Some([13; 32]),
                 }),
-            },
+            ),
             auth: Auth {
                 owner_id: owner,
                 email: "fixture".into(),
@@ -187,6 +264,15 @@ impl Harness {
             format!("beweft_session={}", self.session).parse().unwrap(),
         );
         h
+    }
+    async fn revocation_marker(&self, provider: &str) -> Uuid {
+        sqlx::query_scalar::<_, Option<Uuid>>("SELECT revocation_id FROM provider_oauth_fences WHERE provider=$1")
+            .bind(provider)
+            .fetch_optional(&self.state.db)
+            .await
+            .unwrap()
+            .flatten()
+            .unwrap_or_else(Uuid::nil)
     }
     async fn app(&self, provider: &str, client: &str, origin: Option<&str>) {
         let _ = connections::save_app(

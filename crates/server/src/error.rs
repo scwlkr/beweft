@@ -11,8 +11,14 @@ impl ApiError {
     pub fn bad(message: impl Into<String>) -> Self {
         Self(StatusCode::BAD_REQUEST, "invalid_request", message.into())
     }
+    pub fn bad_code(code: &'static str, message: impl Into<String>) -> Self {
+        Self(StatusCode::BAD_REQUEST, code, message.into())
+    }
     pub fn conflict(message: impl Into<String>) -> Self {
         Self(StatusCode::CONFLICT, "conflict", message.into())
+    }
+    pub fn conflict_code(code: &'static str, message: impl Into<String>) -> Self {
+        Self(StatusCode::CONFLICT, code, message.into())
     }
     pub fn forbidden() -> Self {
         Self(
@@ -62,6 +68,9 @@ impl From<sqlx::Error> for ApiError {
             }
             sqlx::Error::Database(d) if d.is_foreign_key_violation() => {
                 Self::bad("A referenced record is missing or still in use")
+            }
+            sqlx::Error::Database(d) if d.code().as_deref() == Some("55P03") => {
+                Self::conflict("Another operation is using this resource; try again")
             }
             _ => Self::internal(e),
         }

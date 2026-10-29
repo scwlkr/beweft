@@ -1,12 +1,20 @@
 import { useComposer } from "./useComposer";
 import { Check, ImagePlus, Save, Send, X } from "lucide-react";
-import { type Brand, type Channel, type Media, type Post } from "./api";
+import {
+  type ApiSession,
+  type Brand,
+  type Channel,
+  type Media,
+  type Post,
+} from "./api";
 import { Network } from "./components/brand";
 import { PostPreview } from "./components/PostPreview";
 import { ErrorNotice, Field } from "./components/shared";
 import { Button } from "./components/ui/button";
 import { Dialog } from "./components/ui/dialog";
 import { ProviderOptions } from "./ProviderOptions";
+import type { PendingMedia } from "./usePendingMedia";
+import type { usePendingSchedule } from "./usePendingSchedule";
 export function Composer({
   brand,
   channels,
@@ -15,6 +23,10 @@ export function Composer({
   initialDate,
   onClose,
   onSaved,
+  pendingSchedule,
+  pendingMedia,
+  reconcileMedia,
+  onReviewMedia,
 }: {
   brand: Brand;
   channels: Channel[];
@@ -23,6 +35,10 @@ export function Composer({
   initialDate?: string;
   onClose: () => void;
   onSaved: () => Promise<void>;
+  pendingSchedule: ReturnType<typeof usePendingSchedule>;
+  pendingMedia: PendingMedia;
+  reconcileMedia: (media: Media, session: ApiSession) => void;
+  onReviewMedia: (id: string) => void;
 }) {
   const {
     post,
@@ -45,14 +61,29 @@ export function Composer({
     setMode,
     date,
     setDate,
+    preservedExact,
+    correction,
+    correctionBusy,
+    correctionConflict,
+    chooseOriginalTime,
+    retryCorrection,
     busy,
     error,
+    intent,
+    intentChanged,
+    recovery,
+    recoveryMessage,
+    recover,
+    release,
     active,
     currentText,
     previewChannel,
     activeMedia,
     setActiveMedia,
     selectedMedia,
+    affectedMedia,
+    missingMedia,
+    scheduleBlocked,
     submit,
   } = useComposer({
     brand,
@@ -62,12 +93,21 @@ export function Composer({
     initialDate,
     onSaved,
     onClose,
+    pendingSchedule,
+    pendingMedia,
+    reconcileMedia,
   });
+  const previewDiffers =
+    !!intent?.media_versions &&
+    Object.entries(intent.media_versions).some(
+      ([id, version]) =>
+        media.find((item) => item.id === id)?.metadata_version !== version,
+    );
   return (
     <Dialog
       open
       onOpenChange={(v) => {
-        if (!v && !busy) onClose();
+        if (!v && (!busy || !!intent)) onClose();
       }}
       title={post?.id ? "Edit post" : "Create a post"}
       description="One idea. A version that feels right on every channel."
@@ -76,7 +116,12 @@ export function Composer({
       <div className="composer-grid">
         <fieldset
           className="composer-editor"
-          disabled={busy}
+          disabled={
+            busy ||
+            !pendingSchedule.ready ||
+            !!intent ||
+            recovery === "complete"
+          }
           aria-label="Post editor"
           aria-busy={busy}
         >
@@ -207,7 +252,7 @@ export function Composer({
                       }
                     >
                       {m.mime.startsWith("image/") ? (
-                        <img src={m.url} alt={m.name} />
+                        <img src={m.url} alt={m.alt_text || m.name} />
                       ) : (
                         <span>Video</span>
                       )}
@@ -223,7 +268,7 @@ export function Composer({
               {selectedMedia.map((m) => (
                 <div key={m.id}>
                   {m.mime.startsWith("image/") ? (
-                    <img src={m.url} alt={m.name} />
+                    <img src={m.url} alt={m.alt_text || m.name} />
                   ) : (
                     <span>{m.name}</span>
                   )}
@@ -241,28 +286,23 @@ export function Composer({
               ))}
             </div>
           )}
-          {active &&
-            ["bluesky", "mastodon"].includes(active.provider) &&
-            selectedMedia.some((m) => m.mime.startsWith("image/")) && (
-              <Field
-                label="Image description"
-                hint="Currently applied to every image in this channel variant. Describe the content for people who cannot see it."
-              >
-                <textarea
-                  rows={2}
-                  value={String(options[active.id]?.alt_text ?? "")}
-                  onChange={(e) =>
-                    setOptions({
-                      ...options,
-                      [active.id]: {
-                        ...options[active.id],
-                        alt_text: e.target.value,
-                      },
-                    })
-                  }
-                />
-              </Field>
-            )}
+          {selectedMedia.length > 0 && (
+            <div className="media-descriptions">
+              <strong>Media descriptions</strong>
+              <p className="muted">
+                These are the last descriptions loaded. Scheduling uses saved
+                descriptions, which another browser can change.
+              </p>
+              <ul>
+                {selectedMedia.map((item) => (
+                  <li key={item.id}>
+                    <strong>{item.name}:</strong>{" "}
+                    {item.alt_text || "No description yet"}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {active && (
             <ProviderOptions
               provider={active.provider}
@@ -288,6 +328,11 @@ export function Composer({
               <select
                 value={mode}
                 onChange={(e) => setMode(e.target.value as typeof mode)}
+                disabled={
+                  correctionBusy ||
+                  correction.kind === "loading" ||
+                  correction.kind === "error"
+                }
               >
                 <option value="draft">Save as draft</option>
                 <option value="queue">Next available queue slot</option>
@@ -302,8 +347,17 @@ export function Composer({
                   type="datetime-local"
                   value={date}
                   onChange={(e) => setDate(e.target.value)}
+                  disabled={
+                    correctionBusy ||
+                    correction.kind === "loading" ||
+                    correction.kind === "error"
+                  }
+                  step="0.001"
                   required
                 />
+                {preservedExact && (
+                  <small>Exact saved time: {preservedExact}</small>
+                )}
               </Field>
             )}
             {mode === "queue" && (
@@ -313,7 +367,64 @@ export function Composer({
               </p>
             )}
           </div>
-          {error && <ErrorNotice message={error} />}
+          {correction.kind === "corrupt" && (
+            <ErrorNotice message="The saved scheduling time could not be understood. Choose the queue or enter a date and time to review it before scheduling." />
+          )}
+          {correction.kind === "error" && (
+            <div role="status">
+              <p>{correction.message}</p>
+              <Button variant="secondary" onClick={retryCorrection}>
+                Check saved time again
+              </Button>
+            </div>
+          )}
+          {mode !== "draft" && !pendingMedia.ready && (
+            <div role="status" className="quiet-note">
+              <p>
+                {pendingMedia.error || "Checking media description recovery…"}
+              </p>
+              {pendingMedia.error && (
+                <Button variant="secondary" onClick={pendingMedia.retry}>
+                  Check media again
+                </Button>
+              )}
+            </div>
+          )}
+          {mode !== "draft" && affectedMedia.length > 0 && (
+            <div role="status" className="quiet-note">
+              <p>
+                A selected media description is unconfirmed. Review it before
+                scheduling.
+              </p>
+              {affectedMedia.map((id) =>
+                pendingMedia.assetErrors[id] ? (
+                  <p key={id}>
+                    {media.find((item) => item.id === id)?.name ?? "Media"}:{" "}
+                    {pendingMedia.assetErrors[id]}
+                  </p>
+                ) : null,
+              )}
+              {affectedMedia.map((id) => (
+                <Button
+                  key={id}
+                  variant="secondary"
+                  onClick={() => onReviewMedia(id)}
+                >
+                  Review{" "}
+                  {media.find((item) => item.id === id)?.name ??
+                    "media description"}
+                </Button>
+              ))}
+              {affectedMedia.some((id) => !!pendingMedia.assetErrors[id]) && (
+                <Button variant="secondary" onClick={pendingMedia.retry}>
+                  Check media again
+                </Button>
+              )}
+            </div>
+          )}
+          {mode !== "draft" && missingMedia.length > 0 && (
+            <ErrorNotice message="A selected media asset could not be loaded. Refresh the workspace before scheduling." />
+          )}
         </fieldset>
         <PostPreview
           brand={brand}
@@ -322,20 +433,125 @@ export function Composer({
           media={selectedMedia}
         />
       </div>
+      {pendingSchedule.error && (
+        <ErrorNotice
+          message={`Schedule recovery is unavailable: ${pendingSchedule.error}`}
+        />
+      )}
+      {intent && correctionConflict && (
+        <div className="notice" role="status">
+          <div>
+            <strong>Review the saved scheduling choice</strong>
+            <p>
+              Original request:{" "}
+              {intent.mode === "queue"
+                ? "next available queue slot"
+                : intent.scheduled_at}
+              .
+            </p>
+            <p>
+              Other saved choice:{" "}
+              {correctionConflict.corrupt
+                ? "unreadable"
+                : correctionConflict.value?.mode === "queue"
+                  ? "next available queue slot"
+                  : (correctionConflict.value?.scheduled_at ?? "none")}
+              .
+            </p>
+            <Button
+              variant="secondary"
+              disabled={busy || intentChanged}
+              onClick={() => void chooseOriginalTime()}
+            >
+              Use original scheduling choice
+            </Button>
+          </div>
+        </div>
+      )}
+      {(intent || recovery === "complete") && (
+        <div className="notice" role="status">
+          <div>
+            <strong>
+              {recovery === "complete"
+                ? "Schedule confirmed"
+                : "Original schedule needs review"}
+            </strong>
+            <p>
+              {recoveryMessage ||
+                (intent?.request_contract === "request-id-v2"
+                  ? "The outcome is not yet confirmed. This saved revision and its channel choices are locked until you check, retry, or stop the original schedule. Stopping first checks whether it already completed."
+                  : intent?.request_contract === "request-id-v1"
+                    ? "This older request has no saved media versions. Check its outcome and keep this record; it cannot be retried safely."
+                    : "This older request has no recovery ID. Check its destinations and keep this record; retrying could create a duplicate.")}
+            </p>
+            {previewDiffers && (
+              <p>
+                Media in the preview has changed or is unavailable. The original
+                schedule may use earlier descriptions.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+      {error && <ErrorNotice message={error} />}
       <footer className="dialog-footer">
-        <Button variant="ghost" onClick={onClose} disabled={busy}>
-          Cancel
+        <Button variant="ghost" onClick={onClose} disabled={busy && !intent}>
+          {intent || recovery === "complete" ? "Close" : "Cancel"}
         </Button>
-        <Button onClick={submit} disabled={busy}>
-          {mode === "draft" ? <Save size={17} /> : <Send size={17} />}{" "}
-          {busy
-            ? "Saving…"
-            : mode === "draft"
-              ? "Save draft"
-              : mode === "queue"
-                ? "Add to queue"
-                : "Schedule post"}
-        </Button>
+        {intent ? (
+          <>
+            <Button
+              variant="secondary"
+              onClick={() => void recover(false)}
+              disabled={busy || !pendingSchedule.ready || intentChanged}
+            >
+              Check scheduling outcome
+            </Button>
+            {recovery !== "release" &&
+              intent.request_contract === "request-id-v2" &&
+              !["mismatch", "legacy"].includes(recovery) && (
+                <Button
+                  onClick={() => void recover(true)}
+                  disabled={busy || !pendingSchedule.ready}
+                >
+                  Retry original schedule
+                </Button>
+              )}
+            {intent.request_contract === "request-id-v2" &&
+              !["mismatch", "legacy"].includes(recovery) && (
+                <Button
+                  onClick={() => void release()}
+                  disabled={busy || !pendingSchedule.ready}
+                >
+                  {recovery === "release"
+                    ? "Refresh descriptions"
+                    : "Stop original schedule"}
+                </Button>
+              )}
+          </>
+        ) : (
+          recovery !== "complete" && (
+            <Button
+              onClick={submit}
+              disabled={
+                busy ||
+                !pendingSchedule.ready ||
+                scheduleBlocked ||
+                correctionBusy ||
+                (mode !== "draft" && correction.kind !== "ready")
+              }
+            >
+              {mode === "draft" ? <Save size={17} /> : <Send size={17} />}{" "}
+              {busy
+                ? "Saving…"
+                : mode === "draft"
+                  ? "Save draft"
+                  : mode === "queue"
+                    ? "Add to queue"
+                    : "Schedule post"}
+            </Button>
+          )
+        )}
       </footer>
     </Dialog>
   );

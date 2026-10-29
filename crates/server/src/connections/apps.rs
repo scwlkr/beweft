@@ -1,4 +1,76 @@
 use super::*;
+
+pub(super) const PROVIDER_BUSY_MESSAGE: &str = "A provider operation is in progress. Wait for it to finish, then retry and check the current provider status before any manual removal.";
+pub(super) const PENDING_REMOVAL_MESSAGE: &str = "Provider removal is pending. Wait for any provider operation still in progress to finish. Removing access at the provider may affect other channels and unrelated accounts. First inspect your channels, then remove the affected access in the provider's access settings (such as connected apps or app passwords). Only after removal is complete, confirm it before connecting again.";
+
+pub(super) fn provider_operation_key(provider: &str) -> String {
+    format!("provider-operation:{provider}")
+}
+
+pub(super) fn provider_busy_error() -> ApiError {
+    ApiError::conflict(PROVIDER_BUSY_MESSAGE)
+}
+
+/// Serialize grant operations and disconnect for a provider, including remote I/O.
+/// A busy gate fails promptly so other requests do not wait on the provider timeout.
+pub(super) async fn oauth_gate(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    provider: &str,
+) -> Result<Option<(i64, Option<Uuid>)>> {
+    fn gate_error(error: sqlx::Error) -> ApiError {
+        if matches!(&error, sqlx::Error::Database(db) if db.code().as_deref() == Some("55P03")) {
+            provider_busy_error()
+        } else {
+            error.into()
+        }
+    }
+    sqlx::query("SET LOCAL lock_timeout = '5s'")
+        .execute(&mut **tx)
+        .await
+        .map_err(gate_error)?;
+    // Every provider grant operation and disconnect uses this nonblocking key.
+    let admitted: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(provider_operation_key(provider))
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(gate_error)?;
+    if !admitted {
+        return Err(provider_busy_error());
+    }
+    let query = "SELECT oauth_generation,revocation_id FROM provider_oauth_fences WHERE provider=$1 FOR UPDATE NOWAIT";
+    let mut row = sqlx::query(query)
+        .bind(provider)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(gate_error)?;
+    if row.is_none() {
+        // The provider advisory lock also serializes creation of the first
+        // fence, so a concurrent app save fails promptly rather than waiting
+        // on the INSERT's unique constraint.
+        sqlx::query("INSERT INTO provider_oauth_fences(provider) VALUES($1) ON CONFLICT(provider) DO NOTHING")
+            .bind(provider).execute(&mut **tx).await.map_err(gate_error)?;
+        row = sqlx::query(query)
+            .bind(provider)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(gate_error)?;
+    }
+    Ok(row.map(|row| (row.get("oauth_generation"), row.get("revocation_id"))))
+}
+
+pub(super) fn pending_removal_error() -> ApiError {
+    ApiError::conflict(PENDING_REMOVAL_MESSAGE)
+}
+
+pub(super) fn require_open_oauth_gate(gate: Option<(i64, Option<Uuid>)>) -> Result<i64> {
+    match gate {
+        Some((generation, None)) => Ok(generation),
+        Some((_, Some(_))) => Err(pending_removal_error()),
+        None => Err(ApiError::bad("Set up this provider app first")),
+    }
+}
+
 pub async fn app_config(state: &AppState, provider: &str) -> Result<AppConfig> {
     let row = sqlx::query("SELECT id,encrypted_config FROM provider_apps WHERE provider=$1")
         .bind(provider)
@@ -17,6 +89,19 @@ pub(super) async fn app_config_tx(
         .fetch_optional(&mut **tx)
         .await?
         .ok_or_else(|| ApiError::bad("Set up this provider app first"))?;
+    decode_app(state, row)
+}
+pub(super) async fn locked_app_config_tx(
+    state: &AppState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    provider: &str,
+) -> Result<AppConfig> {
+    let row =
+        sqlx::query("SELECT id,encrypted_config FROM provider_apps WHERE provider=$1 FOR SHARE")
+            .bind(provider)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(|| ApiError::bad("Set up this provider app first"))?;
     decode_app(state, row)
 }
 fn decode_app(state: &AppState, row: sqlx::postgres::PgRow) -> Result<AppConfig> {
@@ -56,8 +141,29 @@ fn is_public(ip: std::net::IpAddr) -> bool {
 }
 /// Resolve and pin federated hosts to public IPs for this operation, avoiding DNS rebinding.
 pub async fn adapter_for(app: &AppConfig) -> Result<Adapter> {
+    let deadline = providers::SuspendInstant::now()
+        .and_then(|start| start.deadline(std::time::Duration::from_secs(10)))
+        .ok_or_else(|| {
+            ApiError(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "provider_clock_unavailable",
+                "Provider elapsed-time clock is unavailable.".into(),
+            )
+        })?;
+    deadline.run(adapter_for_inner(app)).await.map_err(|_| {
+        ApiError(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "provider_setup_unavailable",
+            "Provider setup exceeded its time limit; retry after checking the connection.".into(),
+        )
+    })?
+}
+
+async fn adapter_for_inner(app: &AppConfig) -> Result<Adapter> {
     #[cfg(feature = "provider-fixtures")]
-    if let Ok(origin) = std::env::var("BEWEFT_PROVIDER_FIXTURE_ORIGIN") {
+    if std::env::var("BEWEFT_ENABLE_FIXTURES").as_deref() == Ok("true")
+        && let Ok(origin) = std::env::var("BEWEFT_PROVIDER_FIXTURE_ORIGIN")
+    {
         return Adapter::fixture(&origin).map_err(provider_error);
     }
     if matches!(app.provider.as_str(), "mastodon" | "bluesky") {
@@ -91,8 +197,52 @@ pub async fn adapter_for(app: &AppConfig) -> Result<Adapter> {
 }
 pub async fn list_apps(State(state): State<AppState>, auth: Auth) -> Result<Json<Value>> {
     auth.owner_session()?;
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('provider',provider,'client_id',client_id,'instance_url',instance_url,'configured',true,'updated_at',updated_at) FROM provider_apps ORDER BY provider").fetch_all(&state.db).await?;
+    let mut rows:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('provider',a.provider,'client_id',a.client_id,'instance_url',a.instance_url,'configured',true,'updated_at',a.updated_at,'revocation_id',f.revocation_id) FROM provider_apps a LEFT JOIN provider_oauth_fences f ON f.provider=a.provider ORDER BY a.provider").fetch_all(&state.db).await?;
+    for row in &mut rows {
+        let provider = row["provider"].as_str().unwrap_or_default();
+        row["configured"] = json!(app_config(&state, provider).await.is_ok());
+    }
     Ok(data(rows))
+}
+/// Report the current removal boundary even if the saved app is missing.
+/// The shared nonblocking admission avoids treating an in-flight operation's
+/// previously committed marker as its current status, and never creates a row.
+pub async fn removal_status(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(provider): Path<String>,
+) -> Result<Json<Value>> {
+    auth.owner_session()?;
+    if !providers::known(&provider) {
+        return Err(ApiError::bad("Provider is unavailable or manual-only"));
+    }
+    let mut tx = state.db.begin().await?;
+    let admitted: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(provider_operation_key(&provider))
+            .fetch_one(&mut *tx)
+            .await?;
+    if !admitted {
+        return Err(provider_busy_error());
+    }
+    let revocation_id: Option<Uuid> = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT revocation_id FROM provider_oauth_fences WHERE provider=$1 FOR SHARE NOWAIT",
+    )
+    .bind(&provider)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| {
+        if matches!(&error, sqlx::Error::Database(db) if db.code().as_deref() == Some("55P03")) {
+            provider_busy_error()
+        } else {
+            error.into()
+        }
+    })?
+    .flatten();
+    tx.commit().await?;
+    Ok(data(
+        json!({"provider":provider,"revocation_id":revocation_id}),
+    ))
 }
 pub async fn save_app(
     State(state): State<AppState>,
@@ -106,6 +256,10 @@ pub async fn save_app(
         return Err(ApiError::bad("Provider is unavailable or manual-only"));
     }
     let mut tx = state.db.begin().await?;
+    // Do not queue configuration writes behind an exchange holding the app
+    // row; the same gate rejects concurrent edits promptly and preserves the
+    // stored revocation fence even when configuration is changed.
+    oauth_gate(&mut tx, &provider).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
         .bind(format!("provider-app:{provider}"))
         .execute(&mut *tx)
@@ -142,7 +296,9 @@ pub async fn save_app(
         instance_url: instance,
     };
     if matches!(provider.as_str(), "mastodon" | "bluesky") {
-        adapter_for(&app).await?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), adapter_for(&app))
+            .await
+            .map_err(|_| ApiError::bad("Provider instance lookup timed out"))??;
     } else if app.instance_url.is_some() {
         return Err(ApiError::bad(
             "Only Mastodon and Bluesky accept an instance URL",
@@ -170,17 +326,22 @@ pub async fn descriptors(State(state): State<AppState>, _auth: Auth) -> Result<J
         .fetch_all(&state.db)
         .await?;
     let mut rows = vec![
-        json!({"id":"manual","name":"Manual handoff","implementation":"available","configuration":"ready","execution":"manual","verification":"owner_attestation","formats":["text","image","video"],"reason":"Prepare content and confirm publication yourself."}),
+        json!({"id":"manual","name":"Manual handoff","implementation":"available","configuration":"ready","execution":"manual","verification":"owner_attestation","formats":["text","image","video"],"oauth":false,"analytics":false,"inbox":false,"reply":false,"reason":"Prepare content and confirm publication yourself."}),
     ];
     for c in providers::capabilities() {
-        let ready = configured.contains(&c.id.to_owned()) && state.config.encryption_key.is_some();
+        let saved = configured.iter().any(|id| id == c.id);
+        let configuration = if !saved {
+            "not_configured"
+        } else if state.config.encryption_key.is_none() {
+            "encryption_key_required"
+        } else if app_config(&state, c.id).await.is_err() {
+            "invalid"
+        } else {
+            "configured"
+        };
         let mut v = serde_json::to_value(c).map_err(ApiError::internal)?;
         v["implementation"] = json!("available");
-        v["configuration"] = json!(if ready {
-            "configured"
-        } else {
-            "not_configured"
-        });
+        v["configuration"] = json!(configuration);
         v["execution"] = json!("direct");
         v["verification"] = json!("unverified_live");
         rows.push(v);
@@ -199,13 +360,13 @@ pub async fn descriptors(State(state): State<AppState>, _auth: Auth) -> Result<J
         (
             "google_business",
             "Google Business Profile",
-            "Provider app approval required; direct adapter is not implemented. Use manual handoff.",
+            "Direct posting is not implemented yet. Use manual handoff; provider app access is a separate prerequisite.",
         ),
     ] {
-        rows.push(json!({"id":id,"name":name,"implementation":"manual_only","configuration":"unavailable","execution":"manual","verification":"owner_attestation","formats":[],"reason":reason}));
+        rows.push(json!({"id":id,"name":name,"implementation":"manual_only","configuration":"unavailable","execution":"manual","verification":"owner_attestation","formats":[],"oauth":false,"analytics":false,"inbox":false,"reply":false,"reason":reason}));
     }
     if state.config.fixture_enabled {
-        rows.push(json!({"id":"fixture","name":"Isolated fixture","implementation":"available","configuration":"ready","execution":"fixture","verification":"fixture_only","formats":["text","image","video"]}));
+        rows.push(json!({"id":"fixture","name":"Isolated fixture","implementation":"available","configuration":"ready","execution":"fixture","verification":"fixture_only","formats":["text","image","video"],"oauth":false,"analytics":false,"inbox":false,"reply":false,"reason":"Isolated development fixture; no social network request."}));
     }
     Ok(data(rows))
 }

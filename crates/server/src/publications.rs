@@ -1,7 +1,7 @@
 use crate::{
     auth::Auth,
-    catalog::Filter,
     error::{ApiError, Result, data, required, uuid},
+    listing::Page,
     state::AppState,
 };
 use axum::{
@@ -9,20 +9,38 @@ use axum::{
     extract::{Path, Query, State},
 };
 use chrono::Utc;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 const SELECT: &str = "SELECT (to_jsonb(p)-'lease_until')||jsonb_build_object('channel_name',c.name,'provider',c.provider) FROM publications p JOIN channels c ON c.id=p.channel_id";
+const SUMMARY: &str = "jsonb_build_object('id',p.id,'post_id',p.post_id,'brand_id',p.brand_id,'channel_id',p.channel_id,'channel_name',left(c.name,100),'provider',left(c.provider,64),'post_version',p.post_version,'scheduled_at',p.scheduled_at,'scheduling_mode',p.scheduling_mode,'state',p.state,'created_at',p.created_at,'updated_at',p.updated_at)";
+#[derive(Deserialize, Default)]
+pub struct PublicationListFilter {
+    brand_id: Option<Uuid>,
+    channel_id: Option<Uuid>,
+    id: Option<Uuid>,
+    group: Option<String>,
+    view: Option<String>,
+    limit: Option<u32>,
+    cursor: Option<String>,
+}
 pub async fn get_publication(db: &PgPool, id: Uuid) -> Result<Value> {
     Ok(sqlx::query_scalar(&format!("{SELECT} WHERE p.id=$1"))
         .bind(id)
         .fetch_one(db)
         .await?)
 }
+pub(crate) async fn get_publication_summaries(db: &PgPool, ids: &[Uuid]) -> Result<Vec<Value>> {
+    let query = format!(
+        "SELECT {SUMMARY} FROM unnest($1::uuid[]) WITH ORDINALITY AS wanted(id,position) JOIN publications p ON p.id=wanted.id JOIN channels c ON c.id=p.channel_id ORDER BY wanted.position"
+    );
+    Ok(sqlx::query_scalar(&query).bind(ids).fetch_all(db).await?)
+}
 pub async fn list(
     State(state): State<AppState>,
     auth: Auth,
-    Query(filter): Query<Filter>,
+    Query(filter): Query<PublicationListFilter>,
 ) -> Result<Json<Value>> {
     if let Some(id) = filter.brand_id {
         auth.brand(id)?;
@@ -30,8 +48,58 @@ pub async fn list(
     if let Some(id) = filter.channel_id {
         auth.brand(crate::catalog::channel_brand(&state, id).await?)?;
     }
-    let rows:Vec<Value>=sqlx::query_scalar(&format!("{SELECT} WHERE ($1::uuid IS NULL OR p.brand_id=$1) AND ($2::uuid IS NULL OR p.channel_id=$2) AND (cardinality($3::uuid[])=0 OR p.brand_id=ANY($3)) ORDER BY p.scheduled_at,p.created_at")).bind(filter.brand_id).bind(filter.channel_id).bind(&auth.brand_ids).fetch_all(&state.db).await?;
-    Ok(data(rows))
+    if filter
+        .group
+        .as_deref()
+        .is_some_and(|g| !matches!(g, "queue" | "history"))
+        || filter.view.as_deref().is_some_and(|v| v != "summary")
+    {
+        return Err(ApiError::bad("Unsupported publication group or view"));
+    }
+    let value = if filter.view.as_deref() == Some("summary") {
+        SUMMARY
+    } else {
+        "(to_jsonb(p)-'lease_until')||jsonb_build_object('channel_name',c.name,'provider',c.provider)"
+    };
+    let filters = json!({"brand_id":filter.brand_id,"channel_id":filter.channel_id,"id":filter.id,"group":filter.group,"view":filter.view});
+    let page = Page::new(
+        "publications",
+        filter.limit,
+        filter.cursor.as_deref(),
+        filters,
+        &auth,
+    )?;
+    let condition = "($1::uuid IS NULL OR p.brand_id=$1) AND ($2::uuid IS NULL OR p.channel_id=$2) AND (cardinality($3::uuid[])=0 OR p.brand_id=ANY($3)) AND ($4::uuid IS NULL OR p.id=$4) AND ($5::text IS NULL OR ($5='queue' AND p.state IN ('queued','sending')) OR ($5='history' AND p.state NOT IN ('queued','sending')))";
+    if let Some(page) = page {
+        let query = format!(
+            "SELECT {value},p.created_at,p.id FROM publications p JOIN channels c ON c.id=p.channel_id WHERE {condition} AND ($6::timestamptz IS NULL OR (p.created_at,p.id)<($6,$7)) ORDER BY p.created_at DESC,p.id DESC LIMIT $8"
+        );
+        let rows = sqlx::query_as(&query)
+            .bind(filter.brand_id)
+            .bind(filter.channel_id)
+            .bind(&auth.brand_ids)
+            .bind(filter.id)
+            .bind(filter.group.as_deref())
+            .bind(page.created_at)
+            .bind(page.id)
+            .bind(page.limit + 1)
+            .fetch_all(&state.db)
+            .await?;
+        page.finish(rows)
+    } else {
+        let query = format!(
+            "SELECT {value} FROM publications p JOIN channels c ON c.id=p.channel_id WHERE {condition} ORDER BY p.scheduled_at,p.created_at"
+        );
+        let rows: Vec<Value> = sqlx::query_scalar(&query)
+            .bind(filter.brand_id)
+            .bind(filter.channel_id)
+            .bind(&auth.brand_ids)
+            .bind(filter.id)
+            .bind(filter.group.as_deref())
+            .fetch_all(&state.db)
+            .await?;
+        Ok(data(rows))
+    }
 }
 pub async fn attempts(
     State(state): State<AppState>,
@@ -105,6 +173,22 @@ async fn change(
     }
     let current: String = row.get("state");
     let provider: String = row.get("provider");
+    let mut x_checkpoint = if provider == "x" && ["retry", "reconcile"].contains(&action) {
+        crate::provider_bridge::x_checkpoint_on(state, &mut tx, id).await?
+    } else {
+        None
+    };
+    if action == "retry"
+        && x_checkpoint.as_ref().is_some_and(|cp| {
+            cp["stage"]
+                .as_str()
+                .is_some_and(|stage| stage.starts_with("x_"))
+        })
+    {
+        return Err(ApiError::conflict(
+            "Inspect provider status and reset the X checkpoint before retrying",
+        ));
+    }
     let mut scheduled_at = row.get::<chrono::DateTime<Utc>, _>("scheduled_at");
     let target = match action {
         "cancel" if ["queued", "manual_required", "failed"].contains(&current.as_str()) => {
@@ -115,11 +199,40 @@ async fn change(
             "queued"
         }
         "manual_complete" if current == "manual_required" && provider == "manual" => "published",
-        "reconcile" if current == "uncertain" => {
+        "reconcile"
+            if current == "uncertain"
+                || (current == "failed"
+                    && body["resolution"] == "not_published"
+                    && x_checkpoint
+                        .as_ref()
+                        .is_some_and(crate::provider_bridge::x_public_boundary)) =>
+        {
             required(&body, "note")?;
             match body["resolution"].as_str() {
                 Some("published") => "published",
-                Some("not_published") => "failed",
+                Some("not_published") => {
+                    if let Some(cp) = x_checkpoint
+                        .as_mut()
+                        .filter(|cp| crate::provider_bridge::x_public_boundary(cp))
+                    {
+                        auth.owner_session()?;
+                        let (attempt, checkpoint) = crate::provider_bridge::x_identity(cp)?;
+                        if body["observed_attempt_id"] != json!(attempt)
+                            || body["observed_checkpoint_id"] != json!(checkpoint)
+                            || body["sender_stopped"] != true
+                            || body["provider_inspected"] != true
+                        {
+                            return Err(ApiError::conflict(
+                                "Stop the original sender, inspect X, and attest not-published using the current attempt and checkpoint IDs",
+                            ));
+                        }
+                        cp["not_published_attestation"] =
+                            json!({"attempt_id":attempt,"checkpoint_id":checkpoint});
+                        crate::provider_bridge::save_recovery_checkpoint_tx(&mut tx, state, id, cp)
+                            .await?;
+                    }
+                    "failed"
+                }
                 _ => {
                     return Err(ApiError::bad(
                         "resolution must be published or not_published",

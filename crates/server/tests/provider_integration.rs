@@ -30,17 +30,37 @@ include!("provider_db/replies.rs");
 include!("provider_db/reply_watermark.rs");
 include!("provider_db/durable_preparation.rs");
 include!("provider_db/reply_deadline.rs");
+include!("provider_db/revocation.rs");
+include!("provider_db/sync_pool.rs");
+include!("provider_db/callback_fence.rs");
+include!("provider_db/bluesky_fence.rs");
+include!("provider_db/provider_gate.rs");
+include!("provider_db/shared_provider.rs");
+include!("provider_db/post_grant_recovery.rs");
+include!("provider_db/revocation_latch.rs");
+include!("provider_db/x_legacy.rs");
 #[path = "../../providers/tests/support/mod.rs"]
 mod media_fixture;
 #[tokio::test]
 #[ignore = "requires isolated BEWEFT_TEST_DATABASE_URL; run provider_integration.py"]
 async fn provider_database_security_and_recovery() {
     let h = Harness::new().await;
+    overlapping_syncs_preserve_pool_and_rotated_tokens(&h).await;
+    callback_exchange_respects_removal_boundary(&h).await;
+    bluesky_connection_obeys_provider_and_brand_fences(&h).await;
+    first_provider_save_rejects_concurrent_creators(&h).await;
+    disconnect_fences_shared_provider_channels(&h).await;
+    provider_gate_orders_manual_removal_and_recovery(&h).await;
+    every_direct_provider_uses_owner_managed_removal(&h).await;
+    post_grant_failures_preserve_status_and_recovery(&h).await;
+    oauth_revocation_fences_reconnects(&h).await;
+    populated_oauth_fence_upgrade(&h).await;
     oauth_replay_session_binding_and_config_change(&h).await;
     refresh_serialization_and_grant_binding(&h).await;
     replies_and_disconnect_share_claim_lock(&h).await;
     reconciliation_serialization_and_expired_reset(&h).await;
     fenced_writes_and_small_pool(&h).await;
+    legacy_x_recovery_uses_observed_identity_without_provider_writes(&h).await;
     reply_recovery_and_unresolved_guard(&h).await;
     concurrent_reply_claims_with_small_pool(&h).await;
     delayed_reply_cannot_bypass_terminal_history(&h).await;

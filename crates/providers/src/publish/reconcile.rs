@@ -40,10 +40,7 @@ impl Adapter {
                 if !r.status().is_success() {
                     return Ok(None);
                 }
-                let v: Value = r
-                    .json()
-                    .await
-                    .map_err(|_| invalid("Invalid upload status response"))?;
+                let v = self.response_json(r, false).await?;
                 let id = field(&v, "id")?;
                 Ok(Some(published(
                     id.clone(),

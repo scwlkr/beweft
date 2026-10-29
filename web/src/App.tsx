@@ -8,7 +8,7 @@ import {
   Search,
   X,
 } from "lucide-react";
-import { api, BrandSchema, type Brand } from "./api";
+import { useEffect, useState } from "react";
 import { Auth } from "./Auth";
 import { BrandDialog } from "./BrandDialog";
 import { Unicorn } from "./components/brand";
@@ -18,13 +18,15 @@ import { Button } from "./components/ui/button";
 import { Composer } from "./Composer";
 import { titles, zone } from "./navigation";
 import { useWorkspace } from "./useWorkspace";
+import { usePendingSchedule } from "./usePendingSchedule";
+import { usePendingMedia } from "./usePendingMedia";
 import { Calendar } from "./views/Calendar";
 import { ConnectionFlow } from "./views/ConnectionFlow";
 import { Connections } from "./views/Connections";
 import { Drafts } from "./views/Drafts";
 import { Ideas } from "./views/Ideas";
 import { Insights } from "./views/Insights";
-import { MediaLibrary } from "./views/MediaLibrary";
+import { MediaDetails, MediaLibrary } from "./views/MediaLibrary";
 import { Queue } from "./views/Queue";
 import { Settings } from "./views/Settings";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
@@ -32,7 +34,11 @@ export default function App() {
   const workspace = useWorkspace();
   const {
     ready,
-    setReady,
+    acceptSession,
+    signingOut,
+    signOutError,
+    sessionCheckFailed,
+    retrySession,
     route,
     brands,
     brandId,
@@ -60,11 +66,26 @@ export default function App() {
     brand,
     load,
     action,
+    reconcileMedia,
     go,
-    chooseBrand,
+    createBrand,
   } = workspace;
+  const pendingSchedule = usePendingSchedule(brandId, ready === true);
+  const pendingMedia = usePendingMedia(ready ? brandId : "", reconcileMedia);
+  const [reviewMediaId, setReviewMediaId] = useState<string | null>(null);
+  useEffect(() => setReviewMediaId(null), [brandId]);
+  const reviewMedia = media.find((item) => item.id === reviewMediaId);
   if (ready === null) return <Busy />;
-  if (!ready) return <Auth onReady={() => setReady(true)} />;
+  if (!ready)
+    return (
+      <Auth
+        signingOut={signingOut}
+        signOutError={signOutError}
+        sessionCheckFailed={sessionCheckFailed}
+        onRetrySession={retrySession}
+        onReady={acceptSession}
+      />
+    );
   const flowId = new URLSearchParams(location.search).get("connection_flow");
   const connectionError = new URLSearchParams(location.search).get(
     "connection_error",
@@ -143,6 +164,61 @@ export default function App() {
               )}
             </header>
             {error && <ErrorNotice message={error} />}
+            {pendingSchedule.intent && (
+              <div className="notice" role="status">
+                <span>
+                  A schedule needs review before another post can be saved for
+                  this brand.
+                </span>
+                <Button
+                  variant="secondary"
+                  onClick={() => setComposer(pendingSchedule.intent!.post)}
+                >
+                  Review pending schedule
+                </Button>
+              </div>
+            )}
+            {brand &&
+              pendingMedia.brand === brand.id &&
+              Object.keys(pendingMedia.intents).length > 0 && (
+                <div className="quiet-note" role="status">
+                  <p>
+                    Some media descriptions are unconfirmed. Review them before
+                    scheduling posts that use them.
+                  </p>
+                  {Object.keys(pendingMedia.intents).map((id) => {
+                    const item = media.find((row) => row.id === id);
+                    return item ? (
+                      <Button
+                        key={id}
+                        variant="secondary"
+                        onClick={() => setReviewMediaId(id)}
+                      >
+                        Review {item.name}
+                      </Button>
+                    ) : null;
+                  })}
+                </div>
+              )}
+            {brand && pendingMedia.error && (
+              <div className="quiet-note" role="status">
+                <p>{pendingMedia.error}</p>
+                <Button variant="secondary" onClick={pendingMedia.retry}>
+                  Check media again
+                </Button>
+              </div>
+            )}
+            {brand && Object.keys(pendingMedia.assetErrors).length > 0 && (
+              <div className="quiet-note" role="status">
+                <p>
+                  Some media descriptions could not be checked. Posts using
+                  those assets remain blocked.
+                </p>
+                <Button variant="secondary" onClick={pendingMedia.retry}>
+                  Check media again
+                </Button>
+              </div>
+            )}
             <div className="content-body" key={brandId}>
               {loading && !brand ? (
                 <Busy />
@@ -205,7 +281,9 @@ export default function App() {
                     <Ideas
                       brand={brand}
                       ideas={ideas.filter((i) =>
-                        matching(i.title + " " + i.text),
+                        matching(
+                          i.title + " " + i.text + " " + i.tags.join(" "),
+                        ),
                       )}
                       action={action}
                       pending={pending}
@@ -221,6 +299,8 @@ export default function App() {
                       )}
                       action={action}
                       pending={pending}
+                      protectedPostId={pendingSchedule.intent?.post.id}
+                      pendingSchedule={pendingSchedule}
                       onEdit={setComposer}
                       onDuplicate={(post) =>
                         setComposer({
@@ -239,6 +319,7 @@ export default function App() {
                       media={media.filter((m) => matching(m.name))}
                       action={action}
                       pending={pending}
+                      reconcileMedia={reconcileMedia}
                     />
                   )}
                   {route === "connections" && (
@@ -282,6 +363,7 @@ export default function App() {
         {flowId && (
           <ConnectionFlow
             flowId={flowId}
+            brandId={brandId}
             onDone={async () => {
               go("connections");
               await load();
@@ -320,16 +402,7 @@ export default function App() {
           <BrandDialog
             busy={pending}
             onClose={() => setBrandOpen(false)}
-            onSave={async (name) => {
-              let created: Brand | undefined;
-              const success = await action(async () => {
-                created = await api("/brands", BrandSchema, "POST", { name });
-              }, "Brand created");
-              if (success && created) {
-                chooseBrand(created.id);
-                setBrandOpen(false);
-              }
-            }}
+            onSave={createBrand}
           />
         )}{" "}
         {composer !== undefined && brand && (
@@ -342,6 +415,21 @@ export default function App() {
             initialDate={composer?.composeDate}
             onClose={() => setComposer(undefined)}
             onSaved={load}
+            pendingSchedule={pendingSchedule}
+            pendingMedia={pendingMedia}
+            reconcileMedia={reconcileMedia}
+            onReviewMedia={setReviewMediaId}
+          />
+        )}
+        {reviewMedia && brand && (
+          <MediaDetails
+            key={reviewMedia.id}
+            selected={reviewMedia}
+            action={action}
+            pending={pending}
+            limit={null}
+            reconcileMedia={reconcileMedia}
+            onClose={() => setReviewMediaId(null)}
           />
         )}
       </div>

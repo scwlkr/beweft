@@ -4,6 +4,7 @@ import {
   type Page,
   type BrowserContext,
 } from "@playwright/test";
+import { execFileSync } from "node:child_process";
 let sessionCookies: Awaited<ReturnType<BrowserContext["cookies"]>> | null =
   null;
 
@@ -24,6 +25,28 @@ export async function withWorkspace(
   const origin = process.env.BEWEFT_TEST_URL;
   if (process.env.BEWEFT_TEST_ISOLATED !== "1" || !origin)
     throw new Error("Requires disposable harness");
+  // Login tests share an owner but not a rate-limit budget. Reset only this
+  // harness-created disposable database between tests, never a real server.
+  const database = process.env.BEWEFT_TEST_DB_NAME ?? "";
+  if (!/^beweft_e2e_[a-f0-9]{12}$/.test(database))
+    throw new Error("Requires disposable harness database");
+  execFileSync(
+    "docker",
+    [
+      "exec",
+      process.env.BEWEFT_TEST_POSTGRES_CONTAINER ?? "beweft-dev-postgres",
+      "psql",
+      "-U",
+      process.env.BEWEFT_TEST_DB_USER ?? "beweft",
+      "-d",
+      database,
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "DELETE FROM auth_limits WHERE key = 'login_global' OR key LIKE 'login:%'",
+    ],
+    { stdio: "ignore" },
+  );
   const browser = await chromium.launch({ headless: true });
   try {
     const context = await browser.newContext({
@@ -40,8 +63,15 @@ export async function withWorkspace(
     };
     // Reuse this isolated owner's session across regression contexts. The main
     // workspace scenario still exercises sign-in through the UI independently.
-    if (sessionCookies) await context.addCookies(sessionCookies);
-    else {
+    if (sessionCookies) {
+      await context.addCookies(sessionCookies);
+      const session = await context.request.get(`${origin}/api/v1/auth/me`);
+      if (!session.ok()) {
+        sessionCookies = null;
+        await context.clearCookies();
+      }
+    }
+    if (!sessionCookies) {
       await write("/auth/login", {
         email: process.env.BEWEFT_TEST_EMAIL,
         password: process.env.BEWEFT_TEST_PASSWORD,
@@ -50,7 +80,11 @@ export async function withWorkspace(
     }
     const page = await context.newPage();
     page.setDefaultTimeout(10000);
-    await run(page, context, write);
+    try {
+      await run(page, context, write);
+    } finally {
+      sessionCookies = await context.cookies();
+    }
   } finally {
     await browser.close();
   }

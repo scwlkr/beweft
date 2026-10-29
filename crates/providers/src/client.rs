@@ -3,9 +3,19 @@ use crate::*;
 pub struct Adapter {
     pub(crate) http: Client,
     pub(crate) fixture_origin: Option<String>,
-    pub(crate) deadline: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) deadline: Option<Deadline>,
 }
 impl Adapter {
+    fn default_deadline() -> Result<Deadline> {
+        SuspendInstant::now()
+            .and_then(|started| started.deadline(Duration::from_secs(60)))
+            .ok_or_else(|| {
+                error(
+                    FailureKind::Unavailable,
+                    "Provider elapsed-time clock is unavailable",
+                )
+            })
+    }
     pub fn new() -> Result<Self> {
         Self::build(None)
     }
@@ -39,7 +49,7 @@ impl Adapter {
                 .build()
                 .map_err(|_| invalid("HTTP client initialization failed"))?,
             fixture_origin: None,
-            deadline: None,
+            deadline: Some(Self::default_deadline()?),
         })
     }
     fn build(fixture_origin: Option<String>) -> Result<Self> {
@@ -52,7 +62,7 @@ impl Adapter {
                 .build()
                 .map_err(|_| invalid("HTTP client initialization failed"))?,
             fixture_origin,
-            deadline: None,
+            deadline: Some(Self::default_deadline()?),
         })
     }
     pub(crate) fn endpoint(&self, url: &str) -> Result<String> {
@@ -90,7 +100,21 @@ impl Adapter {
     }
     pub(crate) async fn send(&self, b: RequestBuilder, write: bool) -> Result<Value> {
         let response = self.response(b, write).await?;
-        response.json().await.map_err(|_| {
+        self.response_json(response, write).await
+    }
+    pub(crate) async fn response_json(
+        &self,
+        response: reqwest::Response,
+        write: bool,
+    ) -> Result<Value> {
+        let body = response.json();
+        let value = if let Some(deadline) = self.deadline {
+            deadline.run(body).await.map_err(|_| error(FailureKind::Uncertain,
+                "Provider response exceeded its time limit; inspect the outcome before retrying"))?
+        } else {
+            body.await
+        };
+        value.map_err(|_| {
             error(
                 if write {
                     FailureKind::Uncertain
@@ -139,8 +163,9 @@ impl Adapter {
             status: Some(s.as_u16()),
         })
     }
-    /// Absolute wall-clock deadline follows the durable worker lease, including suspended processes.
-    pub fn with_deadline(mut self, deadline: chrono::DateTime<chrono::Utc>) -> Self {
+    /// Provider deadlines are derived from the database's remaining time,
+    /// never by comparing its timestamp with the application host's clock.
+    pub fn with_deadline(mut self, deadline: Deadline) -> Self {
         self.deadline = Some(deadline);
         self
     }
@@ -150,10 +175,17 @@ impl Adapter {
         write: bool,
     ) -> Result<reqwest::Response> {
         if let Some(deadline) = self.deadline {
-            let remaining = (deadline - chrono::Utc::now()).to_std().ok().filter(|d| !d.is_zero()).ok_or_else(|| error(FailureKind::Uncertain,"Delivery lease expired before the provider request; reconcile before retrying"))?;
+            let remaining = deadline.remaining().ok_or_else(|| error(FailureKind::Uncertain,"The provider operation reached its time limit before the next request; inspect the outcome before retrying"))?;
             b = b.timeout(remaining.min(Duration::from_secs(60)));
         }
-        b.send().await.map_err(|_| {
+        let pending = b.send();
+        let response = if let Some(deadline) = self.deadline {
+            deadline.run(pending).await.map_err(|_| error(FailureKind::Uncertain,
+                "Provider request exceeded its time limit; its outcome may require reconciliation"))?
+        } else {
+            pending.await
+        };
+        response.map_err(|_| {
             error(
                 if write {
                     FailureKind::Uncertain

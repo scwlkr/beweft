@@ -18,6 +18,8 @@ use serde_json::{Value, json};
 use sqlx::Row;
 use uuid::Uuid;
 pub enum BridgeOutcome {
+    /// A completed, non-public checkpoint is ready for a later bounded claim.
+    Continue,
     Published {
         external_id: String,
         external_url: Option<String>,
@@ -41,7 +43,10 @@ fn encryption_key(state: &AppState) -> Result<&[u8; 32]> {
 mod delivery;
 mod execution;
 mod preparation;
+pub(crate) use delivery::save_checkpoint_tx as save_recovery_checkpoint_tx;
 pub use execution::publish;
+mod validation;
+pub use validation::ScheduleFormatValidator;
 mod inbox;
 mod media;
 mod observations;
@@ -56,3 +61,27 @@ mod reply_recovery;
 pub use reply_recovery::*;
 
 mod reply_claim;
+
+// Session and transaction advisory locks use the same namespaced key. The
+// session owner keeps it across the provider call; recovery must never queue.
+pub(crate) fn reply_execution_key(inbox: Uuid) -> String {
+    format!("reply-execution:{inbox}")
+}
+
+pub(crate) async fn try_reply_execution_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    inbox: Uuid,
+) -> Result<()> {
+    let acquired: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(reply_execution_key(inbox))
+            .fetch_one(&mut **tx)
+            .await?;
+    if !acquired {
+        return Err(ApiError::conflict_code(
+            "reply_execution_active",
+            "The original reply sender is still active. Wait for it to stop, then reload reply history and inspect the provider before resolving the outcome.",
+        ));
+    }
+    Ok(())
+}

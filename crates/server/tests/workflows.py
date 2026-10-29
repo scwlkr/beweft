@@ -55,7 +55,16 @@ def exercise(call, client, origin, sql):
     request = urllib.request.Request(origin + '/api/v1/media?brand_id=' + brand['id'], data=multipart, headers={'Content-Type': 'multipart/form-data; boundary=' + boundary, 'X-Beweft-Request': '1', 'Origin': origin})
     with client.open(request) as response:
         media = json.load(response)['data']
-    media = call(f"/media/{media['id']}", {'alt_text': 'A small white test pixel'}, 'PATCH')
+    assert media['metadata_version'] == 1
+    assert call(f"/media/{media['id']}")['metadata_version'] == 1
+    call(f"/media/{media['id']}", {'alt_text': 'No version'}, 'PATCH', expected=422)
+    call(f"/media/{media['id']}", {'alt_text': 'Before\x00After', 'metadata_version': 1}, 'PATCH', expected=400)
+    assert call(f"/media/{media['id']}")['metadata_version'] == 1
+    media = call(f"/media/{media['id']}", {'alt_text': 'A small white test pixel', 'metadata_version': 1}, 'PATCH')
+    assert media['metadata_version'] == 2
+    call(f"/media/{media['id']}", {'alt_text': 'Stale overwrite', 'metadata_version': 1}, 'PATCH', expected=409)
+    assert call(f"/media/{media['id']}")['alt_text'] == 'A small white test pixel'
+    call(f"/media/{media['id']}", token=restricted['token'], expected=403)
     media_template = call('/templates', {'brand_id': brand['id'], 'name': 'Saved media', 'text': '', 'media_ids': [media['id']]})
     call(f"/media/{media['id']}", method='DELETE', expected=409)
     call(f"/templates/{media_template['id']}", method='DELETE')
@@ -63,7 +72,7 @@ def exercise(call, client, origin, sql):
     when = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=3)).isoformat()
     publication = call(f"/posts/{post['id']}/schedule", {'version': post['version'], 'channel_ids': [channel['id']], 'scheduled_at': when})[0]
     assert publication['payload']['media_metadata'] == [{'id': media['id'], 'alt_text': 'A small white test pixel'}]
-    call(f"/media/{media['id']}", {'alt_text': 'Updated description'}, 'PATCH')
+    call(f"/media/{media['id']}", {'alt_text': 'Updated description', 'metadata_version': media['metadata_version']}, 'PATCH')
     post = call(f"/posts/{post['id']}", {'version': post['version'], 'text': 'Revised content'}, 'PATCH')
     replacement_body = {'post_version': post['version'], 'publication_post_version': publication['post_version'], 'scheduled_at': publication['scheduled_at']}
     call(f"/publications/{publication['id']}/replace", dict(replacement_body, post_version=1), expected=409)

@@ -42,9 +42,27 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
     match provider {
         "x" => {
             post_limit(p, 280)?;
-            if p.media.len() > 4 || p.media.iter().any(|m| !image(m)) {
+            if p.media.len() > 4
+                || p.media.iter().any(|m| !image(m) && m.mime != "video/mp4")
+                || p.options
+                    .get("alt_text")
+                    .is_some_and(|value| !value.is_string())
+                || p.media
+                    .iter()
+                    .any(|m| x_alt_text(p, m).chars().count() > 1000)
+            {
                 return Err(invalid(
-                    "X adapter supports up to four images. Use manual handoff for video.",
+                    "X supports up to four images or one MP4 video; image descriptions must be at most 1,000 characters",
+                ));
+            }
+            // X's documented alt-text support is for image media; do not
+            // silently drop a video description where support is unverified.
+            if p.media
+                .iter()
+                .any(|m| video(m) && !x_alt_text(p, m).trim().is_empty())
+            {
+                return Err(invalid(
+                    "X video descriptions are not supported by this adapter",
                 ));
             }
         }
@@ -71,6 +89,13 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
                     "Choose the YouTube made-for-kids audience setting explicitly",
                 ));
             }
+            if p.options
+                .get("contains_synthetic_media")
+                .is_some_and(|v| !v.is_boolean())
+                || p.options.get("category_id").is_some_and(|v| !v.is_string())
+            {
+                return Err(invalid("Invalid YouTube publishing options"));
+            }
             post_limit(p, 5000)?;
         }
         "facebook" => {
@@ -93,6 +118,14 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
         }
         "threads" => {
             post_limit(p, 500)?;
+            if p.options.get("reply_control").is_some_and(|v| {
+                !matches!(
+                    v.as_str(),
+                    Some("everyone" | "accounts_you_follow" | "mentioned_only")
+                )
+            }) {
+                return Err(invalid("Unsupported Threads reply control"));
+            }
             if p.media.len() > 1 {
                 return Err(invalid(
                     "Threads adapter supports one media attachment; carousel uses manual handoff",
@@ -100,6 +133,21 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
             }
         }
         "mastodon" => {
+            if p.options.get("visibility").is_some_and(|v| {
+                !matches!(
+                    v.as_str(),
+                    Some("public" | "unlisted" | "private" | "direct")
+                )
+            }) {
+                return Err(invalid("Invalid Mastodon visibility"));
+            }
+            if p.options
+                .get("content_warning")
+                .is_some_and(|v| !v.is_string())
+                || p.options.get("sensitive").is_some_and(|v| !v.is_boolean())
+            {
+                return Err(invalid("Invalid Mastodon publishing options"));
+            }
             if p.media.len() > 4 {
                 return Err(invalid("Mastodon adapter supports up to four attachments"));
             }
@@ -126,6 +174,12 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
                 || p.options["board_id"].as_str().unwrap_or("").is_empty()
             {
                 return Err(invalid("Pinterest needs one image and a board ID"));
+            }
+            if p.options
+                .get("link")
+                .is_some_and(|v| !v.is_string() && !v.is_null())
+            {
+                return Err(invalid("Invalid Pinterest link"));
             }
         }
         _ => return Err(invalid("No direct publishing adapter for this provider")),

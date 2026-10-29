@@ -26,6 +26,7 @@ import uuid
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[3]
+TARGET = Path(os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target"))).resolve()
 CONTAINER = os.environ.get("BEWEFT_TEST_POSTGRES_CONTAINER", "beweft-dev-postgres")
 DB = "beweft_test_" + uuid.uuid4().hex[:12]
 DB_PORT = os.environ.get("BEWEFT_TEST_DB_PORT", "55439")
@@ -46,7 +47,7 @@ def run():
     with tempfile.TemporaryDirectory(prefix="beweft-integration-") as temporary:
         env = dict(os.environ, DATABASE_URL=f"postgres://{DB_USER}:{DB_PASSWORD}@localhost:{DB_PORT}/{DB}", BEWEFT_PUBLIC_URL=origin, BEWEFT_BIND=f"127.0.0.1:{port}", BEWEFT_MEDIA_DIR=temporary, BEWEFT_SETUP_SECRET="isolated-integration-setup-secret", BEWEFT_ENABLE_FIXTURES="true", BEWEFT_MAX_UPLOAD_BYTES=str(32*1024*1024), BEWEFT_MEDIA_QUOTA_BYTES=str(33*1024*1024), BEWEFT_FIXTURE_DELAY_MS="15000" if "--workflows-only" in sys.argv else "0")
         for name in ["beweft-server", "beweft-worker"]:
-            processes.append(subprocess.Popen([str(ROOT / "target/debug" / name)], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            processes.append(subprocess.Popen([str(TARGET / "debug" / name)], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
         schema_document = None
@@ -217,7 +218,7 @@ def run():
         crash_job = call(f"/posts/{crash_post['id']}/schedule", {"version": crash_post["version"], "channel_ids": [fixture["id"]], "scheduled_at": dt.datetime.now(dt.timezone.utc).isoformat()})[0]
         time.sleep(0.5)
         assert next(p for p in call("/publications") if p["id"] == crash_job["id"])["state"] == "queued"
-        slow_worker = subprocess.Popen([str(ROOT / "target/debug/beweft-worker")], cwd=ROOT, env=dict(env, BEWEFT_FIXTURE_DELAY_MS="60000"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        slow_worker = subprocess.Popen([str(TARGET / "debug/beweft-worker")], cwd=ROOT, env=dict(env, BEWEFT_FIXTURE_DELAY_MS="60000"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         processes.append(slow_worker)
         wait_state(crash_job, "sending")
         heartbeat_before = call("/jobs/health")["worker_last_seen"]
@@ -230,7 +231,7 @@ def run():
         # Accelerate only the lease clock rather than waiting five minutes after the actual crash.
         sql(f"UPDATE publications SET lease_until=now()-interval '1 second' WHERE id='{crash_job['id']}';")
         for _ in range(2):
-            processes.append(subprocess.Popen([str(ROOT / "target/debug/beweft-worker")], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            processes.append(subprocess.Popen([str(TARGET / "debug/beweft-worker")], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         wait_state(crash_job, "uncertain")
         assert len(call(f"/publications/{crash_job['id']}/attempts")) == 1, "Restart must not create a second ambiguous attempt"
         batch = []
@@ -281,12 +282,12 @@ def run():
         aba_channel = call("/channels", {"brand_id": brand["id"], "name": "Attempt identity race", "provider": "fixture"})
         aba_post = call("/posts", {"brand_id": brand["id"], "text": "Old attempt must never complete a new retry"})
         aba_job = call(f"/posts/{aba_post['id']}/schedule", {"version": aba_post["version"], "channel_ids": [aba_channel["id"]], "scheduled_at": dt.datetime.now(dt.timezone.utc).isoformat()})[0]
-        worker_a = subprocess.Popen([str(ROOT / "target/debug/beweft-worker")], cwd=ROOT, env=dict(env, BEWEFT_FIXTURE_DELAY_MS="6000"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        worker_a = subprocess.Popen([str(TARGET / "debug/beweft-worker")], cwd=ROOT, env=dict(env, BEWEFT_FIXTURE_DELAY_MS="6000"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         processes.append(worker_a)
         wait_state(aba_job, "sending")
         attempt_a = next(a for a in call(f"/publications/{aba_job['id']}/attempts") if a["state"] == "sending")
         sql(f"UPDATE publications SET lease_until=now()-interval '1 second' WHERE id='{aba_job['id']}';")
-        worker_b = subprocess.Popen([str(ROOT / "target/debug/beweft-worker")], cwd=ROOT, env=dict(env, BEWEFT_FIXTURE_DELAY_MS="15000"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        worker_b = subprocess.Popen([str(TARGET / "debug/beweft-worker")], cwd=ROOT, env=dict(env, BEWEFT_FIXTURE_DELAY_MS="15000"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         processes.append(worker_b)
         wait_state(aba_job, "uncertain")
         call(f"/publications/{aba_job['id']}/reconcile", {"resolution": "not_published", "note": "Fixture A has no external publication; deliberate attempt fencing reproduction"})
@@ -393,11 +394,14 @@ def run():
         exercise(call, client, origin, sql)
         # Apply the additive migration to the previous schema and populated records, then roll back the isolated schema.
         upgrade_schema = "upgrade_" + uuid.uuid4().hex[:12]
-        old_brand, old_channel, old_post, old_publication = [str(uuid.uuid4()) for _ in range(4)]
+        old_brand, old_channel, old_post, old_publication, old_media = [str(uuid.uuid4()) for _ in range(5)]
         upgrade_sql = f"BEGIN; CREATE SCHEMA {upgrade_schema}; SET LOCAL search_path TO {upgrade_schema};\n" + (ROOT / "migrations/0001_foundation.sql").read_text()
         upgrade_sql += f"\nINSERT INTO brands(id,name) VALUES('{old_brand}','Upgrade fixture'); INSERT INTO channels(id,brand_id,name,provider) VALUES('{old_channel}','{old_brand}','Old channel','manual'); INSERT INTO posts(id,brand_id,text) VALUES('{old_post}','{old_brand}','Existing draft'); INSERT INTO publications(id,post_id,brand_id,channel_id,post_version,scheduled_at,state,payload) VALUES('{old_publication}','{old_post}','{old_brand}','{old_channel}',1,'2030-01-02T12:34:00Z','queued','{{\"text\":\"Existing snapshot\",\"media_ids\":[]}}');\n"
+        upgrade_sql += f"\nINSERT INTO media(id,brand_id,name,mime,size,storage_key) VALUES('{old_media}','{old_brand}','Existing file','image/png',1,'existing.bin');\n"
         upgrade_sql += (ROOT / "migrations/0003_scheduling_mode.sql").read_text()
         upgrade_sql += (ROOT / "migrations/0005_workflows.sql").read_text()
+        upgrade_sql += (ROOT / "migrations/0010_media_metadata_version.sql").read_text()
+        upgrade_sql += f"\nDO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM media WHERE id='{old_media}' AND name='Existing file' AND storage_key='existing.bin' AND alt_text='' AND metadata_version=1) THEN RAISE EXCEPTION 'Media upgrade changed existing file'; END IF; END $$;"
         upgrade_sql += f"\nDO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM channels WHERE id='{old_channel}' AND target_platform='generic') OR NOT EXISTS(SELECT 1 FROM brands WHERE id='{old_brand}' AND archived_at IS NULL) THEN RAISE EXCEPTION 'Workflow migration changed old brand/channel semantics'; END IF; END $$;"
         upgrade_sql += f"\nDO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM publications WHERE id='{old_publication}' AND scheduling_mode='exact' AND scheduled_at='2030-01-02T12:34:00Z' AND payload->>'text'='Existing snapshot') THEN RAISE EXCEPTION 'Upgrade changed existing publication'; END IF; END $$; ROLLBACK;"
         subprocess.run(["docker", "exec", "-i", CONTAINER, "psql", "-U", DB_USER, "-d", DB, "-v", "ON_ERROR_STOP=1"], input=upgrade_sql, text=True, capture_output=True, check=True)

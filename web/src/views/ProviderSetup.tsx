@@ -1,10 +1,23 @@
 import { ArrowUpRight, ShieldCheck } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
-import { api, ChannelSchema, type Brand, type Provider } from "../api";
-import { ErrorNotice, Field, Submit } from "../components/shared";
+import {
+  api,
+  captureWorkspaceSession,
+  ChannelSchema,
+  isCurrentWorkspaceSession,
+  type ApiSession,
+  type Brand,
+  type Provider,
+} from "../api";
+import type { AcknowledgeRevocationRequest } from "../lib/api-contract.generated";
+import { ErrorNotice, Field } from "../components/shared";
 import { Button } from "../components/ui/button";
 import { Dialog } from "../components/ui/dialog";
+const RemovalStatus = z.object({
+  provider: z.string(),
+  revocation_id: z.string().uuid().nullable(),
+});
 const AppSchema = z.object({
   provider: z.string(),
   client_id: z.string(),
@@ -40,9 +53,66 @@ export function ProviderSetup({
   const [saved, setSaved] = useState("");
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
+  // undefined means the current boundary has not been checked.
+  const [removal, setRemoval] = useState<string | null | undefined>(undefined);
+  const [removalBusy, setRemovalBusy] = useState(false);
+  const [removalError, setRemovalError] = useState("");
+  const [attested, setAttested] = useState(false);
+  const alive = useRef(false);
+  const removalGeneration = useRef(0);
+  const current = (session: ApiSession) =>
+    alive.current && isCurrentWorkspaceSession(session);
+  const checkRemoval = async () => {
+    let session: ApiSession;
+    try {
+      session = captureWorkspaceSession();
+    } catch {
+      return;
+    }
+    const generation = ++removalGeneration.current;
+    const active = () =>
+      current(session) && generation === removalGeneration.current;
+    setRemoval(undefined);
+    setAttested(false);
+    setRemovalError("");
+    setRemovalBusy(true);
+    try {
+      const status = await api(
+        `/connections/${id}/removal-status`,
+        RemovalStatus,
+      );
+      if (!active()) return;
+      if (status.provider !== id)
+        throw new Error(
+          "Provider removal status did not match this connection.",
+        );
+      setRemoval(status.revocation_id);
+    } catch (failure) {
+      if (active()) setRemovalError((failure as Error).message);
+    } finally {
+      if (active()) setRemovalBusy(false);
+    }
+  };
   useEffect(() => {
-    api("/provider-apps", z.array(AppSchema))
+    alive.current = true;
+    let session: ApiSession;
+    try {
+      session = captureWorkspaceSession();
+    } catch {
+      return () => {
+        alive.current = false;
+      };
+    }
+    const controller = new AbortController();
+    api(
+      "/provider-apps",
+      z.array(AppSchema),
+      "GET",
+      undefined,
+      controller.signal,
+    )
       .then((apps) => {
+        if (!current(session) || controller.signal.aborted) return;
         const app = apps.find((a) => a.provider === id);
         if (app) {
           setConfigured(app.configured);
@@ -50,9 +120,65 @@ export function ProviderSetup({
           setInstance(app.instance_url ?? "");
         }
       })
-      .catch((e) => setError(e.message));
+      .catch((e) => {
+        if (current(session) && !controller.signal.aborted) setError(e.message);
+      });
+    void checkRemoval();
+    return () => {
+      alive.current = false;
+      removalGeneration.current++;
+      controller.abort();
+    };
   }, [id]);
+  const acknowledgeRemoval = async () => {
+    if (!removal || !attested || busy || removalBusy) return;
+    let session: ApiSession;
+    try {
+      session = captureWorkspaceSession();
+    } catch {
+      return;
+    }
+    const observedId = removal;
+    const generation = ++removalGeneration.current;
+    const active = () =>
+      current(session) && generation === removalGeneration.current;
+    setRemoval(undefined);
+    setAttested(false);
+    setRemovalError("");
+    setRemovalBusy(true);
+    try {
+      await api(
+        `/connections/${id}/acknowledge-revocation`,
+        z.object({ revocation_acknowledged: z.literal(true) }),
+        "POST",
+        {
+          access_removed: true,
+          revocation_id: observedId,
+        } satisfies AcknowledgeRevocationRequest,
+      );
+      if (active()) {
+        setRemoval(null);
+        setSaved(
+          "Your removal attestation was recorded. Provider access was not checked by beweft.",
+        );
+      }
+    } catch (failure) {
+      if (active())
+        setRemovalError(
+          `${(failure as Error).message} Check removal status and review it again before confirming.`,
+        );
+    } finally {
+      if (active()) setRemovalBusy(false);
+    }
+  };
   const save = async () => {
+    if (busy || removalBusy || removal !== null) return;
+    let session: ApiSession;
+    try {
+      session = captureWorkspaceSession();
+    } catch {
+      return;
+    }
     setBusy(true);
     setError("");
     setSaved("");
@@ -71,18 +197,29 @@ export function ProviderSetup({
             : {}),
         },
       );
+      if (!current(session)) return;
       setConfigured(true);
       setClientSecret("");
       setCallback(result.callback_url);
       setSaved("Provider app saved. You can now connect your account.");
       await onSaved();
     } catch (e) {
-      setError((e as Error).message);
+      if (current(session)) {
+        setError((e as Error).message);
+        setRemoval(undefined);
+      }
     } finally {
-      setBusy(false);
+      if (current(session)) setBusy(false);
     }
   };
   const connect = async () => {
+    if (busy || removalBusy || removal !== null) return;
+    let session: ApiSession;
+    try {
+      session = captureWorkspaceSession();
+    } catch {
+      return;
+    }
     setBusy(true);
     setError("");
     try {
@@ -94,9 +231,10 @@ export function ProviderSetup({
           reconnect_channel_id: reconnectId,
           timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         });
+        if (!current(session)) return;
         setPassword("");
         await onSaved();
-        onClose();
+        if (current(session)) onClose();
       } else {
         const flow = await api(
           `/connections/${id}/start`,
@@ -107,15 +245,19 @@ export function ProviderSetup({
           "POST",
           { brand_id: brand.id, reconnect_channel_id: reconnectId },
         );
+        if (!current(session)) return;
         const destination = new URL(flow.authorization_url);
         if (destination.protocol !== "https:")
           throw new Error("Provider returned an insecure authorization URL.");
         location.assign(destination.href);
       }
     } catch (e) {
-      setError((e as Error).message);
+      if (current(session)) {
+        setError((e as Error).message);
+        setRemoval(undefined);
+      }
     } finally {
-      setBusy(false);
+      if (current(session)) setBusy(false);
     }
   };
   return (
@@ -151,6 +293,64 @@ export function ProviderSetup({
           </div>
         </dl>
         {error && <ErrorNotice message={error} />}
+        <section
+          className="form-stack detail-section"
+          aria-label="Provider access removal"
+        >
+          <h3>Provider access removal</h3>
+          {removal === undefined && (
+            <p>
+              Check the current removal status before configuring or connecting
+              this provider.
+            </p>
+          )}
+          {removal === null && (
+            <p>
+              No provider access removal is currently pending. This status does
+              not verify access at the provider.
+            </p>
+          )}
+          {removal && (
+            <>
+              <p>
+                Before connecting again, inspect your channels, including other
+                brands, and remove beweft access in the provider’s connected-app
+                settings or app passwords. Removing access can affect other
+                accounts.
+              </p>
+              <p>
+                This is your attestation; beweft does not verify or revoke
+                access at the provider.
+              </p>
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={attested}
+                  onChange={(event) => setAttested(event.target.checked)}
+                />
+                I removed beweft access at the provider and reviewed the impact
+                on my other channels.
+              </label>
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={!attested || removalBusy || busy}
+                onClick={() => void acknowledgeRemoval()}
+              >
+                Confirm provider access removed
+              </Button>
+            </>
+          )}
+          {removalError && <ErrorNotice message={removalError} />}
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={removalBusy || busy}
+            onClick={() => void checkRemoval()}
+          >
+            {removalBusy ? "Checking removal status…" : "Check removal status"}
+          </Button>
+        </section>
         <form
           className="form-stack detail-section"
           onSubmit={(e) => {
@@ -218,7 +418,12 @@ export function ProviderSetup({
             Registration, permissions, and access requirements{" "}
             <ArrowUpRight size={14} />
           </a>
-          <Submit pending={busy}>Save provider app</Submit>
+          <Button
+            type="submit"
+            disabled={busy || removalBusy || removal !== null}
+          >
+            {busy ? "Saving…" : "Save provider app"}
+          </Button>
           {saved && (
             <p className="success-message" role="status">
               {saved}
@@ -264,7 +469,12 @@ export function ProviderSetup({
           )}
           <Button
             type="submit"
-            disabled={busy || (!configured && id !== "bluesky")}
+            disabled={
+              busy ||
+              removalBusy ||
+              removal !== null ||
+              (!configured && id !== "bluesky")
+            }
           >
             <ShieldCheck size={16} />
             {busy

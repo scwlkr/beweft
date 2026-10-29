@@ -58,6 +58,13 @@ pub struct Channel {
     pub target_platform: Option<String>,
     #[schema(required = true)]
     pub manual_guidance: Option<super::ManualGuidance>,
+    #[schema(required = true)]
+    pub connection_identity: Option<String>,
+    pub connection_status: String,
+    #[schema(required = true)]
+    pub connection_error: Option<String>,
+    #[schema(required = true)]
+    pub connected_at: Option<DateTime<Utc>>,
     pub id: Uuid,
     pub brand_id: Uuid,
     pub name: String,
@@ -104,8 +111,21 @@ pub struct Post {
     pub updated_at: DateTime<Utc>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
+pub struct PostSummary {
+    pub id: Uuid,
+    pub brand_id: Uuid,
+    pub title: String,
+    pub text: String,
+    pub media_ids: Vec<Uuid>,
+    pub version: i32,
+    pub status: PostStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct Media {
     pub alt_text: String,
+    pub metadata_version: i32,
     pub id: Uuid,
     pub brand_id: Uuid,
     pub name: String,
@@ -181,10 +201,57 @@ pub struct Publication {
     pub updated_at: DateTime<Utc>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
+pub struct PublicationSummary {
+    pub id: Uuid,
+    pub post_id: Uuid,
+    pub brand_id: Uuid,
+    pub channel_id: Uuid,
+    /// Display name truncated to at most 100 Unicode characters in summaries.
+    #[schema(max_length = 100)]
+    pub channel_name: String,
+    /// Provider label truncated to at most 64 Unicode characters in summaries.
+    #[schema(max_length = 64)]
+    pub provider: String,
+    pub post_version: i32,
+    pub scheduled_at: DateTime<Utc>,
+    pub scheduling_mode: SchedulingMode,
+    pub state: PublicationState,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ScheduleRequestIntent {
+    pub version: i32,
+    pub channel_ids: Vec<Uuid>,
+    /// UTC RFC3339, rendered to microsecond precision; null means a posting-rule slot.
+    #[schema(required = true)]
+    pub scheduled_at: Option<DateTime<Utc>>,
+    /// Original normalized media-version map, or null for legacy requests.
+    #[schema(required = true)]
+    pub media_versions: Option<BTreeMap<Uuid, i64>>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleRequestOutcome {
+    Accepted,
+    Rejected,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ScheduleRequestResult {
+    pub request_id: Uuid,
+    pub post_id: Uuid,
+    pub brand_id: Uuid,
+    pub request: ScheduleRequestIntent,
+    pub outcome: ScheduleRequestOutcome,
+    #[schema(required = true)]
+    pub error: Option<ErrorDetail>,
+    pub publications: Vec<PublicationSummary>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct PublicationAttempt {
     pub id: Uuid,
     pub publication_id: Uuid,
-    pub state: PublicationState,
+    pub state: PublicationAttemptState,
     pub provider: String,
     pub started_at: DateTime<Utc>,
     #[schema(required = true)]
@@ -193,6 +260,18 @@ pub struct PublicationAttempt {
     pub receipt: Option<Value>,
     #[schema(required = true)]
     pub error: Option<String>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicationAttemptState {
+    Sending,
+    ManualRequired,
+    Published,
+    FixtureComplete,
+    Failed,
+    Uncertain,
+    Reconciled,
+    Continued,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct JobHealth {
@@ -233,5 +312,125 @@ pub struct ProviderDescriptor {
     pub execution: String,
     pub verification: String,
     pub formats: Vec<String>,
+    pub oauth: bool,
+    pub analytics: bool,
+    pub inbox: bool,
+    pub reply: bool,
     pub reason: String,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ProviderApp {
+    pub provider: String,
+    pub client_id: String,
+    #[schema(required = true)]
+    pub instance_url: Option<String>,
+    pub configured: bool,
+    pub updated_at: DateTime<Utc>,
+    #[schema(required = true)]
+    pub revocation_id: Option<Uuid>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct SavedProviderApp {
+    pub provider: String,
+    pub client_id: String,
+    #[schema(required = true)]
+    pub instance_url: Option<String>,
+    pub configured: bool,
+    pub callback_url: String,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct StartedConnection {
+    pub authorization_url: String,
+    pub flow_id: Uuid,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ConnectionDestination {
+    pub id: String,
+    pub name: String,
+    #[schema(required = true)]
+    pub username: Option<String>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ConnectionFlow {
+    pub id: Uuid,
+    pub brand_id: Uuid,
+    pub provider: String,
+    pub destinations: Vec<ConnectionDestination>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct DisconnectResult {
+    pub disconnected: bool,
+    pub provider_revoked: bool,
+    pub channels_requiring_reconnection: u64,
+    #[schema(required = true)]
+    pub revocation_id: Option<Uuid>,
+    pub next_action: String,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct RevocationAcknowledged {
+    pub revocation_acknowledged: bool,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ProviderRemovalStatus {
+    pub provider: String,
+    #[schema(required = true)]
+    pub revocation_id: Option<Uuid>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ProviderSyncResult {
+    pub metrics_observed: u64,
+    pub inbox_items: u64,
+    pub coverage: String,
+    pub errors: Vec<String>,
+    pub note: String,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ProviderReply {
+    pub id: Uuid,
+    pub inbox_id: Uuid,
+    pub text: String,
+    pub state: String,
+    pub revision: i64,
+    #[schema(required = true)]
+    pub receipt: Option<Value>,
+    #[schema(required = true)]
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ProviderStatus {
+    pub session_expired: bool,
+    pub reset_allowed: bool,
+    #[schema(required = true)]
+    pub reason: Option<String>,
+    #[schema(required = true)]
+    pub x_upload: Option<XUploadStatus>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct XUploadStatus {
+    /// `post_started` is the public delivery boundary, including text-only posts.
+    pub phase: XUploadPhase,
+    pub attempt_id: Uuid,
+    pub checkpoint_id: Uuid,
+    pub reset_allowed: bool,
+    pub reason: String,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum XUploadPhase {
+    Upload,
+    PostStarted,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ProviderReconcilePending {
+    pub state: String,
+    pub reason: String,
+    pub session_expired: Option<bool>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ResetExpiredSessionResult {
+    pub state: String,
+    pub session_reset: bool,
+    pub next_action: String,
 }

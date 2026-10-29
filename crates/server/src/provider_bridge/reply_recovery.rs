@@ -9,7 +9,7 @@ pub async fn replies(
 ) -> Result<Json<Value>> {
     let brand:Uuid=sqlx::query_scalar("SELECT c.brand_id FROM provider_inbox i JOIN channels c ON c.id=i.channel_id WHERE i.id=$1").bind(id).fetch_one(&state.db).await?;
     auth.brand(brand)?;
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT (to_jsonb(r)-'owner_id'-'history_order'-'delivery_deadline') || CASE WHEN state='sending' AND delivery_deadline<clock_timestamp() THEN jsonb_build_object('state','uncertain','error','Reply response was lost; inspect the network before resolving its outcome') ELSE '{}'::jsonb END FROM provider_replies r WHERE inbox_id=$1 AND owner_id=$2 ORDER BY history_order DESC LIMIT 100").bind(id).bind(auth.owner_id).fetch_all(&state.db).await?;
+    let rows:Vec<Value>=sqlx::query_scalar("SELECT (to_jsonb(r)-'owner_id'-'history_order'-'delivery_deadline') || CASE WHEN state='sending' AND delivery_deadline<clock_timestamp() THEN jsonb_build_object('state','uncertain','error','Reply outcome is unknown. Ensure the original sender has stopped and inspect the provider before resolving.') ELSE '{}'::jsonb END FROM provider_replies r WHERE inbox_id=$1 AND owner_id=$2 ORDER BY history_order DESC LIMIT 100").bind(id).bind(auth.owner_id).fetch_all(&state.db).await?;
     Ok(data(json!(rows)))
 }
 pub async fn resolve_reply(
@@ -32,6 +32,18 @@ pub async fn resolve_reply(
             ));
         }
     };
+    let observed_revision = body["observed_revision"]
+        .as_i64()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            ApiError::bad("observed_revision must be the revision from the latest reply history")
+        })?;
+    if outcome == "failed" && body["sender_stopped"].as_bool() != Some(true) {
+        return Err(ApiError::bad_code(
+            "reply_sender_attestation_required",
+            "Confirm that the original sender has stopped and inspect the provider before recording not published. Provider acceptance can remain uncertain.",
+        ));
+    }
     if let Some(url) = body["external_url"].as_str() {
         let parsed = url::Url::parse(url).map_err(|_| ApiError::bad("Invalid external URL"))?;
         if !matches!(parsed.scheme(), "https" | "http")
@@ -46,16 +58,23 @@ pub async fn resolve_reply(
     let context=sqlx::query("SELECT i.channel_id,c.brand_id FROM provider_inbox i JOIN channels c ON c.id=i.channel_id WHERE i.id=$1").bind(id).fetch_one(&state.db).await?;
     auth.brand(context.get("brand_id"))?;
     let mut tx = state.db.begin().await?;
+    super::try_reply_execution_tx(&mut tx, id).await?;
     crate::schedules::lock_channel(&mut tx, context.get("channel_id")).await?;
-    let row=sqlx::query("SELECT state,delivery_deadline<clock_timestamp() AS expired FROM provider_replies WHERE id=$1 AND inbox_id=$2 AND owner_id=$3 FOR UPDATE").bind(request_id).bind(id).bind(auth.owner_id).fetch_one(&mut *tx).await?;
+    let row=sqlx::query("SELECT state,revision,delivery_deadline<clock_timestamp() AS expired FROM provider_replies WHERE id=$1 AND inbox_id=$2 AND owner_id=$3 FOR UPDATE").bind(request_id).bind(id).bind(auth.owner_id).fetch_one(&mut *tx).await?;
+    if row.get::<i64, _>("revision") != observed_revision {
+        return Err(ApiError::conflict_code(
+            "reply_observation_changed",
+            "Reply history changed since it was inspected. Reload it and inspect the provider again before resolving.",
+        ));
+    }
     let status: String = row.get("state");
     if status != "uncertain" && !(status == "sending" && row.get::<bool, _>("expired")) {
         return Err(ApiError::conflict(
             "Only uncertain replies can be resolved; wait for an active reply to finish",
         ));
     }
-    let receipt = json!({"verification":"owner_attestation","resolution":body["resolution"],"note":note,"external_url":body["external_url"]});
-    let result:Value=sqlx::query_scalar("UPDATE provider_replies SET state=$2,receipt=$3,error=NULL,updated_at=now() WHERE id=$1 RETURNING to_jsonb(provider_replies.*)-'owner_id'-'history_order'-'delivery_deadline'").bind(request_id).bind(outcome).bind(&receipt).fetch_one(&mut *tx).await?;
+    let receipt = json!({"verification":"owner_attestation","resolution":body["resolution"],"sender_stopped":body["sender_stopped"],"observed_revision":observed_revision,"note":note,"external_url":body["external_url"]});
+    let result:Value=sqlx::query_scalar("UPDATE provider_replies SET state=$2,receipt=$3,error=NULL,updated_at=clock_timestamp() WHERE id=$1 RETURNING to_jsonb(provider_replies.*)-'owner_id'-'history_order'-'delivery_deadline'").bind(request_id).bind(outcome).bind(&receipt).fetch_one(&mut *tx).await?;
     sqlx::query("INSERT INTO audit_events(id,owner_id,action,subject_id,detail) VALUES($1,$2,'resolve_reply',$3,$4)").bind(Uuid::new_v4()).bind(auth.owner_id).bind(request_id).bind(receipt).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(data(result))

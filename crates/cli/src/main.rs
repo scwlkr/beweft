@@ -1,30 +1,35 @@
 mod client;
 mod mcp;
 mod tools;
+mod upload;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::io::Read;
+const MAX_WIRE_INPUT: u64 = 8 * 1024 * 1024;
 
 fn read_json(path: &str) -> Result<Value> {
     let mut bytes = Vec::new();
     if path == "-" {
         std::io::stdin()
-            .take(1024 * 1024 + 1)
+            .take(MAX_WIRE_INPUT + 1)
             .read_to_end(&mut bytes)?;
     } else {
         std::fs::File::open(path)
             .context("Cannot open JSON file")?
-            .take(1024 * 1024 + 1)
+            .take(MAX_WIRE_INPUT + 1)
             .read_to_end(&mut bytes)?;
     }
-    ensure!(bytes.len() <= 1024 * 1024, "JSON input exceeds 1 MiB");
+    ensure!(
+        bytes.len() as u64 <= MAX_WIRE_INPUT,
+        "JSON input exceeds 8 MiB"
+    );
     serde_json::from_slice(&bytes).context("Invalid JSON input")
 }
 async fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || matches!(args[0].as_str(), "help" | "--help" | "-h") {
         println!(
-            "beweft <tool> [--json FILE|-]\nbeweft schema <tool>\nbeweft api <GET|POST|PATCH|PUT|DELETE> /path [--json FILE|-]\nbeweft mcp\n\nTools: {}\nUse underscores or hyphens. Outputs JSON. Tokens: BEWEFT_TOKEN_FILE (chmod 600) or BEWEFT_TOKEN.\nServer origin: BEWEFT_URL (default http://127.0.0.1:3000). No automatic write retries.",
+            "beweft <tool> [--json FILE|-]\nbeweft schema <tool>\nbeweft api <GET|POST|PATCH|PUT|DELETE> /path [--json FILE|-]\nbeweft mcp\n\nTools: {}\nUse underscores or hyphens. Outputs JSON. Tokens: BEWEFT_TOKEN_FILE (chmod 600) or BEWEFT_TOKEN.\nServer origin: BEWEFT_URL (default http://127.0.0.1:3000). No automatic write retries.\nBefore scheduling, save the request UUID and exact approved body. For an unknown result, use schedule-request with that UUID; 404 does not prove failure.",
             tools::NAMES.join(", ")
         );
         return Ok(());
@@ -81,6 +86,7 @@ async fn run() -> Result<()> {
                 json!({})
             },
             false,
+            None,
         )
         .await?
     };

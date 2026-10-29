@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
-import { api, ApiError } from "../api";
+import {
+  api,
+  ApiError,
+  captureWorkspaceSession,
+  isCurrentWorkspaceSession,
+  requireWorkspaceSession,
+  withWorkspaceSession,
+  type ApiSession,
+} from "../api";
 import {
   readIntent,
   forgetIntent,
@@ -8,10 +16,12 @@ import {
   type Pending,
 } from "./replyIntent";
 import { ItemSchema } from "./insight-contracts";
+import type { ResolveProviderReplyRequest } from "../lib/api-contract.generated";
 const Attempt = z.object({
   id: z.string().uuid(),
   inbox_id: z.string(),
   text: z.string(),
+  revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   state: z.enum(["sending", "uncertain", "published", "failed"]),
   error: z.string().nullable().optional(),
   receipt: z.unknown().optional(),
@@ -26,6 +36,7 @@ const unresolved = (attempt: Attempt) =>
 export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
   const [text, setText] = useState("");
   const [attempt, setAttempt] = useState<Attempt | null>(null);
+  const [observation, setObservation] = useState(0);
   const [pending, setPending] = useState<Pending | null>(null);
   const [historyChanged, setHistoryChanged] = useState(false);
   const [latest, setLatest] = useState<Attempt | null>(null);
@@ -35,68 +46,153 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
   const [error, setError] = useState("");
   const key = useRef("");
   const alive = useRef(true);
-  const running = useRef(false);
+  const running = useRef<object | null>(null);
+  const recoveryController = useRef<AbortController | null>(null);
+  const intentController = useRef<AbortController | null>(null);
   const identity = `${brandId}:${item.channel_id}:${item.id}`;
   const currentIdentity = useRef(identity);
   currentIdentity.current = identity;
   const current = () => alive.current && currentIdentity.current === identity;
-
-  const recover = async () => {
-    setReady(false);
-    const owner = await api("/auth/me", z.object({ id: z.string() }));
-    const storageKey = `beweft.pending-reply:${owner.id}:${identity}`;
-    const rows = await api(`/inbox/${item.id}/replies`, z.array(Attempt));
-    if (rows.some((row) => row.inbox_id !== item.id))
-      throw new Error(
-        "Reply recovery returned a different conversation. Sending is blocked.",
+  const activeOperation = (session: ApiSession, operation: object) => {
+    if (!current() || running.current !== operation) return false;
+    requireWorkspaceSession(session);
+    return true;
+  };
+  const lockForSession = async <T>(
+    storageKey: string,
+    session: ApiSession,
+    work: () => T,
+  ) => {
+    intentController.current?.abort();
+    const controller = new AbortController();
+    intentController.current = controller;
+    try {
+      return await lockIntent(
+        storageKey,
+        () =>
+          withWorkspaceSession(
+            session,
+            () => {
+              if (!current()) throw new DOMException("Abandoned", "AbortError");
+              return work();
+            },
+            controller.signal,
+          ),
+        controller.signal,
       );
-    const remembered = readIntent(storageKey);
-    const ordered = rows;
-    const outstanding = ordered.find(unresolved);
-    const recorded =
-      outstanding ??
-      (remembered
-        ? (ordered.find((row) => row.id === remembered.request_id) ?? null)
-        : (ordered[0] ?? null));
-    if (!current()) return null;
-    key.current = storageKey;
-    lastSeen.current = ordered[0]?.id ?? null;
-    setLatest(ordered[0] ?? null);
-    setHistoryChanged(
-      !!remembered &&
-        remembered.expected_last_request_id !== lastSeen.current &&
-        !ordered.some((row) => row.id === remembered.request_id),
-    );
-    setAttempt(recorded);
-    setPending(remembered);
-    if (recorded || remembered) setText(recorded?.text ?? remembered!.text);
-    if (
-      recorded &&
-      !unresolved(recorded) &&
-      recorded.id === remembered?.request_id
-    ) {
-      await lockIntent(storageKey, () => forgetIntent(storageKey, recorded.id));
-      setPending(null);
+    } finally {
+      if (intentController.current === controller)
+        intentController.current = null;
     }
-    setReady(true);
-    setError(recorded?.error ?? "");
-    return { rows, recorded, remembered };
+  };
+
+  const recover = async (session: ApiSession) => {
+    if (!current()) return null;
+    requireWorkspaceSession(session);
+    recoveryController.current?.abort();
+    const controller = new AbortController();
+    recoveryController.current = controller;
+    const active = () => {
+      if (
+        !current() ||
+        controller.signal.aborted ||
+        recoveryController.current !== controller
+      )
+        return false;
+      requireWorkspaceSession(session);
+      return true;
+    };
+    setReady(false);
+    try {
+      const owner = await api(
+        "/auth/me",
+        z.object({ id: z.string() }),
+        "GET",
+        undefined,
+        controller.signal,
+      );
+      if (!active()) return null;
+      const storageKey = `beweft.pending-reply:${owner.id}:${identity}`;
+      const rows = await api(
+        `/inbox/${item.id}/replies`,
+        z.array(Attempt),
+        "GET",
+        undefined,
+        controller.signal,
+      );
+      if (!active()) return null;
+      if (rows.some((row) => row.inbox_id !== item.id))
+        throw new Error(
+          "Reply recovery returned a different conversation. Sending is blocked.",
+        );
+      const remembered = readIntent(storageKey);
+      const ordered = rows;
+      const outstanding = ordered.find(unresolved);
+      const recorded =
+        outstanding ??
+        (remembered
+          ? (ordered.find((row) => row.id === remembered.request_id) ?? null)
+          : (ordered[0] ?? null));
+      if (!active()) return null;
+      key.current = storageKey;
+      lastSeen.current = ordered[0]?.id ?? null;
+      setLatest(ordered[0] ?? null);
+      setHistoryChanged(
+        !!remembered &&
+          remembered.expected_last_request_id !== lastSeen.current &&
+          !ordered.some((row) => row.id === remembered.request_id),
+      );
+      setAttempt(recorded);
+      setObservation((value) => value + 1);
+      setPending(remembered);
+      if (recorded || remembered) setText(recorded?.text ?? remembered!.text);
+      if (
+        recorded &&
+        !unresolved(recorded) &&
+        recorded.id === remembered?.request_id
+      ) {
+        await lockForSession(storageKey, session, () => {
+          if (active()) forgetIntent(storageKey, recorded.id);
+        });
+        if (!active()) return null;
+        setPending(null);
+      }
+      setReady(true);
+      setError(recorded?.error ?? "");
+      return { rows, recorded, remembered };
+    } finally {
+      if (recoveryController.current === controller)
+        recoveryController.current = null;
+    }
   };
   const check = async () => {
     if (running.current) return;
-    running.current = true;
+    let session: ApiSession;
+    try {
+      session = captureWorkspaceSession();
+    } catch {
+      return;
+    }
+    const operation = {};
+    running.current = operation;
     setBusy(true);
     setError("");
     try {
-      await recover();
+      await recover(session);
     } catch (failure) {
-      if (current())
+      if (
+        isCurrentWorkspaceSession(session) &&
+        current() &&
+        running.current === operation
+      )
         setError(
           `${(failure as Error).message} The existing reply must be checked before sending.`,
         );
     } finally {
-      running.current = false;
-      if (current()) setBusy(false);
+      if (running.current === operation) {
+        running.current = null;
+        if (current() && isCurrentWorkspaceSession(session)) setBusy(false);
+      }
     }
   };
   useEffect(() => {
@@ -104,13 +200,23 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
     void check();
     return () => {
       alive.current = false;
+      recoveryController.current?.abort();
+      intentController.current?.abort();
+      running.current = null;
     };
     // The parent keys this hook's dialog by brand, channel, and inbox item.
   }, [identity]);
 
   const send = async () => {
     if (running.current || !ready || (attempt && unresolved(attempt))) return;
-    running.current = true;
+    let session: ApiSession;
+    try {
+      session = captureWorkspaceSession();
+    } catch {
+      return;
+    }
+    const operation = {};
+    running.current = operation;
     setBusy(true);
     setError("");
     const intentAtClick = pending;
@@ -119,13 +225,14 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
     try {
       // Recheck durable attempts immediately before sending. The server also guards
       // concurrent tabs, which can race between this read and the POST.
-      const recovered = await recover();
-      if (!recovered || !current()) return;
+      const recovered = await recover(session);
+      if (!activeOperation(session, operation) || !recovered) return;
       if (recovered.rows.some(unresolved)) return;
       const head = recovered.rows[0]?.id ?? null;
       // Claim only the intent the user actually saw. Another tab may have written
       // an intent while this tab's GET was in flight; do not overwrite or send it.
-      const outgoing = await lockIntent(key.current, () => {
+      const outgoing = await lockForSession(key.current, session, () => {
+        if (!current() || running.current !== operation) return null;
         const remembered = readIntent(key.current) ?? recovered.remembered;
         if (
           remembered &&
@@ -171,7 +278,7 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
         localStorage.setItem(key.current, JSON.stringify(claimed));
         return claimed;
       });
-      if (!outgoing || !current()) return;
+      if (!activeOperation(session, operation) || !outgoing) return;
       setPending(outgoing);
       setText(outgoing.text);
       setAttempt(null);
@@ -185,17 +292,22 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
         throw new Error(
           "Reply response identity did not match. Check the existing attempt.",
         );
-      if (!current()) return;
+      if (!activeOperation(session, operation)) return;
       setAttempt(result);
       setError(result.error ?? "");
       if (!unresolved(result)) {
-        await lockIntent(key.current, () =>
+        await lockForSession(key.current, session, () =>
           forgetIntent(key.current, result.id),
         );
+        if (!activeOperation(session, operation)) return;
         setPending(null);
       }
     } catch (failure) {
-      if (current()) {
+      if (
+        isCurrentWorkspaceSession(session) &&
+        current() &&
+        running.current === operation
+      ) {
         setReady(false);
         setError(
           failure instanceof ApiError &&
@@ -205,14 +317,33 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
         );
       }
     } finally {
-      running.current = false;
-      if (current()) setBusy(false);
+      if (running.current === operation) {
+        running.current = null;
+        if (current() && isCurrentWorkspaceSession(session)) setBusy(false);
+      }
     }
   };
   const acknowledgeHistory = async () => {
-    if (!pending || !ready || busy || (latest && unresolved(latest))) return;
+    if (
+      !pending ||
+      !ready ||
+      busy ||
+      running.current ||
+      (latest && unresolved(latest))
+    )
+      return;
+    let session: ApiSession;
     try {
-      const updated = await lockIntent(key.current, () => {
+      session = captureWorkspaceSession();
+    } catch {
+      return;
+    }
+    const operation = {};
+    running.current = operation;
+    setBusy(true);
+    try {
+      const updated = await lockForSession(key.current, session, () => {
+        if (running.current !== operation) return null;
         const stored = readIntent(key.current);
         if (stored?.request_id !== pending.request_id) return null;
         const acknowledged = {
@@ -222,26 +353,46 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
         localStorage.setItem(key.current, JSON.stringify(acknowledged));
         return acknowledged;
       });
-      if (updated && current()) {
+      if (!activeOperation(session, operation)) return;
+      if (updated) {
         setPending(updated);
         setHistoryChanged(false);
         setError(
           "History acknowledged. Retry the original reply explicitly only if it is still needed.",
         );
-      } else await check();
+      } else await recover(session);
     } catch (failure) {
-      setReady(false);
-      setError((failure as Error).message);
+      if (
+        isCurrentWorkspaceSession(session) &&
+        current() &&
+        running.current === operation
+      ) {
+        setReady(false);
+        setError((failure as Error).message);
+      }
+    } finally {
+      if (running.current === operation) {
+        running.current = null;
+        if (current() && isCurrentWorkspaceSession(session)) setBusy(false);
+      }
     }
   };
   const resolve = async (body: {
     resolution: "published" | "not_published";
     note: string;
     external_url?: string;
+    sender_stopped?: true;
   }) => {
     if (!attempt || attempt.state !== "uncertain" || running.current || !ready)
       return;
-    running.current = true;
+    let session: ApiSession;
+    try {
+      session = captureWorkspaceSession();
+    } catch {
+      return;
+    }
+    const operation = {};
+    running.current = operation;
     setBusy(true);
     setError("");
     try {
@@ -249,26 +400,41 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
         `/inbox/${item.id}/replies/${attempt.id}/resolve`,
         Attempt,
         "POST",
-        body,
+        {
+          ...body,
+          observed_revision: attempt.revision,
+        } satisfies ResolveProviderReplyRequest,
       );
       if (result.id !== attempt.id || result.inbox_id !== item.id)
         throw new Error("Reply resolution identity did not match.");
-      await recover();
+      if (!activeOperation(session, operation)) return;
+      await recover(session);
     } catch (failure) {
-      if (current()) {
+      if (
+        isCurrentWorkspaceSession(session) &&
+        current() &&
+        running.current === operation
+      ) {
         setReady(false);
         setError(
           `${(failure as Error).message} Check the recorded outcome before continuing.`,
         );
       }
     } finally {
-      running.current = false;
-      if (current()) setBusy(false);
+      if (running.current === operation) {
+        running.current = null;
+        if (current() && isCurrentWorkspaceSession(session)) setBusy(false);
+      }
     }
   };
   const another = () => {
     if (!ready || !attempt || unresolved(attempt) || busy) return;
     if (pending && pending.request_id !== attempt.id) return;
+    try {
+      captureWorkspaceSession();
+    } catch {
+      return;
+    }
     setAttempt(null);
     setPending(null);
     setText("");
@@ -278,6 +444,7 @@ export function useReply(brandId: string, item: z.infer<typeof ItemSchema>) {
     text,
     setText,
     attempt,
+    observation,
     pending,
     busy,
     ready,

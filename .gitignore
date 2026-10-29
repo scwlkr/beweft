@@ -3,6 +3,10 @@
 .env.*
 !.env.example
 .local/
+**/installation.env
+**/database.dump
+**/media.tar
+**/key.sha256
 node_modules/
 target/
 dist/

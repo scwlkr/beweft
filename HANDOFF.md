@@ -25,8 +25,9 @@ It does not need subscriptions, customer billing, a commercial hosting service,
 or an elaborate agency product.
 
 Keep existing repositories, data, publishing routes, and services intact.
-This bootstrap contains only project notes, the handoff, a license, and
-Wstack's starter CLI. No app implementation has begun.
+At the start of this request, the bootstrap contained only project notes, the
+handoff, a license, and Wstack's starter CLI. Implementation has since begun;
+use `w.md` and `ORCHESTRATOR-HANDOFF.md` for current status and remaining work.
 
 ## Research and REA
 
