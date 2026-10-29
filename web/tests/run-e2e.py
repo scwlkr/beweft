@@ -11,6 +11,7 @@ import secrets
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
@@ -55,7 +56,7 @@ def main():
     request = urllib.request.Request(origin + "/api/v1/auth/bootstrap", data=json.dumps({"setup_secret":setup,"email":env["BEWEFT_TEST_EMAIL"],"password":password}).encode(), headers={"Content-Type":"application/json","X-Beweft-Request":"1","Origin":origin})
     with urllib.request.urlopen(request) as response:
         assert response.status == 200
-    subprocess.run(["pnpm", "--filter", "@beweft/web", "exec", "playwright", "test"], cwd=ROOT, env=env, check=True)
+    subprocess.run(["pnpm", "--filter", "@beweft/web", "exec", "playwright", "test", *sys.argv[1:]], cwd=ROOT, env=env, check=True)
 
 
 try:
