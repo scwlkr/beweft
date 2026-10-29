@@ -1284,6 +1284,8 @@
             "type": "string"
           },
           "channel_name": {
+            "description": "Display name truncated to at most 100 Unicode characters in summaries.",
+            "maxLength": 100,
             "type": "string"
           },
           "created_at": {
@@ -1303,6 +1305,8 @@
             "type": "integer"
           },
           "provider": {
+            "description": "Provider label truncated to at most 64 Unicode characters in summaries.",
+            "maxLength": 64,
             "type": "string"
           },
           "scheduled_at": {

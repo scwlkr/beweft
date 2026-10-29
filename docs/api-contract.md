@@ -48,9 +48,11 @@ list order and response shape remain unchanged for the web application.
 - `/publications` additionally accepts `group=queue|history`, `view=summary`,
   and `id=UUID`. Queue means queued/sending; history means every other state.
   The summary is `{id,post_id,brand_id,channel_id,channel_name,provider,post_version,scheduled_at,scheduling_mode,state,created_at,updated_at}`;
-  payload and external/error fields are omitted. GET
-  `/publications?id=UUID&limit=1` without `view=summary` reads one full,
-  authorized record in the usual `data` array.
+  payload and external/error fields are omitted. In every publication summary,
+  including schedule responses and request recovery, `channel_name` is truncated
+  to 100 Unicode characters and `provider` to 64. UUIDs and request identity are
+  unchanged. GET `/publications?id=UUID&limit=1` without `view=summary` reads one
+  full, authorized record, including its original channel name and provider.
 
 The generated OpenAPI and TypeScript include the optional filters, compact
 projections, and paged response envelopes.

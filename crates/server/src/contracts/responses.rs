@@ -198,7 +198,11 @@ pub struct PublicationSummary {
     pub post_id: Uuid,
     pub brand_id: Uuid,
     pub channel_id: Uuid,
+    /// Display name truncated to at most 100 Unicode characters in summaries.
+    #[schema(max_length = 100)]
     pub channel_name: String,
+    /// Provider label truncated to at most 64 Unicode characters in summaries.
+    #[schema(max_length = 64)]
     pub provider: String,
     pub post_version: i32,
     pub scheduled_at: DateTime<Utc>,

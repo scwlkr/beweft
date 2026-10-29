@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -268,18 +269,50 @@ def run():
             assert call(f"/posts/{past['id']}/schedule?view=summary", past_body)[0]["id"] == made[0]["id"]
             call(f"/posts/{past['id']}/schedule", {**past_body, "request_id": str(uuid.uuid4())}, expected=400)
 
-            # Even a worst-case 50-channel escaped draft has bounded recovery.
+            # Existing provider-derived rows can contain oversized display
+            # names and unknown provider labels regardless of API input limits.
+            # Use escaped controls and multibyte characters to test the bound.
             bulk_brand = call("/brands", {"name": "Bounded recovery"})["id"]
             bulk_channels = [call("/channels", {"brand_id": bulk_brand, "name": f"Bulk {i}", "provider": "manual"})["id"] for i in range(50)]
+            sql(f"UPDATE channels SET name=repeat(chr(1),100000), provider=repeat(chr(2),100000), target_platform=NULL WHERE brand_id='{bulk_brand}'")
+            sql(f"UPDATE channels SET name=repeat('é😊',50000), provider=repeat('界🪐',50000) WHERE id='{bulk_channels[0]}'")
             bulk_post = call("/posts", {"brand_id": bulk_brand, "text": "\u0001" * 100000})
             bulk_key = str(uuid.uuid4())
             bulk_body = {"version": 1, "channel_ids": bulk_channels, "scheduled_at": timestamp(dt.timedelta(hours=8)), "request_id": bulk_key}
             status, raw = response(f"/posts/{bulk_post['id']}/schedule?view=summary", bulk_body)
             assert status == 200 and len(raw) < 100000
             bulk = json.loads(raw)["data"]
+            assert len(bulk) == 50 and [row["channel_id"] for row in bulk] == sorted(bulk_channels)
+            assert all(len(row["channel_name"]) == 100 and len(row["provider"]) == 64 for row in bulk)
+            unicode_row = next(row for row in bulk if row["channel_id"] == bulk_channels[0])
+            assert unicode_row["channel_name"] == "é😊" * 50 and unicode_row["provider"] == "界🪐" * 32
             status, raw = response(f"/schedule-requests/{bulk_key}")
             assert status == 200 and len(raw) < 100000
-            assert len(json.loads(raw)["data"]["publications"]) == len(bulk) == 50
+            receipt = json.loads(raw)["data"]
+            assert receipt["request"]["channel_ids"] == sorted(bulk_channels)
+            assert receipt["publications"] == bulk
+            status, raw = response(f"/posts/{bulk_post['id']}/schedule?view=summary", bulk_body)
+            assert status == 200 and len(raw) < 100000 and json.loads(raw)["data"] == bulk
+            pages = []
+            cursor = None
+            while True:
+                query = {"brand_id": bulk_brand, "limit": 10, "view": "summary"}
+                if cursor is not None:
+                    query["cursor"] = cursor
+                status, raw = response("/publications?" + urllib.parse.urlencode(query))
+                assert status == 200 and len(raw) < 30000
+                page = json.loads(raw)
+                pages.extend(page["data"])
+                cursor = page["next_cursor"]
+                if cursor is None:
+                    break
+            assert {row["id"] for row in pages} == {row["id"] for row in bulk}
+            assert {row["id"]: row for row in pages} == {row["id"]: row for row in bulk}
+            # The single-record full detail still returns the original values.
+            control_row = next(row for row in bulk if row["channel_id"] != bulk_channels[0])
+            full = call(f"/publications?id={control_row['id']}&limit=1")[0]
+            assert full["channel_name"] == "\u0001" * 100000
+            assert full["provider"] == "\u0002" * 100000
 
             # The exported contract includes both full and compact paged
             # representations and the runtime emits the described fields.
@@ -296,6 +329,9 @@ def run():
             assert "PublicationSummary" in json.dumps(paths["/api/v1/posts/{id}/schedule"]["post"])
             assert any(p["name"] == "request_id" for p in paths["/api/v1/schedule-requests/{request_id}"]["get"]["parameters"])
             assert schema["components"]["schemas"]["ScheduleRequestIntent"]["required"] == ["version", "channel_ids", "scheduled_at"]
+            summary_schema = schema["components"]["schemas"]["PublicationSummary"]["properties"]
+            assert summary_schema["channel_name"]["maxLength"] == 100
+            assert summary_schema["provider"]["maxLength"] == 64
             for route in ["posts", "publications"]:
                 status, raw = response(f"/{route}?limit=1&view=summary")
                 value = json.loads(raw)
@@ -309,7 +345,7 @@ def run():
             call(f"/brands/{brand}", {"archived": True}, method="PATCH")
             assert [p["id"] for p in call(path, body)] == [p["id"] for p in result["publications"]]
             call(f"/posts/{different['id']}/schedule", {"version": 1, "channel_ids": [channels[0]], "scheduled_at": timestamp(), "request_id": str(uuid.uuid4())}, expected=409)
-            print("PASS prompt repeated same-key retries preserve pool capacity and all scheduling recovery invariants")
+            print("PASS bounded summary names, repeated same-key retries and scheduling recovery invariants")
         finally:
             if locker is not None:
                 locker.stdin.write("ROLLBACK;\n\\q\n")

@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 const SELECT: &str = "SELECT (to_jsonb(p)-'lease_until')||jsonb_build_object('channel_name',c.name,'provider',c.provider) FROM publications p JOIN channels c ON c.id=p.channel_id";
-const SUMMARY: &str = "jsonb_build_object('id',p.id,'post_id',p.post_id,'brand_id',p.brand_id,'channel_id',p.channel_id,'channel_name',c.name,'provider',c.provider,'post_version',p.post_version,'scheduled_at',p.scheduled_at,'scheduling_mode',p.scheduling_mode,'state',p.state,'created_at',p.created_at,'updated_at',p.updated_at)";
+const SUMMARY: &str = "jsonb_build_object('id',p.id,'post_id',p.post_id,'brand_id',p.brand_id,'channel_id',p.channel_id,'channel_name',left(c.name,100),'provider',left(c.provider,64),'post_version',p.post_version,'scheduled_at',p.scheduled_at,'scheduling_mode',p.scheduling_mode,'state',p.state,'created_at',p.created_at,'updated_at',p.updated_at)";
 #[derive(Deserialize, Default)]
 pub struct PublicationListFilter {
     brand_id: Option<Uuid>,
