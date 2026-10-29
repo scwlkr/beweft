@@ -1,7 +1,14 @@
 # beweft project notes
 
-Status: project bootstrap only. The app, REA investigation, social connections,
-hosting, and publishing have not started here.
+Status: full implementation in progress. Research and architecture decisions are
+in `docs/research/` and `docs/architecture.md`. REA is installed for local Codex;
+authorized passive Buffer investigation has begun. Provider implementation and
+fixture verification do not establish live account access or publication.
+
+Owner decisions: unicorn mascot and feel; self-host deployment uses placeholders
+until a server/domain is selected. No production deployment target is approved.
+Existing Chrome remote debugging was enabled with explicit permanent approval.
+Repository: https://github.com/scwlkr/beweft (already public; admin access verified).
 
 The [build brief](HANDOFF.md) describes the intended product. A local private
 handoff, when present, contains the owner's complete request for a build chat.
