@@ -208,7 +208,14 @@ test("Google composer and exact-ID recovery work with the real API", async () =>
       checkpoint_id: newerCheckpointId,
       retry_allowed: true,
     });
+    const retried = page.waitForResponse(
+      (result) =>
+        result.url().endsWith(`/publications/${publication.id}/retry`) &&
+        result.request().method() === "POST",
+    );
     await dialog.getByRole("button", { name: "Retry publication" }).click();
+    expect((await retried).ok()).toBe(true);
+    await expect(dialog).toHaveCount(0);
     const updated = await context.request.get(
       `/api/v1/publications?brand_id=${brand.id}`,
     );
