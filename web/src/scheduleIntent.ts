@@ -56,6 +56,9 @@ export const ScheduleIntent = z
       .record(z.string(), z.number().int().positive().safe())
       .optional(),
     request_contract: z.enum(["request-id-v1", "request-id-v2"]).optional(),
+    // Local preference observed when the request was created. It is not part
+    // of the server request, but fences a later correction against other tabs.
+    correction_baseline: z.string().max(4096).nullable().optional(),
     uncertain: z.boolean(),
     rejection: z.string().optional(),
     rejection_code: z.string().optional(),
@@ -149,6 +152,159 @@ export const ScheduleIntent = z
     }
   });
 export type ScheduleIntent = z.infer<typeof ScheduleIntent>;
+
+const ScheduleCorrection = z
+  .object({
+    revision: z.string().uuid(),
+    owner_id: z.string().uuid(),
+    brand_id: z.string().uuid(),
+    post_id: z.string().uuid(),
+    mode: z.enum(["queue", "exact"]),
+    scheduled_at: z.string().nullable(),
+  })
+  .strict()
+  .refine((value) =>
+    value.mode === "queue"
+      ? value.scheduled_at === null
+      : !!value.scheduled_at && !!canonicalScheduleTime(value.scheduled_at),
+  );
+export type ScheduleCorrection = z.infer<typeof ScheduleCorrection>;
+export type CorrectionSnapshot = {
+  key: string;
+  raw: string | null;
+  value: ScheduleCorrection | null;
+  corrupt: boolean;
+};
+export const correctionEvent = "beweft-schedule-correction";
+export class ScheduleCorrectionConflict extends Error {
+  constructor() {
+    super(
+      "The saved scheduling time changed in another tab. Review both choices before continuing.",
+    );
+  }
+}
+export function readScheduleCorrection(
+  owner: string,
+  brand: string,
+  post: string,
+): CorrectionSnapshot {
+  const key = `beweft.schedule-correction:${owner}:${brand}:${post}`;
+  const raw = localStorage.getItem(key);
+  if (raw === null) return { key, raw, value: null, corrupt: false };
+  try {
+    const value = ScheduleCorrection.parse(JSON.parse(raw));
+    if (
+      value.owner_id !== owner ||
+      value.brand_id !== brand ||
+      value.post_id !== post
+    )
+      throw new Error("Different scheduling scope");
+    return { key, raw, value, corrupt: false };
+  } catch {
+    return { key, raw, value: null, corrupt: true };
+  }
+}
+export function assertScheduleCorrection(snapshot: CorrectionSnapshot) {
+  if (localStorage.getItem(snapshot.key) !== snapshot.raw)
+    throw new Error(
+      "The saved scheduling time changed in another tab. Reopen this draft to review it.",
+    );
+}
+export function removeScheduleCorrection(
+  snapshot: CorrectionSnapshot,
+  session: ApiSession,
+  signal?: AbortSignal,
+  pendingKey?: string,
+) {
+  return withWorkspaceSession(
+    session,
+    () => {
+      if (pendingKey && readScheduleIntent(pendingKey))
+        throw new Error(
+          "Another tab has an unfinished schedule. Review it before changing the saved time.",
+        );
+      assertScheduleCorrection(snapshot);
+      if (snapshot.raw !== null) {
+        localStorage.removeItem(snapshot.key);
+        if (localStorage.getItem(snapshot.key) !== null)
+          throw new Error("The saved scheduling time could not be updated.");
+        window.dispatchEvent(new Event(correctionEvent));
+      }
+    },
+    signal,
+  );
+}
+function persistCorrection(intent: ScheduleIntent, key: string) {
+  const preference: ScheduleCorrection = {
+    revision: crypto.randomUUID(),
+    owner_id: intent.owner_id!,
+    brand_id: intent.brand_id!,
+    post_id: intent.post.id,
+    mode: intent.mode,
+    scheduled_at: intent.scheduled_at ?? null,
+  };
+  const raw = JSON.stringify(preference);
+  localStorage.setItem(key, raw);
+  if (localStorage.getItem(key) !== raw)
+    throw new Error(
+      "The scheduling time could not be saved in browser storage.",
+    );
+  window.dispatchEvent(new Event(correctionEvent));
+  return { key, raw, value: preference, corrupt: false };
+}
+function saveCorrectionForRejectedIntent(intent: ScheduleIntent) {
+  if (!intent.owner_id || !intent.brand_id)
+    throw new Error("The saved schedule has no verified owner or brand.");
+  const existing = readScheduleCorrection(
+    intent.owner_id,
+    intent.brand_id,
+    intent.post.id,
+  );
+  const sameChoice =
+    existing.value?.mode === intent.mode &&
+    existing.value.scheduled_at === (intent.scheduled_at ?? null);
+  if (
+    existing.corrupt ||
+    (existing.raw !== (intent.correction_baseline ?? null) && !sameChoice)
+  )
+    throw new ScheduleCorrectionConflict();
+  return persistCorrection(intent, existing.key);
+}
+// This only changes the local preference after an explicit choice. The
+// unresolved request remains intact and must still be checked or stopped.
+export function chooseOriginalCorrection(
+  pendingKey: string,
+  intent: ScheduleIntent,
+  snapshot: CorrectionSnapshot,
+  session: ApiSession,
+  signal?: AbortSignal,
+) {
+  return withWorkspaceSession(
+    session,
+    () => {
+      const saved = readScheduleIntent(pendingKey);
+      if (
+        !saved ||
+        !sameScheduleIntent(saved, intent) ||
+        scheduleHasConflict(saved)
+      )
+        throw new Error(
+          "The saved schedule changed. Reopen it before continuing.",
+        );
+      if (!saved.owner_id || !saved.brand_id)
+        throw new Error("The saved schedule has no verified owner or brand.");
+      const current = readScheduleCorrection(
+        saved.owner_id,
+        saved.brand_id,
+        saved.post.id,
+      );
+      if (current.key !== snapshot.key || current.raw !== snapshot.raw)
+        throw new ScheduleCorrectionConflict();
+      return persistCorrection(saved, current.key);
+    },
+    signal,
+  );
+}
 export const PublicationSummary = z.object({
   id: z.string().uuid(),
   post_id: z.string().uuid(),
@@ -245,12 +401,17 @@ export function clearScheduleIntent(
           "The original scheduling outcome does not match the saved record. Keep it for review.",
         );
       }
+      const correction =
+        confirmed.kind === "rejected"
+          ? saveCorrectionForRejectedIntent(saved)
+          : null;
       localStorage.removeItem(key);
       if (readScheduleIntent(key))
         throw new Error(
           "The confirmed schedule could not be cleared from browser storage.",
         );
       window.dispatchEvent(new Event(scheduleEvent));
+      return correction;
     },
     signal,
   );
@@ -293,6 +454,7 @@ export function makeScheduleIntent(
   date: string,
   mediaVersions: Record<string, number>,
   preservedExact?: string | null,
+  correctionBaseline: string | null = null,
 ): ScheduleIntent {
   return ScheduleIntent.parse({
     id: crypto.randomUUID(),
@@ -302,6 +464,7 @@ export function makeScheduleIntent(
     channel_ids: [...new Set(channelIds)].sort(),
     mode,
     request_contract: "request-id-v2",
+    correction_baseline: correctionBaseline,
     uncertain: false,
     scheduled_at:
       mode === "exact"
@@ -356,6 +519,7 @@ export function sameScheduleIntent(a: ScheduleIntent, b: ScheduleIntent) {
     a.owner_id === b.owner_id &&
     a.brand_id === b.brand_id &&
     a.request_contract === b.request_contract &&
+    a.correction_baseline === b.correction_baseline &&
     sameMediaVersions(a.media_versions, b.media_versions) &&
     a.mode === b.mode &&
     (a.scheduled_at ? canonicalScheduleTime(a.scheduled_at) : null) ===
@@ -668,6 +832,20 @@ export async function sendScheduleIntent(
           409,
           "schedule_request_conflict",
         );
+      if (!retry) {
+        const correction = readScheduleCorrection(
+          intent.owner_id!,
+          intent.brand_id!,
+          intent.post.id,
+        );
+        if (
+          correction.corrupt ||
+          correction.raw !== (intent.correction_baseline ?? null)
+        )
+          throw new Error(
+            "The saved scheduling time changed in another tab. Reopen this draft to review it.",
+          );
+      }
       const priorIntent = saved ?? intent;
       persistScheduleIntent(key, {
         ...priorIntent,

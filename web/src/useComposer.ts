@@ -5,6 +5,7 @@ import {
   captureWorkspaceSession,
   isCurrentWorkspaceSession,
   requireWorkspaceSession,
+  withWorkspaceSession,
   PostSchema,
   MediaSchema,
   type ApiSession,
@@ -20,18 +21,24 @@ import type {
 import { localDateTime } from "./components/shared";
 import {
   clearScheduleIntent,
+  assertScheduleCorrection,
+  chooseOriginalCorrection,
   effectiveMediaIds,
   inspectScheduleIntent,
   makeScheduleIntent,
   markScheduleMismatch,
   readScheduleIntent,
+  readScheduleCorrection,
+  removeScheduleCorrection,
   requireSavedSchedule,
   retireScheduleIntent,
   sameScheduleIntent,
   scheduleHasConflict,
   scheduleLock,
   sendScheduleIntent,
+  ScheduleCorrectionConflict,
   type PublicationSummary,
+  type CorrectionSnapshot,
   type ScheduleIntent,
 } from "./scheduleIntent";
 import type { usePendingSchedule } from "./usePendingSchedule";
@@ -129,15 +136,22 @@ export function useComposer({
     if (requestedTab !== tab) setTab(tab);
   }, [requestedTab, tab]);
   const [mediaOpen, setMediaOpen] = useState(false);
-  const [mode, setMode] = useState<"draft" | "queue" | "exact">(
+  const [mode, setModeValue] = useState<"draft" | "queue" | "exact">(
     initialDate ? "exact" : "draft",
   );
   const [date, setDateValue] = useState(initialDate ?? localDateTime());
   const [preservedExact, setPreservedExact] = useState<string | null>(null);
-  const setDate = (value: string) => {
-    setDateValue(value);
-    setPreservedExact(null);
-  };
+  const [correction, setCorrection] = useState<
+    | { kind: "loading" }
+    | { kind: "error"; message: string }
+    | { kind: "ready" | "corrupt"; snapshot: CorrectionSnapshot | null }
+  >({ kind: "loading" });
+  const [correctionBusy, setCorrectionBusy] = useState(false);
+  const [correctionConflict, setCorrectionConflict] =
+    useState<CorrectionSnapshot | null>(null);
+  const [correctionRetry, setCorrectionRetry] = useState(0);
+  const editedChoice = useRef(false);
+  const editingChoice = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [recovery, setRecovery] = useState<
@@ -151,6 +165,166 @@ export function useComposer({
   >("unchecked");
   const [recoveryMessage, setRecoveryMessage] = useState("");
   const intent = pendingSchedule.intent;
+  useEffect(() => {
+    if (!pendingSchedule.ready) {
+      setCorrection({ kind: "loading" });
+      return;
+    }
+    try {
+      const session = captureWorkspaceSession();
+      requireWorkspaceSession(session);
+      const snapshot = post?.id
+        ? readScheduleCorrection(pendingSchedule.owner, brand.id, post.id)
+        : null;
+      setCorrection({
+        kind: snapshot?.corrupt ? "corrupt" : "ready",
+        snapshot,
+      });
+      if (!intent && !editedChoice.current && snapshot?.value) {
+        setModeValue(snapshot.value.mode);
+        setPreservedExact(snapshot.value.scheduled_at);
+        if (snapshot.value.scheduled_at)
+          setDateValue(localDateTime(snapshot.value.scheduled_at, true));
+      }
+    } catch {
+      setCorrection({
+        kind: "error",
+        message:
+          "The saved scheduling time could not be read. Check browser storage and try again.",
+      });
+    }
+    // A pending request supplies its own immutable scheduling choice.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    pendingSchedule.ready,
+    pendingSchedule.owner,
+    brand.id,
+    post?.id,
+    correctionRetry,
+  ]);
+  const editChoice = async (
+    next: { mode: "draft" | "queue" | "exact" } | { date: string },
+  ) => {
+    if (
+      editingChoice.current ||
+      correction.kind === "loading" ||
+      correction.kind === "error"
+    )
+      return;
+    if (
+      correction.kind === "corrupt" &&
+      "mode" in next &&
+      next.mode !== "queue"
+    ) {
+      editedChoice.current = true;
+      setModeValue(next.mode);
+      setPreservedExact(null);
+      return;
+    }
+    let session: ApiSession;
+    try {
+      session = captureWorkspaceSession();
+    } catch {
+      return;
+    }
+    const signal = lifetime.current?.signal;
+    editingChoice.current = true;
+    setCorrectionBusy(true);
+    try {
+      if (correction.snapshot?.raw !== null && correction.snapshot)
+        await removeScheduleCorrection(
+          correction.snapshot,
+          session,
+          signal,
+          pendingSchedule.key,
+        );
+      else if (correction.snapshot) {
+        requireWorkspaceSession(session);
+        assertScheduleCorrection(correction.snapshot);
+      }
+      if (!active(session, signal)) return;
+      editedChoice.current = true;
+      setCorrection({
+        kind: "ready",
+        snapshot: correction.snapshot
+          ? { ...correction.snapshot, raw: null, value: null, corrupt: false }
+          : null,
+      });
+      if ("mode" in next) setModeValue(next.mode);
+      else setDateValue(next.date);
+      setPreservedExact(null);
+    } catch (failure) {
+      if (mounted.current && isCurrentWorkspaceSession(session))
+        setError(
+          failure instanceof Error
+            ? failure.message
+            : "Unable to update the scheduling time.",
+        );
+    } finally {
+      editingChoice.current = false;
+      if (mounted.current && isCurrentWorkspaceSession(session))
+        setCorrectionBusy(false);
+    }
+  };
+  const setMode = (value: "draft" | "queue" | "exact") => {
+    if (value !== mode) void editChoice({ mode: value });
+  };
+  const setDate = (value: string) => void editChoice({ date: value });
+  const rememberCorrectionConflict = (
+    failure: unknown,
+    saved: ScheduleIntent,
+  ) => {
+    if (!(failure instanceof ScheduleCorrectionConflict)) return;
+    try {
+      requireWorkspaceSession(captureWorkspaceSession());
+      setCorrectionConflict(
+        readScheduleCorrection(pendingSchedule.owner, brand.id, saved.post.id),
+      );
+    } catch {
+      // The original request remains stored; storage can be checked again.
+    }
+  };
+  const chooseOriginalTime = async () => {
+    if (!intent || !correctionConflict || running.current || intentChanged)
+      return;
+    let session: ApiSession;
+    try {
+      session = captureWorkspaceSession();
+    } catch {
+      return;
+    }
+    const signal = lifetime.current?.signal;
+    running.current = true;
+    setBusy(true);
+    try {
+      const snapshot = await chooseOriginalCorrection(
+        pendingSchedule.key,
+        intent,
+        correctionConflict,
+        session,
+        signal,
+      );
+      if (!active(session, signal)) return;
+      setCorrection({ kind: "ready", snapshot });
+      setCorrectionConflict(null);
+      setError("");
+      setRecoveryMessage(
+        "The original time is saved. Check or stop the original schedule again.",
+      );
+    } catch (failure) {
+      if (mounted.current && isCurrentWorkspaceSession(session)) {
+        rememberCorrectionConflict(failure, intent);
+        setError(
+          failure instanceof Error
+            ? failure.message
+            : "Unable to save the original time.",
+        );
+      }
+    } finally {
+      running.current = false;
+      if (mounted.current && isCurrentWorkspaceSession(session)) setBusy(false);
+    }
+  };
   const openedIntent = useRef<ScheduleIntent | null>(null);
   if (!intent) openedIntent.current = null;
   else if (!openedIntent.current || openedIntent.current.id !== intent.id)
@@ -193,7 +367,7 @@ export function useComposer({
         saved.variants.map((v) => [v.channel_id, v.options ?? {}]),
       ),
     );
-    setMode(intent.mode);
+    setModeValue(intent.mode);
     if (intent.scheduled_at) {
       setDateValue(localDateTime(intent.scheduled_at, true));
       setPreservedExact(intent.scheduled_at);
@@ -346,7 +520,7 @@ export function useComposer({
     if (!active(lockedSession, signal)) return;
     await onSaved();
     if (!active(lockedSession, signal)) return;
-    await clearScheduleIntent(
+    const snapshot = await clearScheduleIntent(
       pendingSchedule.key,
       saved,
       { kind: "rejected" },
@@ -354,6 +528,7 @@ export function useComposer({
       signal,
     );
     if (!active(lockedSession, signal)) return;
+    setCorrection({ kind: "ready", snapshot });
     if (draftMissing) setPost(null);
     setRecovery("unchecked");
     setRecoveryMessage("");
@@ -495,6 +670,7 @@ export function useComposer({
         lifetime.current?.signal === signal &&
         isCurrentWorkspaceSession(session)
       ) {
+        rememberCorrectionConflict(e, intent);
         if (e instanceof ApiError && e.code === "schedule_request_conflict") {
           setRecovery("mismatch");
           setRecoveryMessage(
@@ -603,6 +779,7 @@ export function useComposer({
         lifetime.current?.signal === signal &&
         isCurrentWorkspaceSession(session)
       ) {
+        rememberCorrectionConflict(e, intent);
         if (e instanceof ApiError && e.code === "schedule_request_conflict") {
           await markScheduleMismatch(
             pendingSchedule.key,
@@ -641,7 +818,9 @@ export function useComposer({
       !pendingSchedule.ready ||
       intent ||
       recovery === "complete" ||
-      scheduleBlocked
+      scheduleBlocked ||
+      correctionBusy ||
+      (mode !== "draft" && correction.kind !== "ready")
     )
       return;
     if (
@@ -731,6 +910,16 @@ export function useComposer({
             throw new Error(
               "Another tab has an unfinished schedule. Review that original schedule before saving a post.",
             );
+          if (
+            mode !== "draft" &&
+            correction.kind === "ready" &&
+            correction.snapshot
+          )
+            await withWorkspaceSession(
+              lockedSession,
+              () => assertScheduleCorrection(correction.snapshot!),
+              signal,
+            );
           const snapshots = scheduledMediaIds.map(
             (id) => media.find((item) => item.id === id)!,
           );
@@ -797,6 +986,9 @@ export function useComposer({
               date,
               mediaVersions,
               preservedExact,
+              correction.kind === "ready"
+                ? (correction.snapshot?.raw ?? null)
+                : null,
             );
             const rows = await sendScheduleIntent(
               pendingSchedule.key,
@@ -880,6 +1072,11 @@ export function useComposer({
     date,
     setDate,
     preservedExact,
+    correction,
+    correctionBusy,
+    correctionConflict,
+    chooseOriginalTime,
+    retryCorrection: () => setCorrectionRetry((value) => value + 1),
     busy,
     error,
     intent,

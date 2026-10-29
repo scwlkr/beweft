@@ -1393,6 +1393,13 @@ test("an exact saved timestamp retains seconds, microseconds and offset after re
     await page.getByRole("button", { name: "Stop original schedule" }).click();
     await expect(page.getByText(/original schedule was stopped/)).toBeVisible();
     await expect(page.getByText(`Exact saved time: ${exact}`)).toBeVisible();
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.reload();
+    await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+    await expect(page.getByLabel("When should this go out?")).toHaveValue(
+      "exact",
+    );
+    await expect(page.getByText(`Exact saved time: ${exact}`)).toBeVisible();
     await page
       .getByLabel("Working title")
       .fill("Corrected without changing the time");
@@ -1400,6 +1407,8 @@ test("an exact saved timestamp retains seconds, microseconds and offset after re
     await expect(page.getByRole("dialog")).toHaveCount(0);
     expect(requests).toHaveLength(2);
     expect(requests[1].scheduled_at).toBe(exact);
+    expect(requests[1].request_id).not.toBe(requests[0].request_id);
+    expect(requests[1].version).toBe(requests[0].version + 1);
     expect(requests[1].media_versions).toEqual({ [f.media!.id]: 2 });
     const receipt = await read(
       context,
@@ -1409,6 +1418,265 @@ test("an exact saved timestamp retains seconds, microseconds and offset after re
     expect(
       await read(context, `/publications?brand_id=${f.brand.id}&view=summary`),
     ).toHaveLength(1);
+  });
+});
+
+test("a retired queue choice survives reload and a deliberate mode and time edit replaces it", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    const key = `beweft.schedule-correction:${f.owner.id}:${f.brand.id}:${f.post.id}`;
+    const requests: any[] = [];
+    await page.route(routeFor(f.post.id), (route) => {
+      requests.push(route.request().postDataJSON());
+      return requests.length === 1 ? route.abort("failed") : route.continue();
+    });
+    await page.goto("/#drafts");
+    await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+    await page.getByLabel("When should this go out?").selectOption("queue");
+    await page.getByRole("button", { name: "Add to queue" }).click();
+    await page.getByRole("button", { name: "Stop original schedule" }).click();
+    await expect(page.getByText(/original schedule was stopped/)).toBeVisible();
+    expect(
+      JSON.parse((await page.evaluate((k) => localStorage.getItem(k), key))!),
+    ).toMatchObject({ mode: "queue", scheduled_at: null });
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.reload();
+    await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+    await expect(page.getByLabel("When should this go out?")).toHaveValue(
+      "queue",
+    );
+    await page.getByLabel("When should this go out?").selectOption("exact");
+    const chosen = localTime(4 * 86400_000);
+    await page.getByLabel(/Date and time/).fill(chosen);
+    expect(await page.evaluate((k) => localStorage.getItem(k), key)).toBeNull();
+    await page.getByRole("button", { name: "Schedule post" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(requests[1].request_id).not.toBe(requests[0].request_id);
+    expect(requests[1].scheduled_at).toBe(new Date(chosen).toISOString());
+    expect(
+      await read(context, `/publications?brand_id=${f.brand.id}&view=summary`),
+    ).toHaveLength(1);
+  });
+});
+
+test("deliberately editing a restored exact time uses the new time", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    const key = `beweft.schedule-correction:${f.owner.id}:${f.brand.id}:${f.post.id}`;
+    const exact = new Date(Date.now() + 8 * 86400_000).toISOString();
+    await page.goto("/#drafts");
+    await page.evaluate(
+      ({ key, f, exact }) => {
+        localStorage.setItem(
+          key,
+          JSON.stringify({
+            revision: crypto.randomUUID(),
+            owner_id: f.owner.id,
+            brand_id: f.brand.id,
+            post_id: f.post.id,
+            mode: "exact",
+            scheduled_at: exact,
+          }),
+        );
+      },
+      { key, f: { owner: f.owner, brand: f.brand, post: f.post }, exact },
+    );
+    let request: any;
+    await page.route(routeFor(f.post.id), (route) => {
+      request = route.request().postDataJSON();
+      return route.continue();
+    });
+    await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+    await expect(page.getByText(`Exact saved time: ${exact}`)).toBeVisible();
+    const changed = localTime(3 * 86400_000);
+    await page.getByLabel(/Date and time/).fill(changed);
+    expect(
+      await page.evaluate((key) => localStorage.getItem(key), key),
+    ).toBeNull();
+    await expect(page.getByText(`Exact saved time: ${exact}`)).toHaveCount(0);
+    await page.getByRole("button", { name: "Schedule post" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(request.scheduled_at).toBe(new Date(changed).toISOString());
+  });
+});
+
+test("a correction storage failure retains the rejected request until the time is saved", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    const key = `beweft.schedule-correction:${f.owner.id}:${f.brand.id}:${f.post.id}`;
+    await page.route(routeFor(f.post.id), (route) => route.abort("failed"));
+    await start(page);
+    await expect(
+      page.getByRole("button", { name: "Stop original schedule" }),
+    ).toBeEnabled();
+    const before = await pending(page, f.key);
+    await page.evaluate((key) => {
+      const set = Storage.prototype.setItem;
+      (window as any).restoreCorrectionStorage = () => {
+        Storage.prototype.setItem = set;
+      };
+      Storage.prototype.setItem = function (item, value) {
+        if (item === key) throw new Error("Correction storage unavailable");
+        return set.call(this, item, value);
+      };
+    }, key);
+    await page.getByRole("button", { name: "Stop original schedule" }).click();
+    await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+      "Correction storage unavailable",
+    );
+    expect((await pending(page, f.key)).id).toBe(before.id);
+    expect(await page.evaluate((k) => localStorage.getItem(k), key)).toBeNull();
+    await page.evaluate(() => (window as any).restoreCorrectionStorage());
+    await page
+      .getByRole("button", { name: "Check scheduling outcome" })
+      .click();
+    await expect(page.getByText(/original schedule was stopped/)).toBeVisible();
+    expect(await pending(page, f.key)).toBeNull();
+    expect(
+      JSON.parse((await page.evaluate((k) => localStorage.getItem(k), key))!)
+        .scheduled_at,
+    ).toBe(before.scheduled_at);
+  });
+});
+
+test("a damaged preference during retirement requires explicit review before recovery", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    const key = `beweft.schedule-correction:${f.owner.id}:${f.brand.id}:${f.post.id}`;
+    await page.route(routeFor(f.post.id), (route) => route.abort("failed"));
+    await start(page);
+    await expect(
+      page.getByRole("button", { name: "Stop original schedule" }),
+    ).toBeEnabled();
+    const saved = await pending(page, f.key);
+    await page.evaluate((key) => localStorage.setItem(key, "{damaged"), key);
+    await page.getByRole("button", { name: "Stop original schedule" }).click();
+    await expect(
+      page.getByText("Other saved choice: unreadable."),
+    ).toBeVisible();
+    expect(await page.evaluate((key) => localStorage.getItem(key), key)).toBe(
+      "{damaged",
+    );
+    expect((await pending(page, f.key)).id).toBe(saved.id);
+    await page
+      .getByRole("button", { name: "Use original scheduling choice" })
+      .click();
+    await page.getByRole("button", { name: "Stop original schedule" }).click();
+    await expect(page.getByText(/original schedule was stopped/)).toBeVisible();
+    expect(await pending(page, f.key)).toBeNull();
+    expect(
+      JSON.parse(
+        (await page.evaluate((key) => localStorage.getItem(key), key))!,
+      ).scheduled_at,
+    ).toBe(saved.scheduled_at);
+  });
+});
+
+test("a corrupt saved choice requires an explicit time review and leaves foreign choices alone", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    const key = `beweft.schedule-correction:${f.owner.id}:${f.brand.id}:${f.post.id}`;
+    const foreign = `beweft.schedule-correction:${crypto.randomUUID()}:${f.brand.id}:${f.post.id}`;
+    const otherBrand = `beweft.schedule-correction:${f.owner.id}:${crypto.randomUUID()}:${f.post.id}`;
+    await page.goto("/#drafts");
+    await page.evaluate(
+      ({ key, foreign, otherBrand }) => {
+        localStorage.setItem(key, "{damaged");
+        localStorage.setItem(foreign, "foreign choice");
+        localStorage.setItem(otherBrand, "other brand choice");
+      },
+      { key, foreign, otherBrand },
+    );
+    await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+    await expect(
+      page.getByText(/saved scheduling time could not be understood/),
+    ).toBeVisible();
+    await page.getByLabel("When should this go out?").selectOption("exact");
+    await expect(
+      page.getByRole("button", { name: "Schedule post" }),
+    ).toBeDisabled();
+    const chosen = localTime(5 * 86400_000);
+    await page.getByLabel(/Date and time/).fill(chosen);
+    await expect(
+      page.getByRole("button", { name: "Schedule post" }),
+    ).toBeEnabled();
+    expect(await page.evaluate((k) => localStorage.getItem(k), key)).toBeNull();
+    expect(await page.evaluate((k) => localStorage.getItem(k), foreign)).toBe(
+      "foreign choice",
+    );
+    expect(
+      await page.evaluate((k) => localStorage.getItem(k), otherBrand),
+    ).toBe("other brand choice");
+    await page.getByRole("button", { name: "Schedule post" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  });
+});
+
+test("a saved choice with the wrong scope requires an explicit queue choice", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    const key = `beweft.schedule-correction:${f.owner.id}:${f.brand.id}:${f.post.id}`;
+    await page.goto("/#drafts");
+    await page.evaluate(
+      ({ key, f }) => {
+        localStorage.setItem(
+          key,
+          JSON.stringify({
+            revision: crypto.randomUUID(),
+            owner_id: f.owner.id,
+            brand_id: crypto.randomUUID(),
+            post_id: f.post.id,
+            mode: "queue",
+            scheduled_at: null,
+          }),
+        );
+      },
+      { key, f: { owner: f.owner, post: f.post } },
+    );
+    await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+    await expect(
+      page.getByText(/saved scheduling time could not be understood/),
+    ).toBeVisible();
+    await expect(page.getByLabel("When should this go out?")).toHaveValue(
+      "draft",
+    );
+    await page.getByLabel("When should this go out?").selectOption("queue");
+    expect(
+      await page.evaluate((key) => localStorage.getItem(key), key),
+    ).toBeNull();
+    await expect(
+      page.getByRole("button", { name: "Add to queue" }),
+    ).toBeEnabled();
+  });
+});
+
+test("unreadable saved-time storage blocks scheduling until it can be checked", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    const key = `beweft.schedule-correction:${f.owner.id}:${f.brand.id}:${f.post.id}`;
+    await page.goto("/#drafts");
+    await page.evaluate((key) => {
+      const get = Storage.prototype.getItem;
+      (window as any).restoreCorrectionRead = () => {
+        Storage.prototype.getItem = get;
+      };
+      Storage.prototype.getItem = function (item) {
+        if (item === key) throw new Error("Correction storage unavailable");
+        return get.call(this, item);
+      };
+    }, key);
+    await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+    await expect(
+      page.getByText(/saved scheduling time could not be read/),
+    ).toBeVisible();
+    await expect(page.getByLabel("When should this go out?")).toBeDisabled();
+    await page.evaluate(() => (window as any).restoreCorrectionRead());
+    await page.getByRole("button", { name: "Check saved time again" }).click();
+    await expect(page.getByLabel("When should this go out?")).toBeEnabled();
+    await page.getByLabel("When should this go out?").selectOption("exact");
+    await page.getByLabel(/Date and time/).fill(localTime(7 * 86400_000));
+    await page.getByRole("button", { name: "Schedule post" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
   });
 });
 

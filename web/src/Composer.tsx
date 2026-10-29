@@ -62,6 +62,11 @@ export function Composer({
     date,
     setDate,
     preservedExact,
+    correction,
+    correctionBusy,
+    correctionConflict,
+    chooseOriginalTime,
+    retryCorrection,
     busy,
     error,
     intent,
@@ -323,6 +328,11 @@ export function Composer({
               <select
                 value={mode}
                 onChange={(e) => setMode(e.target.value as typeof mode)}
+                disabled={
+                  correctionBusy ||
+                  correction.kind === "loading" ||
+                  correction.kind === "error"
+                }
               >
                 <option value="draft">Save as draft</option>
                 <option value="queue">Next available queue slot</option>
@@ -337,6 +347,11 @@ export function Composer({
                   type="datetime-local"
                   value={date}
                   onChange={(e) => setDate(e.target.value)}
+                  disabled={
+                    correctionBusy ||
+                    correction.kind === "loading" ||
+                    correction.kind === "error"
+                  }
                   step="0.001"
                   required
                 />
@@ -352,6 +367,17 @@ export function Composer({
               </p>
             )}
           </div>
+          {correction.kind === "corrupt" && (
+            <ErrorNotice message="The saved scheduling time could not be understood. Choose the queue or enter a date and time to review it before scheduling." />
+          )}
+          {correction.kind === "error" && (
+            <div role="status">
+              <p>{correction.message}</p>
+              <Button variant="secondary" onClick={retryCorrection}>
+                Check saved time again
+              </Button>
+            </div>
+          )}
           {mode !== "draft" && !pendingMedia.ready && (
             <div role="status" className="quiet-note">
               <p>
@@ -411,6 +437,36 @@ export function Composer({
         <ErrorNotice
           message={`Schedule recovery is unavailable: ${pendingSchedule.error}`}
         />
+      )}
+      {intent && correctionConflict && (
+        <div className="notice" role="status">
+          <div>
+            <strong>Review the saved scheduling choice</strong>
+            <p>
+              Original request:{" "}
+              {intent.mode === "queue"
+                ? "next available queue slot"
+                : intent.scheduled_at}
+              .
+            </p>
+            <p>
+              Other saved choice:{" "}
+              {correctionConflict.corrupt
+                ? "unreadable"
+                : correctionConflict.value?.mode === "queue"
+                  ? "next available queue slot"
+                  : (correctionConflict.value?.scheduled_at ?? "none")}
+              .
+            </p>
+            <Button
+              variant="secondary"
+              disabled={busy || intentChanged}
+              onClick={() => void chooseOriginalTime()}
+            >
+              Use original scheduling choice
+            </Button>
+          </div>
+        </div>
       )}
       {(intent || recovery === "complete") && (
         <div className="notice" role="status">
@@ -477,7 +533,13 @@ export function Composer({
           recovery !== "complete" && (
             <Button
               onClick={submit}
-              disabled={busy || !pendingSchedule.ready || scheduleBlocked}
+              disabled={
+                busy ||
+                !pendingSchedule.ready ||
+                scheduleBlocked ||
+                correctionBusy ||
+                (mode !== "draft" && correction.kind !== "ready")
+              }
             >
               {mode === "draft" ? <Save size={17} /> : <Send size={17} />}{" "}
               {busy

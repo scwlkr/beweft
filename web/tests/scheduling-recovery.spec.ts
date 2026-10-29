@@ -1028,6 +1028,7 @@ test("a held retirement receipt cannot clear a changed same-ID snapshot", async 
     const owner = (await (await context.request.get("/api/v1/auth/me")).json())
       .data;
     const key = `beweft.pending-schedule:${owner.id}:${f.brand.id}`;
+    const correctionKey = `beweft.schedule-correction:${owner.id}:${f.brand.id}:${f.post.id}`;
     const held = deferred(),
       release = deferred();
     let sent: any;
@@ -1078,7 +1079,322 @@ test("a held retirement receipt cannot clear a changed same-ID snapshot", async 
           key,
         ),
       ).toEqual(updated);
+      expect(
+        await other.evaluate((key) => localStorage.getItem(key), correctionKey),
+      ).toBeNull();
       expect(await summaries(context, f.brand.id)).toEqual([]);
+    } finally {
+      release.resolve();
+      await other.close();
+    }
+  });
+});
+
+test("a stale retirement cannot overwrite another tab's newer scheduling choice", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    const owner = (await (await context.request.get("/api/v1/auth/me")).json())
+      .data;
+    const pendingKey = `beweft.pending-schedule:${owner.id}:${f.brand.id}`;
+    const correctionKey = `beweft.schedule-correction:${owner.id}:${f.brand.id}:${f.post.id}`;
+    const held = deferred(),
+      release = deferred();
+    let sent: any;
+    await page.route(
+      /\/api\/v1\/posts\/[^/]+\/schedule\?view=summary$/,
+      (route) => {
+        sent = route.request().postDataJSON();
+        return route.abort("failed");
+      },
+    );
+    await page.route("**/api/v1/schedule-requests/*/retire", async (route) => {
+      held.resolve();
+      await release.promise;
+      await route
+        .fulfill({
+          json: {
+            data: {
+              ...receipt(f, sent, []),
+              outcome: "rejected",
+              error: { code: "schedule_request_retired", message: "Stopped" },
+            },
+          },
+        })
+        .catch(() => {});
+    });
+    const other = await context.newPage();
+    try {
+      await other.goto("/#drafts");
+      await startSchedule(page);
+      await page
+        .getByRole("button", { name: "Stop original schedule" })
+        .click();
+      await held.promise;
+      const newer = {
+        revision: crypto.randomUUID(),
+        owner_id: owner.id,
+        brand_id: f.brand.id,
+        post_id: f.post.id,
+        mode: "queue",
+        scheduled_at: null,
+      };
+      await other.evaluate(
+        ({ key, value }) => localStorage.setItem(key, JSON.stringify(value)),
+        { key: correctionKey, value: newer },
+      );
+      release.resolve();
+      await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+        "saved scheduling time changed in another tab",
+      );
+      expect(
+        JSON.parse(
+          (await other.evaluate(
+            (key) => localStorage.getItem(key),
+            correctionKey,
+          ))!,
+        ),
+      ).toEqual(newer);
+      expect(
+        JSON.parse(
+          (await other.evaluate(
+            (key) => localStorage.getItem(key),
+            pendingKey,
+          ))!,
+        ).id,
+      ).toBe(sent.request_id);
+      await expect(
+        page.getByText("Other saved choice: next available queue slot."),
+      ).toBeVisible();
+      await page
+        .getByRole("button", { name: "Use original scheduling choice" })
+        .click();
+      await expect(
+        page.getByText(
+          "The original time is saved. Check or stop the original schedule again.",
+        ),
+      ).toBeVisible();
+      expect(
+        JSON.parse(
+          (await other.evaluate(
+            (key) => localStorage.getItem(key),
+            correctionKey,
+          ))!,
+        ).scheduled_at,
+      ).toBe(sent.scheduled_at);
+      expect(
+        JSON.parse(
+          (await other.evaluate(
+            (key) => localStorage.getItem(key),
+            pendingKey,
+          ))!,
+        ).id,
+      ).toBe(sent.request_id);
+      await page
+        .getByRole("button", { name: "Stop original schedule" })
+        .click();
+      await expect(
+        page.getByText(/original schedule was stopped/),
+      ).toBeVisible();
+      expect(
+        await other.evaluate((key) => localStorage.getItem(key), pendingKey),
+      ).toBeNull();
+    } finally {
+      release.resolve();
+      await other.close();
+    }
+  });
+});
+
+test("a retirement completion from a signed-out tab cannot save a correction", async () => {
+  await withWorkspace(async (old, context, write) => {
+    await old.addInitScript(() => {
+      window.addEventListener(
+        "storage",
+        (event) => {
+          if (event.key === "beweft.auth-epoch")
+            event.stopImmediatePropagation();
+        },
+        true,
+      );
+    });
+    const f = await setup(old, context, write);
+    const owner = (await (await context.request.get("/api/v1/auth/me")).json())
+      .data;
+    const pendingKey = `beweft.pending-schedule:${owner.id}:${f.brand.id}`;
+    const correctionKey = `beweft.schedule-correction:${owner.id}:${f.brand.id}:${f.post.id}`;
+    const held = deferred(),
+      release = deferred();
+    let sent: any;
+    await old.route(
+      /\/api\/v1\/posts\/[^/]+\/schedule\?view=summary$/,
+      (route) => {
+        sent = route.request().postDataJSON();
+        return route.abort("failed");
+      },
+    );
+    await old.route("**/api/v1/schedule-requests/*/retire", async (route) => {
+      held.resolve();
+      await release.promise;
+      await route
+        .fulfill({
+          json: {
+            data: {
+              ...receipt(f, sent, []),
+              outcome: "rejected",
+              error: { code: "schedule_request_retired", message: "Stopped" },
+            },
+          },
+        })
+        .catch(() => {});
+    });
+    const other = await context.newPage();
+    try {
+      await other.goto("/#drafts");
+      await startSchedule(old);
+      await old.getByRole("button", { name: "Stop original schedule" }).click();
+      await held.promise;
+      await other.getByRole("button", { name: "Sign out" }).click();
+      await expect(other.getByLabel("Email address")).toBeVisible();
+      release.resolve();
+      await expect(old.getByLabel("Email address")).toBeVisible();
+      expect(
+        await other.evaluate((key) => localStorage.getItem(key), correctionKey),
+      ).toBeNull();
+      expect(
+        JSON.parse(
+          (await other.evaluate(
+            (key) => localStorage.getItem(key),
+            pendingKey,
+          ))!,
+        ).id,
+      ).toBe(sent.request_id);
+    } finally {
+      release.resolve();
+      await other.close();
+    }
+  });
+});
+
+test("a stale tab cannot erase a newer correction choice when editing", async () => {
+  await withWorkspace(async (old, context, write) => {
+    const f = await setup(old, context, write);
+    const owner = (await (await context.request.get("/api/v1/auth/me")).json())
+      .data;
+    const key = `beweft.schedule-correction:${owner.id}:${f.brand.id}:${f.post.id}`;
+    const original = {
+      revision: crypto.randomUUID(),
+      owner_id: owner.id,
+      brand_id: f.brand.id,
+      post_id: f.post.id,
+      mode: "exact",
+      scheduled_at: new Date(Date.now() + 7 * 86400_000).toISOString(),
+    };
+    const newer = {
+      ...original,
+      revision: crypto.randomUUID(),
+      mode: "queue",
+      scheduled_at: null,
+    };
+    await old.goto("/#drafts");
+    await old.evaluate(
+      ({ key, value }) => localStorage.setItem(key, JSON.stringify(value)),
+      { key, value: original },
+    );
+    await old.getByRole("button", { name: "Edit draft", exact: true }).click();
+    await expect(
+      old.getByText(`Exact saved time: ${original.scheduled_at}`),
+    ).toBeVisible();
+    const other = await context.newPage();
+    try {
+      await other.goto("/#drafts");
+      await other.evaluate(
+        ({ key, value }) => localStorage.setItem(key, JSON.stringify(value)),
+        { key, value: newer },
+      );
+      await old.getByLabel("When should this go out?").selectOption("queue");
+      await expect(old.getByRole("dialog").getByRole("alert")).toContainText(
+        "saved scheduling time changed in another tab",
+      );
+      expect(
+        JSON.parse(
+          (await other.evaluate((key) => localStorage.getItem(key), key))!,
+        ),
+      ).toEqual(newer);
+      await expect(old.getByLabel("When should this go out?")).toHaveValue(
+        "exact",
+      );
+    } finally {
+      await other.close();
+    }
+  });
+});
+
+test("a changed same-revision correction cannot race a draft save into scheduling", async () => {
+  await withWorkspace(async (old, context, write) => {
+    const f = await setup(old, context, write);
+    const owner = (await (await context.request.get("/api/v1/auth/me")).json())
+      .data;
+    const key = `beweft.schedule-correction:${owner.id}:${f.brand.id}:${f.post.id}`;
+    const pendingKey = `beweft.pending-schedule:${owner.id}:${f.brand.id}`;
+    const original = {
+      revision: crypto.randomUUID(),
+      owner_id: owner.id,
+      brand_id: f.brand.id,
+      post_id: f.post.id,
+      mode: "exact",
+      scheduled_at: new Date(Date.now() + 7 * 86400_000).toISOString(),
+    };
+    const newer = {
+      ...original,
+      scheduled_at: new Date(Date.now() + 9 * 86400_000).toISOString(),
+    };
+    const held = deferred(),
+      release = deferred();
+    let sends = 0;
+    await old.route(`**/api/v1/posts/${f.post.id}`, async (route) => {
+      if (route.request().method() !== "PATCH") return route.continue();
+      held.resolve();
+      await release.promise;
+      await route.continue().catch(() => {});
+    });
+    await old.route(
+      /\/api\/v1\/posts\/[^/]+\/schedule\?view=summary$/,
+      (route) => {
+        sends++;
+        return route.continue();
+      },
+    );
+    await old.goto("/#drafts");
+    await old.evaluate(
+      ({ key, value }) => localStorage.setItem(key, JSON.stringify(value)),
+      { key, value: original },
+    );
+    await old.getByRole("button", { name: "Edit draft", exact: true }).click();
+    await expect(
+      old.getByText(`Exact saved time: ${original.scheduled_at}`),
+    ).toBeVisible();
+    const other = await context.newPage();
+    try {
+      await other.goto("/#drafts");
+      await old.getByRole("button", { name: "Schedule post" }).click();
+      await held.promise;
+      await other.evaluate(
+        ({ key, value }) => localStorage.setItem(key, JSON.stringify(value)),
+        { key, value: newer },
+      );
+      release.resolve();
+      await expect(old.getByRole("dialog").getByRole("alert")).toContainText(
+        "saved scheduling time changed in another tab",
+      );
+      expect(sends).toBe(0);
+      expect(
+        await other.evaluate((key) => localStorage.getItem(key), pendingKey),
+      ).toBeNull();
+      expect(
+        JSON.parse(
+          (await other.evaluate((key) => localStorage.getItem(key), key))!,
+        ),
+      ).toEqual(newer);
     } finally {
       release.resolve();
       await other.close();

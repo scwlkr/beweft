@@ -55,6 +55,12 @@ test("a lost local format rejection recovers its receipt before correction", asy
     const ownerResponse = await context.request.get("/api/v1/auth/me");
     const owner = (await ownerResponse.json()).data;
     const key = `beweft.pending-schedule:${owner.id}:${brand.id}`;
+    const base = new Date(Date.now() + 7 * 86400_000);
+    base.setUTCSeconds(37, 0);
+    const local = new Date(base.getTime() - base.getTimezoneOffset() * 60000)
+      .toISOString()
+      .slice(0, 19);
+    const exact = `${new Date(base.getTime() + 330 * 60000).toISOString().slice(0, 19)}.123456+05:30`;
     await context.addInitScript(
       (id) => localStorage.setItem("beweft.brand", id),
       brand.id,
@@ -65,7 +71,18 @@ test("a lost local format rejection recovers its receipt before correction", asy
       async (route) => {
         requests.push(route.request().postDataJSON());
         if (requests.length !== 1) return route.continue();
-        const response = await route.fetch();
+        requests[0].scheduled_at = exact;
+        await page.evaluate(
+          ({ key, exact }) => {
+            const saved = JSON.parse(localStorage.getItem(key)!);
+            saved.scheduled_at = exact;
+            localStorage.setItem(key, JSON.stringify(saved));
+          },
+          { key, exact },
+        );
+        const response = await route.fetch({
+          postData: JSON.stringify(requests[0]),
+        });
         expect(response.status()).toBe(400);
         expect((await response.json()).error.code).toBe(
           "provider_format_invalid",
@@ -76,9 +93,7 @@ test("a lost local format rejection recovers its receipt before correction", asy
     await page.goto("/#drafts");
     await page.getByRole("button", { name: "Edit draft", exact: true }).click();
     await page.getByLabel("When should this go out?").selectOption("exact");
-    await page
-      .getByLabel(/Date and time/)
-      .fill(new Date(Date.now() + 7 * 86400_000).toISOString().slice(0, 16));
+    await page.getByLabel(/Date and time/).fill(local);
     await page.getByRole("button", { name: "Schedule post" }).click();
     await expect(
       page.getByRole("button", { name: "Check scheduling outcome" }),
@@ -109,6 +124,8 @@ test("a lost local format rejection recovers its receipt before correction", asy
     );
     expect(replay.status()).toBe(400);
     expect((await replay.json()).error.code).toBe("provider_format_invalid");
+    await page.reload();
+    await page.getByRole("button", { name: "Review pending schedule" }).click();
     await page
       .getByRole("button", { name: "Check scheduling outcome" })
       .click();
@@ -116,6 +133,13 @@ test("a lost local format rejection recovers its receipt before correction", asy
       page.getByText(/original schedule was not made/),
     ).toBeVisible();
     await expect(page.getByLabel("Post text", { exact: true })).toBeEnabled();
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.reload();
+    await page.getByRole("button", { name: "Edit draft", exact: true }).click();
+    await expect(page.getByLabel("When should this go out?")).toHaveValue(
+      "exact",
+    );
+    await expect(page.getByText(`Exact saved time: ${exact}`)).toBeVisible();
     await page
       .getByLabel("Post text", { exact: true })
       .fill("Corrected format");
@@ -123,6 +147,7 @@ test("a lost local format rejection recovers its receipt before correction", asy
     await expect(page.getByRole("dialog")).toHaveCount(0);
     expect(requests).toHaveLength(2);
     expect(requests[1].request_id).not.toBe(saved.id);
+    expect(requests[1].scheduled_at).toBe(exact);
     expect(requests[1].version).toBe(saved.post.version + 1);
     const publications = await context.request.get(
       `/api/v1/publications?brand_id=${brand.id}&view=summary`,
