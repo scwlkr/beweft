@@ -11,6 +11,16 @@ use serde_json::{Value, json};
     ),
     components(schemas(
         BootstrapRequest,
+        DisconnectRequest,
+        ProviderAppRequest,
+        StartConnectionRequest,
+        CompleteConnectionRequest,
+        BlueskyConnectionRequest,
+        AcknowledgeRevocationRequest,
+        ProviderSyncRequest,
+        ProviderReplyRequest,
+        ProviderReplyResolution,
+        ResolveProviderReplyRequest,
         LoginRequest,
         TokenScope,
         CreateTokenRequest,
@@ -23,6 +33,7 @@ use serde_json::{Value, json};
         CreatePostRequest,
         UpdatePostRequest,
         SchedulePostRequest,
+        RetireScheduleRequest,
         CreateScheduleRequest,
         ReorderQueueRequest,
         ManualCompleteRequest,
@@ -51,13 +62,28 @@ use serde_json::{Value, json};
         Publication,
         PublicationSummary,
         ScheduleRequestIntent,
+        ScheduleRequestOutcome,
         ScheduleRequestResult,
         PublicationAttempt,
+        PublicationAttemptState,
         JobHealth,
         WorkflowSummary,
         Analytics,
         Inbox,
         ProviderDescriptor,
+        ProviderApp,
+        SavedProviderApp,
+        StartedConnection,
+        ConnectionDestination,
+        ConnectionFlow,
+        DisconnectResult,
+        RevocationAcknowledged,
+        ProviderRemovalStatus,
+        ProviderSyncResult,
+        ProviderReply,
+        ProviderStatus,
+        ProviderReconcilePending,
+        ResetExpiredSessionResult,
         IdeaStatus,
         UpdateBrandRequest,
         CreateIdeaGroupRequest,
@@ -113,6 +139,9 @@ pub fn build_document() -> Value {
                 {"type":"array","items":reference("Publication")},
                 {"type":"array","items":reference("PublicationSummary")}
             ]});
+        } else if path == "/publications/{id}/provider-reconcile" {
+            envelope["properties"]["data"] =
+                json!({"anyOf":[reference("Publication"),reference("ProviderReconcilePending")]});
         }
         let content = if response == "binary" {
             let mut media = serde_json::Map::new();
@@ -134,6 +163,9 @@ pub fn build_document() -> Value {
             json!({"application/json":{"schema":envelope}})
         };
         let mut operation = json!({"operationId":format!("{}_{}",method,path.replace('/',"_").replace(['{','}'],"")),"responses":{"200":{"description":"Success","content":content}}});
+        if response == "redirect" {
+            operation["responses"] = json!({"303":{"description":"Redirect to connection setup or declined-consent notice","headers":{"Location":{"schema":{"type":"string"}}}}});
+        }
         for (status, description) in [
             ("400", "Invalid input"),
             ("401", "Authentication required"),
@@ -147,12 +179,31 @@ pub fn build_document() -> Value {
         ] {
             operation["responses"][status] = json!({"description":description,"content":{"application/json":{"schema":reference("ErrorResponse")}}});
         }
+        if method == "post" && matches!(path, "/posts/{id}/schedule" | "/publications/{id}/replace")
+        {
+            operation["responses"]["503"] = json!({"description":"Local media inspection unavailable or timed out","content":{"application/json":{"schema":reference("ErrorResponse")}}});
+        }
         let mut parameters = Vec::new();
         if path.contains("{id}") {
             parameters.push(json!({"name":"id","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}));
         }
         if path.contains("{request_id}") {
             parameters.push(json!({"name":"request_id","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}));
+        }
+        if path.contains("{provider}") {
+            parameters.push(
+                json!({"name":"provider","in":"path","required":true,"schema":{"type":"string"}}),
+            );
+        }
+        if path == "/connections/{provider}/callback" {
+            for name in ["state", "code", "error"] {
+                parameters.push(
+                    json!({"name":name,"in":"query","required":false,"schema":{"type":"string"}}),
+                );
+            }
+        }
+        if path == "/provider-media/{id}" {
+            parameters.push(json!({"name":"token","in":"query","required":true,"schema":{"type":"string","minLength":64,"maxLength":64}}));
         }
         if (method == "get"
             && [
@@ -208,7 +259,34 @@ pub fn build_document() -> Value {
         if !parameters.is_empty() {
             operation["parameters"] = json!(parameters);
         }
-        if ["/auth/logout", "/auth/password", "/tokens", "/tokens/{id}"].contains(&path)
+        if path == "/connections/{provider}/callback" {
+            operation["security"] = json!([]);
+            operation["description"] = json!(
+                "OAuth callback validates its single-use state, correlation cookie, originating live owner session, provider generation, and expiration."
+            );
+        } else if path == "/provider-media/{id}" {
+            operation["security"] = json!([{"providerMediaToken":[]}]);
+            operation["description"] = json!(
+                "Short-lived provider fetch capability bound to this media ID; it is not an authenticated library URL."
+            );
+        } else if [
+            "/auth/logout",
+            "/auth/password",
+            "/tokens",
+            "/tokens/{id}",
+            "/provider-apps",
+            "/provider-apps/{provider}",
+            "/connections/bluesky",
+            "/connections/{provider}/start",
+            "/connections/{provider}/acknowledge-revocation",
+            "/connections/{provider}/removal-status",
+            "/connection-flows/{id}",
+            "/connection-flows/{id}/complete",
+            "/channels/{id}/disconnect",
+            "/publications/{id}/reset-expired-session",
+            "/inbox/{id}/replies/{request_id}/resolve",
+        ]
+        .contains(&path)
             || path.starts_with("/auth/sessions")
         {
             operation["security"] = json!([{"session":[]}]);
@@ -233,12 +311,20 @@ pub fn build_document() -> Value {
     document["paths"] = Value::Object(paths);
     // The media precondition is a UUID-keyed map of positive i64 versions,
     // capped so a recovered request remains bounded.
-    for name in ["SchedulePostRequest", "ScheduleRequestIntent"] {
+    for name in [
+        "SchedulePostRequest",
+        "RetireScheduleRequest",
+        "ScheduleRequestIntent",
+    ] {
         let versions = &mut document["components"]["schemas"][name]["properties"]["media_versions"];
         versions["maxProperties"] = json!(1000);
         versions["additionalProperties"]["minimum"] = json!(1);
     }
-    document["components"]["securitySchemes"] = json!({"session":{"type":"apiKey","in":"cookie","name":"beweft_session"},"bearer":{"type":"http","scheme":"bearer"}});
+    document["components"]["schemas"]["DisconnectRequest"]["properties"]["confirm_shared_impact"]
+        ["enum"] = json!([true]);
+    document["components"]["schemas"]["AcknowledgeRevocationRequest"]["properties"]["access_removed"]
+        ["enum"] = json!([true]);
+    document["components"]["securitySchemes"] = json!({"session":{"type":"apiKey","in":"cookie","name":"beweft_session"},"bearer":{"type":"http","scheme":"bearer"},"providerMediaToken":{"type":"apiKey","in":"query","name":"token"}});
     document
 }
 pub async fn document() -> Json<Value> {

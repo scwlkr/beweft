@@ -77,12 +77,12 @@ async fn disconnect_fences_shared_provider_channels(h: &Harness) {
             .header(header::COOKIE, &session)
             .header("x-beweft-request", "1")
     };
-    let ack = |provider: &str| {
+    let ack = |provider: &str, revocation_id: Uuid| {
         client
             .post(format!("{base}/ack/{provider}"))
             .header(header::COOKIE, &session)
             .header("x-beweft-request", "1")
-            .json(&json!({"access_removed":true}))
+            .json(&json!({"access_removed":true,"revocation_id":revocation_id}))
     };
 
     // An active sibling delivery blocks a provider-wide removal boundary.
@@ -166,7 +166,7 @@ async fn disconnect_fences_shared_provider_channels(h: &Harness) {
     let message = blocked["error"]["message"].as_str().unwrap();
     assert!(message.contains("other channels") && message.contains("unrelated accounts"));
     assert_eq!(
-        ack("linkedin").send().await.unwrap().status(),
+        ack("linkedin", h.revocation_marker("linkedin").await).send().await.unwrap().status(),
         StatusCode::OK
     );
     let status: String = sqlx::query_scalar("SELECT connection_status FROM channels WHERE id=$1")
@@ -288,7 +288,7 @@ async fn disconnect_fences_shared_provider_channels(h: &Harness) {
     .unwrap();
     assert!(pending.is_some());
     assert_eq!(
-        ack("linkedin").send().await.unwrap().status(),
+        ack("linkedin", h.revocation_marker("linkedin").await).send().await.unwrap().status(),
         StatusCode::OK
     );
 
@@ -338,7 +338,7 @@ async fn disconnect_fences_shared_provider_channels(h: &Harness) {
         .unwrap();
     assert_eq!(status, "reconnect_required");
     assert_eq!(
-        ack("mastodon").send().await.unwrap().status(),
+        ack("mastodon", h.revocation_marker("mastodon").await).send().await.unwrap().status(),
         StatusCode::OK
     );
     assert_eq!(h.provider.masto_revoke_requests.load(Ordering::SeqCst), 0);
@@ -461,7 +461,7 @@ async fn every_direct_provider_uses_owner_managed_removal(h: &Harness) {
             .post(format!("{base}/ack/{provider}"))
             .header(header::COOKIE, &session)
             .header("x-beweft-request", "1")
-            .json(&json!({"access_removed":true}))
+            .json(&json!({"access_removed":true,"revocation_id":marker.unwrap()}))
             .send()
             .await
             .unwrap();

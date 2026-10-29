@@ -59,9 +59,12 @@ async fn probe(m: &Media) -> Result<Value> {
             cmd.arg("pipe:0");
         }
     }
-    let mut child = cmd
-        .spawn()
-        .map_err(|_| invalid("Media inspection requires ffprobe installed on the server"))?;
+    let mut child = cmd.spawn().map_err(|_| {
+        error(
+            FailureKind::Unavailable,
+            "Media inspection requires ffprobe installed on the server",
+        )
+    })?;
     let input = child.stdin.take();
     let output = child
         .stdout
@@ -100,7 +103,12 @@ async fn probe(m: &Media) -> Result<Value> {
     };
     tokio::time::timeout(Duration::from_secs(15), run)
         .await
-        .map_err(|_| invalid("Media inspection exceeded its time limit"))?
+        .map_err(|_| {
+            error(
+                FailureKind::Unavailable,
+                "Media inspection exceeded its time limit",
+            )
+        })?
 }
 
 pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {

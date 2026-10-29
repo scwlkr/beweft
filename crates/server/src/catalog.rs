@@ -49,29 +49,6 @@ pub async fn create_brand(
 pub fn manual_capabilities() -> Value {
     json!({"execution":"manual","verification":"owner_attestation","formats":["text","image","video"],"publishing":true,"analytics":false,"inbox":false})
 }
-pub async fn providers(State(state): State<AppState>, _auth: Auth) -> Json<Value> {
-    let mut rows = vec![
-        json!({"id":"manual","name":"Manual handoff","implementation":"available","configuration":"ready","execution":"manual","verification":"owner_attestation","formats":["text","image","video"],"reason":"Prepare content and confirm publication yourself."}),
-    ];
-    for (id, name) in [
-        ("x", "X"),
-        ("youtube", "YouTube"),
-        ("facebook", "Facebook"),
-        ("instagram", "Instagram"),
-        ("threads", "Threads"),
-        ("tiktok", "TikTok"),
-        ("bluesky", "Bluesky"),
-        ("mastodon", "Mastodon"),
-        ("linkedin", "LinkedIn"),
-        ("pinterest", "Pinterest"),
-    ] {
-        rows.push(json!({"id":id,"name":name,"implementation":"unavailable","configuration":"not_configured","execution":"unavailable","verification":"unverified","formats":[],"reason":"Direct provider adapter is not installed in this foundation. Use a manual channel."}));
-    }
-    if state.config.fixture_enabled {
-        rows.push(json!({"id":"fixture","name":"Isolated fixture","implementation":"available","configuration":"ready","execution":"fixture","verification":"fixture_only","formats":["text","image","video"],"reason":"Development fixture; never sends to a social network."}));
-    }
-    data(rows)
-}
 pub async fn channels(
     State(state): State<AppState>,
     auth: Auth,

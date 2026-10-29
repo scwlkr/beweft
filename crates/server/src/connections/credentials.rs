@@ -34,7 +34,7 @@ pub(super) async fn store_channel(
     caps["permissions"] = providers::grant_permissions(channel);
     caps["publishing"] = json!(caps["permissions"]["actions"]["publish"]["status"] != "missing");
     let row:Value=sqlx::query_scalar("INSERT INTO channels(id,brand_id,name,provider,timezone,capabilities,encrypted_credentials,connection_identity,connection_status,connected_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'connected',now()) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,capabilities=EXCLUDED.capabilities,encrypted_credentials=EXCLUDED.encrypted_credentials,connection_status='connected',connection_error=NULL,connected_at=now() RETURNING to_jsonb(channels.*)-'encrypted_credentials'").bind(id).bind(brand).bind(&channel.identity.name).bind(&channel.app.provider).bind(timezone).bind(caps).bind(encrypted).bind(channel.destination_key()).fetch_one(&mut **tx).await?;
-    Ok(row)
+    Ok(crate::manual_channels::decorate(row))
 }
 
 async fn check_bluesky_reconnect(
@@ -230,6 +230,23 @@ async fn load_channel_inner(
     }
     Ok(channel)
 }
+/// The public route requires explicit acknowledgment before any disconnect mutation.
+pub async fn disconnect_confirmed(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<Uuid>,
+    Json(body): Json<crate::contracts::DisconnectRequest>,
+) -> Result<Json<Value>> {
+    auth.owner_session()?;
+    if !body.confirm_shared_impact {
+        return Err(ApiError::bad_code(
+            "disconnect_confirmation_required",
+            "Confirm that this channel's queued deliveries will be canceled and other channels for this provider, including unrelated accounts, may need reconnection after manual access removal.",
+        ));
+    }
+    disconnect(State(state), auth, Path(id)).await
+}
+
 pub async fn disconnect(
     State(state): State<AppState>,
     auth: Auth,
@@ -266,6 +283,7 @@ pub async fn disconnect(
             "disconnected":true,
             "provider_revoked":false,
             "channels_requiring_reconnection":0,
+            "revocation_id":null,
             "next_action":"This channel is already disconnected. No new provider access removal was started."
         })));
     }
@@ -343,7 +361,7 @@ pub async fn disconnect(
         }
     };
     Ok(data(
-        json!({"disconnected":true,"provider_revoked":false,"channels_requiring_reconnection":affected_channels,"next_action":next_action}),
+        json!({"disconnected":true,"provider_revoked":false,"channels_requiring_reconnection":affected_channels,"revocation_id":revocation_id,"next_action":next_action}),
     ))
 }
 
@@ -362,13 +380,16 @@ pub async fn acknowledge_revocation(
     }
     let mut tx = state.db.begin().await?;
     let gate = super::apps::oauth_gate(&mut tx, &provider).await?;
-    if !gate.is_some_and(|(_, pending)| pending.is_some()) {
-        return Err(ApiError::conflict(
-            "There is no unresolved provider revocation",
+    let expected = uuid(&body, "revocation_id")?;
+    if !gate.is_some_and(|(_, pending)| pending == Some(expected)) {
+        return Err(ApiError::conflict_code(
+            "revocation_id_conflict",
+            "The provider removal changed or is no longer pending. Reload provider status before confirming removal.",
         ));
     }
-    sqlx::query("UPDATE provider_oauth_fences SET oauth_generation=oauth_generation+1,revocation_id=NULL WHERE provider=$1")
+    sqlx::query("UPDATE provider_oauth_fences SET oauth_generation=oauth_generation+1,revocation_id=NULL WHERE provider=$1 AND revocation_id=$2")
         .bind(&provider)
+        .bind(expected)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;

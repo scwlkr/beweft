@@ -148,6 +148,55 @@ def run():
             replay = call(f"/posts/{lost['id']}/schedule?view=summary", lost_body)
             assert [p["id"] for p in recovered["publications"]] == [p["id"] for p in replay]
 
+            # Retirement commits a terminal result before a delayed original
+            # can arrive. Discard the response and recover the receipt as if
+            # the response was lost; only a new reviewed key can schedule.
+            retired_post = call("/posts", {"brand_id":brand,"text":"Retire before original"})
+            retired_key = str(uuid.uuid4())
+            retired_intent = {"post_id":retired_post["id"],"brand_id":brand,"version":1,
+                              "channel_ids":[channels[0]],"scheduled_at":timestamp(dt.timedelta(hours=9)),"media_versions":{}}
+            status, _ = response(f"/schedule-requests/{retired_key}/retire", retired_intent)
+            assert status == 200
+            retired_receipt = call(f"/schedule-requests/{retired_key}")
+            assert retired_receipt["outcome"] == "rejected" and retired_receipt["publications"] == []
+            assert retired_receipt["error"]["code"] == "schedule_request_retired"
+            assert retired_receipt["request"]["media_versions"] == {}
+            retired_body = {"version":1,"channel_ids":retired_intent["channel_ids"],
+                            "scheduled_at":retired_intent["scheduled_at"],"media_versions":{},"request_id":retired_key}
+            assert call(f"/posts/{retired_post['id']}/schedule", retired_body, expected=409)["error"]["code"] == "schedule_request_retired"
+            assert call(f"/schedule-requests/{retired_key}/retire", {**retired_intent,"version":2}, expected=409)["error"]["code"] == "schedule_request_conflict"
+            assert sql(f"SELECT count(*) FROM publications WHERE post_id='{retired_post['id']}'") == "0"
+            assert call(f"/schedule-requests/{retired_key}/retire", retired_intent) == retired_receipt
+            fresh = call(f"/posts/{retired_post['id']}/schedule?view=summary", {**retired_body,"request_id":str(uuid.uuid4())})
+            assert len(fresh) == 1 and call(f"/schedule-requests/{retired_key}") == retired_receipt
+
+            # An unsent retired request can outlive its unpublished draft.
+            deleted = call("/posts", {"brand_id":brand,"text":"Retired and deleted"})
+            deleted_key = str(uuid.uuid4())
+            deleted_intent = {"post_id":deleted["id"],"brand_id":brand,"version":1,"channel_ids":[channels[0]],"scheduled_at":timestamp(dt.timedelta(hours=10))}
+            deleted_receipt = call(f"/schedule-requests/{deleted_key}/retire", deleted_intent)
+            call(f"/posts/{deleted['id']}", method="DELETE")
+            assert call(f"/schedule-requests/{deleted_key}/retire", deleted_intent) == deleted_receipt
+            assert call(f"/schedule-requests/{deleted_key}") == deleted_receipt
+            assert call(f"/posts/{deleted['id']}/schedule", {"version":1,"channel_ids":[channels[0]],"scheduled_at":deleted_intent["scheduled_at"],"request_id":deleted_key}, expected=409)["error"]["code"] == "schedule_request_retired"
+            call(f"/schedule-requests/{uuid.uuid4()}/retire", deleted_intent, expected=404)
+
+            # Race a late original against retirement. Exactly one terminal
+            # result wins; a busy response is resolved using the same key.
+            racing = call("/posts", {"brand_id":brand,"text":"Retirement race"})
+            racing_key = str(uuid.uuid4())
+            racing_intent = {"post_id":racing["id"],"brand_id":brand,"version":1,"channel_ids":[channels[0]],"scheduled_at":timestamp(dt.timedelta(hours=11))}
+            racing_body = {"version":1,"channel_ids":racing_intent["channel_ids"],"scheduled_at":racing_intent["scheduled_at"],"request_id":racing_key}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                scheduling = pool.submit(response, f"/posts/{racing['id']}/schedule?view=summary", racing_body)
+                retiring = pool.submit(response, f"/schedule-requests/{racing_key}/retire", racing_intent)
+                scheduled_status, _ = scheduling.result(timeout=10)
+                retired_status, _ = retiring.result(timeout=10)
+            assert scheduled_status in (200,409) and retired_status in (200,409)
+            settled = call(f"/schedule-requests/{racing_key}/retire", racing_intent)
+            count = int(sql(f"SELECT count(*) FROM publications WHERE post_id='{racing['id']}'"))
+            assert (settled["outcome"] == "accepted" and count == 1 and len(settled["publications"]) == 1) or (settled["outcome"] == "rejected" and count == 0 and settled["error"]["code"] == "schedule_request_retired")
+
             # Hold the original on its channel lock. More than ten same-key
             # retries must fail promptly without leaving database lock waiters
             # behind or exhausting the ten-connection application pool.
@@ -170,6 +219,10 @@ def run():
                     time.sleep(0.05)
                 else:
                     raise AssertionError("schedule did not wait on the fixture channel lock")
+                call(f"/schedule-requests/{pending_key}", expected=404)
+                pending_retire = {"post_id":pending_post["id"],"brand_id":brand,"version":1,
+                                  "channel_ids":pending_body["channel_ids"],"scheduled_at":pending_body["scheduled_at"]}
+                assert call(f"/schedule-requests/{pending_key}/retire", pending_retire, expected=409)["error"]["code"] == "schedule_request_in_progress"
                 call(f"/schedule-requests/{pending_key}", expected=404)
                 started = time.monotonic()
                 retries = [pool.submit(call, pending_path, pending_body, expected=409) for _ in range(12)]
@@ -203,6 +256,8 @@ def run():
             assert [x["id"] for x in first] == [x["id"] for x in second]
             assert [x["id"] for x in call(f"/schedule-requests/{pending_key}")["publications"]] == [x["id"] for x in first]
             assert sql(f"SELECT count(*) FROM publications WHERE post_id='{pending_post['id']}'") == "1"
+            accepted_retirement = call(f"/schedule-requests/{pending_key}/retire", pending_retire)
+            assert accepted_retirement["outcome"] == "accepted" and [x["id"] for x in accepted_retirement["publications"]] == [x["id"] for x in first]
 
             # Cancellation/replacement and a newer draft cannot change which
             # publication IDs the original intent returns.
@@ -221,6 +276,7 @@ def run():
             forbidden = call(f"/schedule-requests/{key}", expected=404, token=token)
             missing = call(f"/schedule-requests/{uuid.uuid4()}", expected=404, token=token)
             assert forbidden == missing
+            call(f"/schedule-requests/{retired_key}/retire", retired_intent, expected=404, token=token)
             other_post = call("/posts", {"brand_id": other_brand, "text": "Other"})
             call(f"/posts/{other_post['id']}/schedule", {"version": 1, "channel_ids": [other_channel], "scheduled_at": when, "request_id": key}, expected=404, token=token)
 

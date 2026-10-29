@@ -9,6 +9,9 @@ struct Provider {
     post_writes: AtomicUsize,
     post_started: Notify,
     post_release: Notify,
+    media_block: AtomicUsize,
+    media_started: Notify,
+    media_release: Notify,
     writes: AtomicUsize,
     reply_started: Notify,
     reply_release: Notify,
@@ -95,6 +98,14 @@ async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
                 _ => Json(json!({"data":{"id":"fixture-post"}})).into_response(),
             }
         }
+        "/2/media/upload" => {
+            let _ = to_bytes(r.into_body(), 5 * 1024 * 1024).await.unwrap();
+            if s.media_block.load(Ordering::SeqCst) != 0 {
+                s.media_started.notify_one();
+                s.media_release.notified().await;
+            }
+            Json(json!({"data":{"id":"media-fixture"}})).into_response()
+        }
         "/fastsession" => {
             let mut r = StatusCode::PERMANENT_REDIRECT.into_response();
             r.headers_mut()
@@ -178,6 +189,8 @@ impl Drop for Harness {
 }
 impl Harness {
     async fn new() -> Self {
+        assert_eq!(std::env::var("BEWEFT_REQUIRE_PROVIDER_FIXTURES").as_deref(), Ok("true"));
+        assert_eq!(std::env::var("BEWEFT_PROVIDER_TEST_SANDBOX").as_deref(), Ok("1"));
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(2)
             .acquire_timeout(std::time::Duration::from_secs(5))
@@ -188,6 +201,7 @@ impl Harness {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         // Single test, current-thread runtime; fixture env read only during this process.
         unsafe {
+            std::env::set_var("BEWEFT_ENABLE_FIXTURES", "true");
             std::env::set_var(
                 "BEWEFT_PROVIDER_FIXTURE_ORIGIN",
                 format!("http://{}", listener.local_addr().unwrap()),
@@ -250,6 +264,15 @@ impl Harness {
             format!("beweft_session={}", self.session).parse().unwrap(),
         );
         h
+    }
+    async fn revocation_marker(&self, provider: &str) -> Uuid {
+        sqlx::query_scalar::<_, Option<Uuid>>("SELECT revocation_id FROM provider_oauth_fences WHERE provider=$1")
+            .bind(provider)
+            .fetch_optional(&self.state.db)
+            .await
+            .unwrap()
+            .flatten()
+            .unwrap_or_else(Uuid::nil)
     }
     async fn app(&self, provider: &str, client: &str, origin: Option<&str>) {
         let _ = connections::save_app(

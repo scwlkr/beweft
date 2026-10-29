@@ -50,6 +50,14 @@ fn channel(provider: &str) -> Channel {
     }
 }
 async fn fixture() -> (Adapter, Arc<Mutex<Seen>>, tokio::task::JoinHandle<()>) {
+    assert_eq!(
+        std::env::var("BEWEFT_REQUIRE_PROVIDER_FIXTURES").as_deref(),
+        Ok("true")
+    );
+    assert_eq!(
+        std::env::var("BEWEFT_PROVIDER_TEST_SANDBOX").as_deref(),
+        Ok("1")
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let adapter = Adapter::fixture(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
     let seen = Arc::new(Mutex::new(Seen::default()));
