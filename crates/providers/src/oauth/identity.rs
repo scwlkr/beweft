@@ -1,6 +1,9 @@
 use super::*;
 impl Adapter {
     pub async fn identities(&self, app: &AppConfig, tokens: &Tokens) -> Result<Vec<Channel>> {
+        if app.provider == "google_business" {
+            return self.google_business_identities(app, tokens).await;
+        }
         let token = Some(tokens.access_token.as_str());
         let mut result = vec![];
         if app.provider == "facebook" {
@@ -35,6 +38,7 @@ impl Adapter {
                     app: app.clone(),
                     tokens: page_tokens,
                     identity: Identity {
+                        parent: None,
                         id: field(item, "id")?,
                         name: field(item, "name")?,
                         username: None,
@@ -88,6 +92,7 @@ impl Adapter {
             app: app.clone(),
             tokens: tokens.clone(),
             identity: Identity {
+                parent: None,
                 id,
                 name,
                 username: item["username"].as_str().map(str::to_owned),
@@ -117,6 +122,7 @@ impl Adapter {
             return Err(invalid("Bluesky account is not active"));
         }
         let identity = Identity {
+            parent: None,
             id: field(&v, "did")?,
             name: field(&v, "handle")?,
             username: Some(field(&v, "handle")?),
@@ -144,7 +150,7 @@ impl Adapter {
                 .form(&[("token", access.as_str()), ("client_id", &app.client_id)]),
             // Google revokes a project-wide grant. A delayed request can
             // invalidate a newer authorization; removal is owner-managed.
-            "youtube" => return Ok(false),
+            "youtube" | "google_business" => return Ok(false),
             "facebook" => self.request(
                 Method::DELETE,
                 "https://graph.facebook.com/v23.0/me/permissions",

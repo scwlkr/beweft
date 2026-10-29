@@ -160,9 +160,15 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
             ("mastodon", t) if t.starts_with("image/") => 16 * 1024 * 1024,
             ("mastodon", _) => 99 * 1024 * 1024,
             ("facebook", t) if t.starts_with("image/") => 10 * 1024 * 1024,
+            ("google_business", _) => 5 * 1024 * 1024,
             ("pinterest", _) => 20 * 1024 * 1024,
             _ => 256 * 1024 * 1024,
         };
+        if provider == "google_business" && bytes < 10240 {
+            return Err(invalid(
+                "Google Business Profile photos must be at least 10,240 bytes",
+            ));
+        }
         if bytes == 0 || bytes > max {
             return Err(invalid(&format!(
                 "Media exceeds the adapter's {max}-byte limit for this format"
@@ -184,6 +190,11 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
         let visual = visuals[0];
         let width = visual["width"].as_u64().unwrap_or(0);
         let height = visual["height"].as_u64().unwrap_or(0);
+        if provider == "google_business" && (width < 250 || height < 250) {
+            return Err(invalid(
+                "Google Business Profile photos must be at least 250 pixels on each side",
+            ));
+        }
         if width == 0
             || height == 0
             || width > 16384

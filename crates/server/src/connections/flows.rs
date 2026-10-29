@@ -33,6 +33,7 @@ pub(super) fn post_grant_error(error: ApiError) -> ApiError {
     if error.2.contains(RECOVERY_GUIDANCE)
         || error.2.contains(super::apps::PROVIDER_BUSY_MESSAGE)
         || error.2.contains(super::apps::PENDING_REMOVAL_MESSAGE)
+        || error.2.contains(super::apps::GOOGLE_REMOVAL_MESSAGE)
     {
         return error;
     }
@@ -54,7 +55,10 @@ fn uncertain_authorization() -> String {
 
 async fn require_recovery_admission(state: &AppState, provider: &str) -> Result<()> {
     let mut tx = state.db.begin().await?;
-    super::apps::require_open_oauth_gate(super::apps::oauth_gate(&mut tx, provider).await?)?;
+    super::apps::require_open_oauth_gate(
+        super::apps::oauth_gate(&mut tx, provider).await?,
+        provider,
+    )?;
     tx.commit().await?;
     Ok(())
 }
@@ -86,8 +90,10 @@ pub async fn start(
     let correlation = crypto::random_secret();
     let verifier = crypto::random_secret();
     let mut tx = state.db.begin().await?;
-    let generation =
-        super::apps::require_open_oauth_gate(super::apps::oauth_gate(&mut tx, &provider).await?)?;
+    let generation = super::apps::require_open_oauth_gate(
+        super::apps::oauth_gate(&mut tx, &provider).await?,
+        &provider,
+    )?;
     lock_active_brand(&mut tx, brand).await?;
     let app = super::apps::app_config_tx(&state, &mut tx, &provider).await?;
     let redirect = format!(
@@ -201,7 +207,7 @@ pub async fn callback(
     let mut tx = state.db.begin().await?;
     let generation = super::apps::oauth_gate(&mut tx, &provider)
         .await
-        .and_then(super::apps::require_open_oauth_gate)
+        .and_then(|gate| super::apps::require_open_oauth_gate(gate, &provider))
         .map_err(|error| {
             if error.0 == axum::http::StatusCode::CONFLICT {
                 ApiError(error.0, error.1, format!("This authorization was consumed. {} Once the current provider status permits, start a new authorization.", error.2))
@@ -274,7 +280,11 @@ pub async fn callback(
     })??;
     if candidates.is_empty() {
         return Err(ApiError::bad(recovery(
-            "No eligible destination was returned. Check account eligibility and permissions.",
+            if provider == "google_business" {
+                "No Google Business Profile location was returned. Check account access and permissions; a listed location does not itself establish post eligibility."
+            } else {
+                "No eligible destination was returned. Check account eligibility and permissions."
+            },
         )));
     }
     let encrypted = crypto::encrypt(
@@ -378,8 +388,11 @@ pub async fn flow_destinations(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>> {
     let (row, candidates) = flow(&state, &auth, &headers, id).await?;
+    let destinations = candidates.iter().map(|c| {
+        Ok(json!({"id":c.selection_key().map_err(provider_error)?,"name":c.identity.name,"username":c.identity.username}))
+    }).collect::<Result<Vec<Value>>>()?;
     Ok(data(
-        json!({"id":id,"brand_id":row.get::<Uuid,_>("brand_id"),"provider":row.get::<String,_>("provider"),"destinations":candidates.iter().map(|c|&c.identity).collect::<Vec<_>>()}),
+        json!({"id":id,"brand_id":row.get::<Uuid,_>("brand_id"),"provider":row.get::<String,_>("provider"),"destinations":destinations}),
     ))
 }
 pub async fn complete(
@@ -392,13 +405,15 @@ pub async fn complete(
     let (row, candidates) = flow(&state, &auth, &headers, id).await?;
     let provider: String = row.get("provider");
     let mut tx = state.db.begin().await?;
-    let generation =
-        super::apps::require_open_oauth_gate(super::apps::oauth_gate(&mut tx, &provider).await?)?;
+    let generation = super::apps::require_open_oauth_gate(
+        super::apps::oauth_gate(&mut tx, &provider).await?,
+        &provider,
+    )?;
     let result = async {
     let identity = required(&body, "destination_id")?;
     let candidate = candidates
         .into_iter()
-        .find(|c| c.identity.id == identity)
+        .find(|c| c.selection_key().is_ok_and(|key| key == identity))
         .ok_or_else(|| ApiError::bad("Choose one of the authorized destinations"))?;
     if candidate.app.provider != provider {
         return Err(ApiError::bad(

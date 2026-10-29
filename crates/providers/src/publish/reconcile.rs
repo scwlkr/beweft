@@ -9,6 +9,27 @@ impl Adapter {
     ) -> Result<Option<Step>> {
         let token = Some(c.tokens.access_token.as_str());
         match c.app.provider.as_str() {
+            "google_business" if checkpoint_stage(cp) == "google_post_processing" => {
+                match self.google_post_status(c, cp).await? {
+                    Step::Published {
+                        external_id,
+                        external_url,
+                        mut receipt,
+                    } => {
+                        receipt["reconciled"] = json!(true);
+                        Ok(Some(Step::Published {
+                            external_id,
+                            external_url,
+                            receipt,
+                        }))
+                    }
+                    Step::Checkpoint(next) if next["stage"] == "google_post_rejected" => {
+                        Ok(Some(Step::Checkpoint(next)))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            "google_business" => Ok(None),
             "youtube" => {
                 let session = field(cp, "session")?;
                 let b = self

@@ -13,6 +13,7 @@ async fn bluesky_connection_obeys_provider_and_brand_fences(h: &Harness) {
     let old = Channel {
         app: connections::app_config(&h.state, "bluesky").await.unwrap(),
         identity: Identity {
+            parent: None,
             id: "did:plc:old".into(),
             name: "Old".into(),
             username: None,

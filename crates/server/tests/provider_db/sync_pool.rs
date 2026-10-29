@@ -12,6 +12,7 @@ async fn overlapping_syncs_preserve_pool_and_rotated_tokens(h: &Harness) {
     let c = Channel {
         app: connections::app_config(&h.state, "youtube").await.unwrap(),
         identity: Identity {
+            parent: None,
             id: "sync-destination".into(),
             name: "Fixture".into(),
             username: None,

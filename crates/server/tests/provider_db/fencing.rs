@@ -9,6 +9,7 @@ async fn fresh_x(h: &Harness) -> Uuid {
     let c = Channel {
         app: connections::app_config(&h.state, "x").await.unwrap(),
         identity: Identity {
+            parent: None,
             id: "destination".into(),
             name: "Fixture".into(),
             username: None,
@@ -162,6 +163,7 @@ async fn fenced_writes_and_small_pool(h: &Harness) {
     let new = Channel {
         app: connections::app_config(&h.state, "x").await.unwrap(),
         identity: Identity {
+            parent: None,
             id: "destination".into(),
             name: "Fixture".into(),
             username: None,

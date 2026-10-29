@@ -22,6 +22,9 @@ pub struct Tokens {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Identity {
+    /// Parent account selected during Google Business Profile discovery.
+    #[serde(default)]
+    pub parent: Option<String>,
     pub id: String,
     pub name: String,
     pub username: Option<String>,
@@ -82,10 +85,42 @@ impl AppConfig {
     }
 }
 impl Channel {
+    /// The selected parent is part of the encrypted credential, while the
+    /// destination remains the stable location resource across parent changes.
+    pub fn selection_key(&self) -> Result<String> {
+        if self.app.provider != "google_business" {
+            return Ok(self.identity.id.clone());
+        }
+        let parent = self
+            .identity
+            .parent
+            .as_deref()
+            .ok_or_else(|| invalid("Google account parent is missing"))?;
+        google_resource(parent, "accounts")?;
+        google_resource(&self.identity.id, "locations")?;
+        Ok(format!("{parent}/{}", self.identity.id))
+    }
     pub fn destination_key(&self) -> String {
         match &self.app.instance_url {
             Some(origin) => format!("{}|{}", origin.trim_end_matches('/'), self.identity.id),
             None => self.identity.id.clone(),
         }
     }
+}
+
+/// Google resource path segments are used only after rejecting separators,
+/// escapes and path traversal. Do not accept arbitrary provider-supplied URLs.
+pub fn google_resource<'a>(value: &'a str, kind: &str) -> Result<&'a str> {
+    let id = value
+        .strip_prefix(&format!("{kind}/"))
+        .ok_or_else(|| invalid("Invalid Google resource name"))?;
+    if id.is_empty()
+        || id.len() > 128
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(invalid("Invalid Google resource name"));
+    }
+    Ok(id)
 }

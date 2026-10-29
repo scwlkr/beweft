@@ -13,7 +13,10 @@ impl Adapter {
             ("redirect_uri", redirect_uri),
             ("client_id", &app.client_id),
         ];
-        if matches!(app.provider.as_str(), "x" | "youtube" | "mastodon") {
+        if matches!(
+            app.provider.as_str(),
+            "x" | "youtube" | "google_business" | "mastodon"
+        ) {
             form.push(("code_verifier", verifier));
         }
         let mut request = self.request(Method::POST, &token_endpoint(app)?, None)?;
