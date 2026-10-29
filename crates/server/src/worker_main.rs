@@ -15,14 +15,10 @@ fn main() -> anyhow::Result<()> {
             .ok()
             .filter(|url| !url.is_empty())
             .ok_or_else(|| anyhow::anyhow!("DATABASE_URL is required for a healthcheck"))?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        let result = runtime.block_on(worker_health::check(&database_url, &id));
-        // DNS resolution can use a blocking thread. Do not let runtime teardown
-        // extend the healthcheck deadline while that thread is still resolving.
-        runtime.shutdown_timeout(std::time::Duration::from_millis(100));
-        return result;
+        // SAFETY: main has not initialized a runtime, tracing, a database
+        // connection, or any worker thread. Regular worker mode skips this.
+        unsafe { worker_health::isolate_postgres_environment() };
+        return worker_health::probe(database_url, id);
     }
     let id = configured_id.unwrap_or_else(|| format!("worker-{}", uuid::Uuid::new_v4()));
     beweft::tracing_init();

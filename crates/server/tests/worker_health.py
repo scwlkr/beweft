@@ -11,10 +11,12 @@ import os
 from pathlib import Path
 import signal
 import socket
+import struct
 import subprocess
 import tempfile
 import threading
 import time
+import urllib.parse
 import uuid
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -117,6 +119,60 @@ def query_deadline(env):
         assert locker.returncode == 0, errors
 
 
+def tls_certificate_deadline(env, temp):
+    """A configured TLS CA FIFO cannot outlive the healthcheck deadline."""
+    fifo = temp / "tls-ca-fifo"
+    os.mkfifo(fifo, 0o600)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(5)
+    port = listener.getsockname()[1]
+    observed, release = threading.Event(), threading.Event()
+    observations = []
+    def fake_postgres():
+        try:
+            conn, _ = listener.accept()
+            with conn:
+                conn.settimeout(5)
+                request = b""
+                while len(request) < 8:
+                    chunk = conn.recv(8 - len(request))
+                    if not chunk:
+                        raise EOFError("Client closed before SSLRequest")
+                    request += chunk
+                assert struct.unpack("!II", request) == (8, 80877103)
+                conn.sendall(b"S")
+                conn.settimeout(1)
+                try:
+                    observations.append(conn.recv(1))
+                except socket.timeout:
+                    observations.append(None)  # CA loading has not sent ClientHello.
+                observed.set()
+                release.wait(6)
+        except Exception as error:
+            observations.append(error)
+            observed.set()
+        finally:
+            listener.close()
+    thread = threading.Thread(target=fake_postgres, daemon=True)
+    thread.start()
+    query = urllib.parse.urlencode({"sslmode": "verify-full", "sslrootcert": str(fifo)})
+    url = f"postgres://fixture:isolated-tls-password@127.0.0.1:{port}/fixture?{query}"
+    started = time.monotonic()
+    try:
+        result = check(dict(env, DATABASE_URL=url), "--healthcheck", success=False)
+        elapsed = time.monotonic() - started
+        assert observed.wait(2) and observations == [None], observations
+        assert elapsed < 5 and "timed out" in result.stderr.lower(), (elapsed, result.stderr)
+        assert "isolated-tls-password" not in result.stderr
+    finally:
+        release.set()
+        thread.join(timeout=6)
+        fifo.unlink()
+        assert not thread.is_alive(), "TLS fixture did not stop"
+
+
 def compose_contract(clean_env):
     fixture_env = dict(clean_env, BEWEFT_DB_PASSWORD="isolated-compose-password",
                        BEWEFT_SETUP_SECRET="isolated-compose-setup", BEWEFT_ENCRYPTION_KEY="1" * 64)
@@ -129,10 +185,79 @@ def compose_contract(clean_env):
     assert worker["healthcheck"]["timeout"] == "5s"
 
 
+def postgres_environment_isolation(env, temp):
+    """A passwordless URL must never read ambient PG credentials or files."""
+    fifo = temp / "pgpass-fifo"
+    os.mkfifo(fifo, 0o600)
+    try:
+        hostile = dict(env, PGPASSFILE=str(fifo), PGPASSWORD="wrong-ambient-password",
+                       PGHOST="unrelated.invalid", PGHOSTADDR="127.0.0.2", PGPORT="1",
+                       PGUSER="unrelated-user", PGDATABASE="unrelated-database",
+                       PGOPTIONS="-c search_path=unrelated,public", PGSSLMODE="verify-full",
+                       PGSSLROOTCERT=str(fifo), PGSSLCERT=str(fifo), PGSSLKEY=str(fifo),
+                       PGAPPNAME="unrelated-application")
+        started = time.monotonic()
+        check(hostile, "--healthcheck", success=True)
+        assert time.monotonic() - started < 5
+
+        # A FIFO without a writer reproduces SQLx's former synchronous pgpass
+        # hang. Accept success only if the test server permits passwordless auth.
+        no_password = f"postgres://{DB_USER}@127.0.0.1:{DB_PORT}/{DB}"
+        no_pass_env = dict(env, DATABASE_URL=no_password, PGPASSFILE=str(fifo))
+        started = time.monotonic()
+        result = subprocess.run([str(BIN / "beweft-worker"), "--healthcheck"], cwd=ROOT,
+                                env=no_pass_env, capture_output=True, text=True, timeout=5)
+        assert time.monotonic() - started < 5 and result.returncode in (0, 1)
+        assert DB_PASSWORD not in result.stdout + result.stderr
+        with_ambient_password = dict(no_pass_env, PGPASSWORD=DB_PASSWORD)
+        other = subprocess.run([str(BIN / "beweft-worker"), "--healthcheck"], cwd=ROOT,
+                               env=with_ambient_password, capture_output=True, text=True, timeout=5)
+        assert other.returncode in (0, 1)
+        assert (other.returncode == 0) == (result.returncode == 0), "Ambient PGPASSWORD changed authentication"
+
+        # Explicit query-form connection details retain normal URL support.
+        query = urllib.parse.urlencode({"host": "127.0.0.1", "port": DB_PORT, "user": DB_USER,
+                                        "password": DB_PASSWORD, "dbname": DB, "sslmode": "disable"})
+        check(dict(hostile, DATABASE_URL="postgres:///?" + query),
+              "--healthcheck", success=True)
+        for incomplete in (f"postgres://127.0.0.1:{DB_PORT}/{DB}",
+                           f"postgres://{DB_USER}@127.0.0.1:{DB_PORT}/",
+                           f"postgres://{DB_USER}@/{DB}"):
+            result = check(dict(hostile, DATABASE_URL=incomplete), "--healthcheck", success=False)
+            assert "DATABASE_URL" in result.stderr and ("explicitly provide" in result.stderr or "PostgreSQL URL" in result.stderr), result.stderr
+    finally:
+        fifo.unlink()
+
+
+def schema_isolation(env):
+    """Ambient and explicit alternate schemas cannot spoof public health."""
+    sql("""
+        CREATE SCHEMA fixture_shadow;
+        CREATE TABLE fixture_shadow.worker_heartbeats(id text PRIMARY KEY, last_seen timestamptz NOT NULL);
+        INSERT INTO fixture_shadow.worker_heartbeats(id,last_seen) VALUES('named-b',now());
+    """)
+    poisoned = dict(env, BEWEFT_WORKER_ID="named-b", PGOPTIONS="-c search_path=fixture_shadow,public")
+    before_public = sql("SELECT last_seen::text FROM public.worker_heartbeats WHERE id='named-b'")
+    before_shadow = sql("SELECT last_seen::text FROM fixture_shadow.worker_heartbeats WHERE id='named-b'")
+    result = check(poisoned, "--healthcheck", success=False)
+    assert "missing or stale" in result.stderr.lower()
+    assert sql("SELECT last_seen::text FROM public.worker_heartbeats WHERE id='named-b'") == before_public
+    assert sql("SELECT last_seen::text FROM fixture_shadow.worker_heartbeats WHERE id='named-b'") == before_shadow
+
+    sql("UPDATE public.worker_heartbeats SET last_seen=now() WHERE id='named-b'; "
+        "UPDATE fixture_shadow.worker_heartbeats SET last_seen=now()-interval '31 seconds' WHERE id='named-b';")
+    check(poisoned, "--healthcheck", success=True)
+    shadow_options = urllib.parse.urlencode({"options": "-c search_path=fixture_shadow,public"})
+    check(dict(poisoned, DATABASE_URL=DATABASE_URL + "?" + shadow_options), "--healthcheck", success=False)
+    public_options = urllib.parse.urlencode({"options": "-c search_path=public"})
+    check(dict(poisoned, DATABASE_URL=DATABASE_URL + "?" + public_options), "--healthcheck", success=True)
+    sql("UPDATE public.worker_heartbeats SET last_seen=now()-interval '31 seconds' WHERE id='named-b'")
+
+
 def run(temp):
     temp = Path(temp)
     clean_env = {k: v for k, v in os.environ.items()
-                 if not k.startswith(("BEWEFT_", "COMPOSE_")) and k != "DATABASE_URL"}
+                 if not k.startswith(("BEWEFT_", "COMPOSE_", "PG")) and k != "DATABASE_URL"}
     marker = temp / "health-must-not-create-media"
     health_env = dict(clean_env, DATABASE_URL=DATABASE_URL, BEWEFT_WORKER_ID="named-a",
                       BEWEFT_MEDIA_DIR=str(marker), BEWEFT_PUBLIC_URL="not-an-origin",
@@ -162,16 +287,20 @@ def run(temp):
         assert not marker.exists(), "Health or invalid invocation created a media directory"
         compose_contract(clean_env)
         connection_deadline(health_env)
+        tls_certificate_deadline(health_env, temp)
 
         # Two named instances must be independently observable.
+        worker_app_name = "beweft-worker-env-" + RUN_ID
         worker_a = subprocess.Popen([str(BIN / "beweft-worker")], cwd=ROOT,
-                                    env=dict(worker_env, BEWEFT_WORKER_ID="named-a"),
+                                    env=dict(worker_env, BEWEFT_WORKER_ID="named-a", PGAPPNAME=worker_app_name),
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         processes.append(worker_a)
         wait_until(lambda: sql("SELECT to_regclass('public.worker_heartbeats') IS NOT NULL") == "t",
                    "Worker did not complete isolated migrations")
         wait_until(lambda: sql("SELECT count(*) FROM worker_heartbeats WHERE id='named-a'") == "1",
                    "Named worker A did not heartbeat")
+        assert sql("SELECT count(*) FROM pg_stat_activity WHERE application_name='" + worker_app_name + "'") != "0", \
+            "Normal worker no longer honors its PostgreSQL environment"
         worker_b = subprocess.Popen([str(BIN / "beweft-worker")], cwd=ROOT,
                                     env=dict(worker_env, BEWEFT_WORKER_ID="named-b"),
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -179,6 +308,7 @@ def run(temp):
         wait_until(lambda: sql("SELECT count(*) FROM worker_heartbeats WHERE id='named-b'") == "1",
                    "Named worker B did not heartbeat")
         assert not check(health_env, "--healthcheck", success=True).stdout
+        postgres_environment_isolation(health_env, temp)
         check(dict(health_env, BEWEFT_WORKER_ID="named-b"), "--healthcheck", success=True)
         check(dict(health_env, BEWEFT_WORKER_ID="wrong-id"), "--healthcheck", success=False)
         query_deadline(health_env)
@@ -195,6 +325,7 @@ def run(temp):
         stale_before = sql("SELECT last_seen::text FROM worker_heartbeats WHERE id='named-b'")
         check(dict(health_env, BEWEFT_WORKER_ID="named-b"), "--healthcheck", success=False)
         assert sql("SELECT last_seen::text FROM worker_heartbeats WHERE id='named-b'") == stale_before
+        schema_isolation(health_env)
 
         # A fresh retained heartbeat does not grant the health process permission
         # to start a scheduler or claim a due publication.
@@ -239,7 +370,7 @@ def run(temp):
         stop(generated)
         assert generated.returncode == 0
         assert sql("SELECT count(*) FROM worker_heartbeats WHERE id LIKE 'worker-%'") == "0"
-        print("PASS: per-instance health, startup isolation, stopped/stale workers, no health writes or claims, connection/query deadlines, worker restart, generated ID and Compose wiring")
+        print("PASS: per-instance health, FIFO password-file and TLS deadlines, ambient PostgreSQL isolation, public-schema fencing, no health writes or claims, connection/query deadlines, worker restart, generated ID and Compose wiring")
     finally:
         for process in reversed(processes):
             stop(process)

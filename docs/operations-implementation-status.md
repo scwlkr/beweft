@@ -43,8 +43,17 @@ These files have not been built or rehearsed together.
 
 `beweft-worker --healthcheck` only needs `DATABASE_URL` and a stable
 `BEWEFT_WORKER_ID`. It reads that instance's heartbeat from the database with a
-three-second connect/query deadline; it does not start a worker, run migrations,
-create media directories or write a heartbeat. A heartbeat is healthy for 30
+three-second connect/query deadline and a four-second overall probe deadline; it
+does not start a worker, run migrations,
+create media directories or write a heartbeat. The PostgreSQL URL must explicitly
+provide the host (or socket), user and database; its password may be omitted when
+the server permits passwordless authentication. Explicit URL TLS and connection
+options are supported; set required TLS settings in the URL. Ambient `PG*`
+variables and password files are ignored in health mode. Health checks support
+the `public` schema: the connection's
+current schema must be `public`, and the heartbeat lookup is schema-qualified.
+Regular worker configuration is unchanged; its database session must also use
+`public` for this healthcheck to describe that worker. A heartbeat is healthy for 30
 seconds. A crashed worker's last heartbeat can remain fresh until that window
 expires; graceful shutdown removes its row. IDs must be unique per worker sharing
 a database and contain 1–128 ASCII letters, digits, `.`, `_` or `-`. A worker
