@@ -1,7 +1,7 @@
 use crate::{
     auth::Auth,
-    catalog::Filter,
     error::{ApiError, Result, data, required, uuid},
+    listing::Page,
     state::AppState,
 };
 use axum::{
@@ -9,20 +9,40 @@ use axum::{
     extract::{Path, Query, State},
 };
 use chrono::Utc;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 const SELECT: &str = "SELECT (to_jsonb(p)-'lease_until')||jsonb_build_object('channel_name',c.name,'provider',c.provider) FROM publications p JOIN channels c ON c.id=p.channel_id";
+const SUMMARY: &str = "jsonb_build_object('id',p.id,'post_id',p.post_id,'brand_id',p.brand_id,'channel_id',p.channel_id,'channel_name',c.name,'provider',c.provider,'post_version',p.post_version,'scheduled_at',p.scheduled_at,'scheduling_mode',p.scheduling_mode,'state',p.state,'created_at',p.created_at,'updated_at',p.updated_at)";
+#[derive(Deserialize, Default)]
+pub struct PublicationListFilter {
+    brand_id: Option<Uuid>,
+    channel_id: Option<Uuid>,
+    id: Option<Uuid>,
+    group: Option<String>,
+    view: Option<String>,
+    limit: Option<u32>,
+    cursor: Option<String>,
+}
 pub async fn get_publication(db: &PgPool, id: Uuid) -> Result<Value> {
     Ok(sqlx::query_scalar(&format!("{SELECT} WHERE p.id=$1"))
         .bind(id)
         .fetch_one(db)
         .await?)
 }
+pub(crate) async fn get_publication_summary(db: &PgPool, id: Uuid) -> Result<Value> {
+    Ok(sqlx::query_scalar(&format!(
+        "SELECT {SUMMARY} FROM publications p JOIN channels c ON c.id=p.channel_id WHERE p.id=$1"
+    ))
+    .bind(id)
+    .fetch_one(db)
+    .await?)
+}
 pub async fn list(
     State(state): State<AppState>,
     auth: Auth,
-    Query(filter): Query<Filter>,
+    Query(filter): Query<PublicationListFilter>,
 ) -> Result<Json<Value>> {
     if let Some(id) = filter.brand_id {
         auth.brand(id)?;
@@ -30,8 +50,58 @@ pub async fn list(
     if let Some(id) = filter.channel_id {
         auth.brand(crate::catalog::channel_brand(&state, id).await?)?;
     }
-    let rows:Vec<Value>=sqlx::query_scalar(&format!("{SELECT} WHERE ($1::uuid IS NULL OR p.brand_id=$1) AND ($2::uuid IS NULL OR p.channel_id=$2) AND (cardinality($3::uuid[])=0 OR p.brand_id=ANY($3)) ORDER BY p.scheduled_at,p.created_at")).bind(filter.brand_id).bind(filter.channel_id).bind(&auth.brand_ids).fetch_all(&state.db).await?;
-    Ok(data(rows))
+    if filter
+        .group
+        .as_deref()
+        .is_some_and(|g| !matches!(g, "queue" | "history"))
+        || filter.view.as_deref().is_some_and(|v| v != "summary")
+    {
+        return Err(ApiError::bad("Unsupported publication group or view"));
+    }
+    let value = if filter.view.as_deref() == Some("summary") {
+        SUMMARY
+    } else {
+        "(to_jsonb(p)-'lease_until')||jsonb_build_object('channel_name',c.name,'provider',c.provider)"
+    };
+    let filters = json!({"brand_id":filter.brand_id,"channel_id":filter.channel_id,"id":filter.id,"group":filter.group,"view":filter.view});
+    let page = Page::new(
+        "publications",
+        filter.limit,
+        filter.cursor.as_deref(),
+        filters,
+        &auth,
+    )?;
+    let condition = "($1::uuid IS NULL OR p.brand_id=$1) AND ($2::uuid IS NULL OR p.channel_id=$2) AND (cardinality($3::uuid[])=0 OR p.brand_id=ANY($3)) AND ($4::uuid IS NULL OR p.id=$4) AND ($5::text IS NULL OR ($5='queue' AND p.state IN ('queued','sending')) OR ($5='history' AND p.state NOT IN ('queued','sending')))";
+    if let Some(page) = page {
+        let query = format!(
+            "SELECT {value},p.created_at,p.id FROM publications p JOIN channels c ON c.id=p.channel_id WHERE {condition} AND ($6::timestamptz IS NULL OR (p.created_at,p.id)<($6,$7)) ORDER BY p.created_at DESC,p.id DESC LIMIT $8"
+        );
+        let rows = sqlx::query_as(&query)
+            .bind(filter.brand_id)
+            .bind(filter.channel_id)
+            .bind(&auth.brand_ids)
+            .bind(filter.id)
+            .bind(filter.group.as_deref())
+            .bind(page.created_at)
+            .bind(page.id)
+            .bind(page.limit + 1)
+            .fetch_all(&state.db)
+            .await?;
+        page.finish(rows)
+    } else {
+        let query = format!(
+            "SELECT {value} FROM publications p JOIN channels c ON c.id=p.channel_id WHERE {condition} ORDER BY p.scheduled_at,p.created_at"
+        );
+        let rows: Vec<Value> = sqlx::query_scalar(&query)
+            .bind(filter.brand_id)
+            .bind(filter.channel_id)
+            .bind(&auth.brand_ids)
+            .bind(filter.id)
+            .bind(filter.group.as_deref())
+            .fetch_all(&state.db)
+            .await?;
+        Ok(data(rows))
+    }
 }
 pub async fn attempts(
     State(state): State<AppState>,

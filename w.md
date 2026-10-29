@@ -1,6 +1,14 @@
 # beweft project notes
 
-Status: implementation paused at the owner's request for orchestrator handoff.
+Status: the owner resumed the full autonomous build on 2026-10-29 with three
+implementation workers and the orchestrator. Current assignments, integration
+decisions and verification boundaries are in
+[the active delivery record](docs/orchestration-current.md).
+Draft PR #9 preserves the pilot's brand-recovery work and an unresolved review
+finding. Nothing from that pilot has yet been merged or deployed.
+CLI/MCP qualification PR #10 is integrated in the handoff branch; shared schema
+updates, scheduling request recovery and self-host delivery remain in progress.
+Results and workflow improvements: [cycle 1](docs/orchestration-cycle-1.md).
 Start continuation with [ORCHESTRATOR-HANDOFF.md](ORCHESTRATOR-HANDOFF.md), which
 contains the launch prompt, five-agent ownership, PR stack and unresolved review
 findings. No previous implementation agents remain active. Research decisions are

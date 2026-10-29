@@ -1,7 +1,8 @@
 # beweft: autonomous orchestrator handoff
 
 Prepared 2026-10-29 at the owner's explicit request to pause implementation and
-transfer the remaining build to an orchestrator with five parallel agents.
+transfer the remaining build to an orchestrator. The owner subsequently revised
+the team to three concurrent subagents plus the orchestrator to fit this runtime.
 This is a continuation, not a fresh scaffold. No implementation agents remain
 running from the previous session. Read the launch prompt below in a new chat.
 
@@ -50,6 +51,14 @@ Main's verified merge is `26e3ebf45fb530c5d004f04216bb94d24ddf54e6`.
 | [#6](https://github.com/scwlkr/beweft/pull/6) | `codex/provider-adapters`, `ae56dec` | Draft, based on #5. Provider modules and fixtures; one outstanding revocation/reconnect race. Routes/worker are not wired. |
 | [#7](https://github.com/scwlkr/beweft/pull/7) | `codex/cli-self-hosting`, `d0fd324` | Draft, based on #6. Compiling partial CLI/MCP and unverified packaging. See its explicit status document. |
 
+A subsequent bounded trial produced [draft PR #9](https://github.com/scwlkr/beweft/pull/9),
+`codex/cycle1-brand-recovery`, head `a6b3d9f`. It targets the handoff branch but
+has **not** been merged; its changes are not present in the handoff checkout.
+The reviewed code at `1b519c3` passes 28 browser tests but has a remaining
+automatic-fallback/snapshot-ordering race. See `docs/orchestration-cycle-1.md`
+before continuing it; create a worktree from that remote branch to retain its
+progress. Its old managed worktree is retired after preserving the branch.
+
 The handoff branch `codex/orchestrator-handoff` contains this entire stack plus
 the handoff documentation. For a fresh clone, fetch and check out that branch
 after confirming there is no unrelated local work. Inspect remote state before acting; do not
@@ -73,6 +82,10 @@ with duplicate historical diffs. Never force-push another agent's active branch.
    `useWorkspace.ts` now uses the same cleanup/invalidation for fallback as for
    explicit selection. Add the removed/archived-active-brand plus failed-next-
    brand-load regression. No stale draft or composer may remain editable.
+   PR #9 adds broader recovery work and tests, but review still blocks it:
+   automatic A→B fallback can invalidate a newer successful snapshot excluding
+   B. Preserve that branch, add the exact pending-snapshot regression, and fix
+   the distinction between automatic fallback and manual selection.
 3. **Disconnect/reconnect versus remote revocation — P2, not fixed.**
    `connections/credentials.rs` commits disconnect and releases its lock before
    remote revoke. An already-authorized reconnect can complete during the gap;
@@ -81,6 +94,12 @@ with duplicate historical diffs. Never force-push another agent's active branch.
    before that boundary. Test a blocked revoke, concurrent reconnect completion,
    then released revoke. [Google's revocation behavior](https://developers.google.com/identity/protocols/oauth2/web-server#tokenrevoke)
    matters here; a channel lock covering only local writes is insufficient.
+4. **Pre-existing browser authentication follow-ups.** The pilot reproduced
+   composer/direct-view 401 responses being handled locally without clearing
+   the workspace, and a delayed logout callback signing out a subsequently
+   authenticated session. They also occur at the pilot base and were outside
+   its bounded changes. Track them for the full web/authentication delivery;
+   do not mistake workspace-read session guards for coverage of every caller.
 
 Each consequential fix requires a **brand-new, read-only reviewer with no
 implementation conversation**. Prior reviewers cannot review their own fixes.
@@ -147,7 +166,12 @@ implementation conversation**. Prior reviewers cannot review their own fixes.
    merged reviewed PRs, current capability matrix and only specific external
    blockers. Keep server/domain placeholders until the owner chooses them.
 
-## Five-agent ownership plan
+## Three-agent ownership plan
+
+Run at most three subagents concurrently: agent 1 owns workstreams A+B below,
+agent 2 owns C, and agent 3 owns D+E. These are five workstreams, not five agents.
+Rotate assignments as dependencies finish. A fresh reviewer occupies a released
+worker slot; never exceed three active children or reuse an implementer as reviewer.
 
 Use separate worktrees/branches so agents do not overwrite one shared checkout.
 Agree the narrow interfaces before changing them; workers remain productive on
@@ -167,6 +191,44 @@ changes through the orchestrator. C never hand-edits generated types. E must
 coordinate the worker ID/health hook with A. All agents submit focused PRs;
 cross-lane dependencies are explicit. No duplicate implementation in two lanes.
 
+## Compact orchestration contract
+
+Use the same small contract for each independently mergeable task:
+
+- State the behavior, acceptance cases, exclusions, owned files, starting SHA,
+  target PR branch and required propagation through the stack. For asynchronous
+  flows, identify authoritative responses and optional dependencies explicitly.
+  Check both clearing old state and making replacement state usable. Exercise
+  persistent outages, not just one failed request. For a user-requested bounded
+  trial, define its stop gate/rework limit before starting; the full-product
+  mandate continues through normal fix/review loops without that trial limit.
+- Give workers fresh, self-contained context. Request milestone/blocker updates
+  and a final report of at most 250 words: exact SHA/PR, files, checks, limitations
+  and owned resources. Keep raw command logs out of the parent unless needed to
+  decide a failure. Prefer a short current-state record over rereading this full
+  handoff at every cycle. End the worker turn with that final checkpoint; do not
+  wait for acknowledgement. The orchestrator waits for completion rather than
+  sending redundant finish requests.
+- Freeze a committed head before review. Brief a new reviewer with requirements,
+  base/head and source access, not the implementer's rationale. Review affected
+  invariants and surrounding behavior, not just whether a new test passes.
+- Reserve capacity for review and fixes. A worker that has handed off should
+  finish its turn; an observer should return concise findings and release its
+  slot. A consequential fix gets another newly spawned reviewer.
+- Transfer ownership of temporary test resources that the reviewer still needs;
+  clean them once review and integration finish. Reuse immutable tools/caches,
+  but coordinate mutable build outputs and identify their source revision after
+  any negative-control experiment. Verify the integrated SHA before
+  retiring the managed worktree through Codex.
+- Prefer worktree-owned dependency installations backed by the package store.
+  If temporary links are used, include safe invocation/environment details in
+  the handoff. Do not force a package manager to replace shared dependencies
+  just to bypass a verification prompt. Stage explicit paths: directory ignore
+  patterns may not hide temporary symlinks.
+
+The bounded trial and its measured limits are recorded in
+`docs/orchestration-cycle-1.md`. It is not evidence of five-worker throughput.
+
 ## Capacity and model requirement
 
 Use **`gpt-6.1-terra` with `reasoning_effort: "max"`**, including fresh reviewers.
@@ -174,15 +236,13 @@ For `collaboration.spawn_agent`, model overrides require `fork_turns: "none"`.
 Give each agent a self-contained brief and file ownership; tell it it is not
 alone and must preserve others' changes.
 
-Five simultaneously active children plus the orchestrator require **six active
-agent slots**. The handoff session advertised only four total (three children).
-No five-agent team was launched or claimed. The destination must expose at least
-six slots; verify its actual tool limit. Do not circumvent limits with hidden
-processes or claim queued agents are running in parallel. If capacity is lower,
-report that exact runtime limitation rather than silently substituting a smaller
-team. Fresh reviewers occupy released worker slots; never reuse an implementer
-as the supposedly independent reviewer. Keep five lanes progressing as capacity
-allows, with no human approval bottleneck.
+The owner explicitly authorizes **three concurrent subagents plus the
+orchestrator**, matching the four-slot runtime. This supersedes the earlier
+five-child requirement. Do not stop because six slots are unavailable. Keep at
+most three children active and rotate completed worker slots into fresh reviews.
+Never reuse an implementer as the independent reviewer or bypass the host limit.
+Keep the five workstreams progressing across this three-agent team without
+routine human approval gates.
 
 ## Copy-and-paste launch prompt
 
@@ -200,18 +260,24 @@ handoffs when present. Apply $wstack from
 technical-stack and code-review references. The handoff is a starting record;
 verify Git/PR/runtime state before consequential actions.
 
-Run five parallel implementation lanes using the ownership table in the handoff.
+Run three concurrent subagents plus yourself, within the four-agent runtime.
+This is my explicit revision of the previous five-child requirement: do not
+block waiting for six slots. Assign agent 1 to core/provider workstreams A+B,
+agent 2 to web workstream C, and agent 3 to CLI/operations workstreams D+E.
 Every subagent, including newly spawned independent reviewers, must use
 gpt-6.1-terra at max reasoning effort. Spawn with fork_turns="none" and complete
-self-contained briefs. Use separate managed worktrees/branches. Check that the
-runtime actually permits five children plus you before launching. If it cannot,
-state that exact capacity blocker; do not pretend serial/queued work satisfies
-the requested parallel team or bypass the host limit.
+self-contained briefs. Use separate managed worktrees/branches. Keep at most
+three children active; when a worker finishes, use its released slot for a
+brand-new reviewer or the next assignment. Do not bypass the host limit.
 
 You own integration, decomposition, shared contracts, test coordination, PR
 quality, release readiness and cleanup. Workers own their files and submit
-focused PRs with clear results, validation and limitations. Keep all five lanes
+focused PRs with clear results, validation and limitations. Keep the three agents
 productive, resolve interface decisions promptly and prevent overlapping edits.
+Use the handoff's compact orchestration contract: explicit landing branches,
+fresh bounded briefs, reports of at most 250 words, frozen review SHAs and
+named cleanup ownership. Protect your own context by consuming decisions and
+failure evidence instead of replaying full worker logs.
 Use released slots for brand-new read-only adversarial reviewers; never reuse
 an implementer or inherited implementation conversation as independent review.
 Consequential fixes always receive another fresh review. Review PR diffs and

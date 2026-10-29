@@ -1,10 +1,16 @@
 # Delivery checklist
 
-Implementation is paused for the owner's orchestrator handoff; use
-`ORCHESTRATOR-HANDOFF.md` for the precise checkpoints, outstanding findings and
-launch prompt. This is working status, not a release claim. Hosting remains local until the
+Implementation resumed on 2026-10-29; use
+`docs/orchestration-current.md` for active checkpoints and
+`ORCHESTRATOR-HANDOFF.md` for the starting stack and requirements.
+This is working status, not a release claim. Hosting remains local until the
 owner chooses a server and domain. Example production values must stay clearly
 marked placeholders. No live provider publication has been authorized for tests.
+
+The subsequent bounded cycle-1 trial is recorded in `docs/orchestration-cycle-1.md`.
+Draft PR #9 retains partial brand-recovery improvements and passing browser
+checks, with a remaining review blocker. It is not merged into this branch or
+main. Two pre-existing browser authentication follow-ups were also recorded.
 
 ## Complete
 

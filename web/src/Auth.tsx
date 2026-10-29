@@ -1,45 +1,90 @@
 import { ArrowUpRight, ShieldCheck } from "lucide-react";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { z } from "zod";
-import { api, authLock } from "./api";
+import { api, ApiError, authLock, rotateAuthEpoch } from "./api";
 import { Unicorn } from "./components/brand";
 import { Busy, ErrorNotice, Field, Submit } from "./components/shared";
+import { Button } from "./components/ui/button";
 export function Auth({
   onReady,
   signingOut,
   signOutError,
+  sessionCheckFailed,
+  onRetrySession,
 }: {
-  onReady: () => void;
+  onReady: (epoch: string) => void;
   signingOut: boolean;
   signOutError: string;
+  sessionCheckFailed: boolean;
+  onRetrySession: () => void;
 }) {
   const [initialized, setInitialized] = useState<boolean | null>(null);
   const [error, setError] = useState("");
+  const [statusError, setStatusError] = useState("");
+  const [statusAttempt, setStatusAttempt] = useState(0);
   const [busy, setBusy] = useState(false);
+  const activeRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => activeRequest.current?.abort(), []);
   useEffect(() => {
-    api("/auth/status", z.object({ initialized: z.boolean() }))
-      .then((d) => setInitialized(d.initialized))
-      .catch((e) => setError(e.message));
-  }, []);
+    let active = true;
+    const controller = new AbortController();
+    setStatusError("");
+    api(
+      "/auth/status",
+      z.object({ initialized: z.boolean() }),
+      "GET",
+      undefined,
+      controller.signal,
+    )
+      .then((d) => {
+        if (active) setInitialized(d.initialized);
+      })
+      .catch((e) => {
+        if (!active) return;
+        if (e instanceof ApiError && e.code === "session_changed")
+          setStatusAttempt((attempt) => attempt + 1);
+        else setStatusError(e.message);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [statusAttempt]);
   const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (signingOut) return;
     setBusy(true);
     setError("");
     const data = new FormData(e.currentTarget);
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 15000);
+    activeRequest.current = controller;
     try {
-      await authLock(() =>
-        api(
+      const epoch = await authLock(async () => {
+        const epoch = rotateAuthEpoch();
+        await api(
           initialized ? "/auth/login" : "/auth/bootstrap",
           z.object({ id: z.string(), email: z.string() }),
           "POST",
           Object.fromEntries(data),
-        ),
-      );
-      onReady();
+          controller.signal,
+        );
+        return epoch;
+      }, controller.signal);
+      onReady(epoch);
     } catch (e) {
-      setError((e as Error).message);
+      setError(
+        timedOut
+          ? "Sign-in could not be confirmed. Check your connection, then try again."
+          : (e as Error).message,
+      );
     } finally {
+      clearTimeout(timeout);
+      if (activeRequest.current === controller) activeRequest.current = null;
       setBusy(false);
     }
   };
@@ -78,8 +123,19 @@ export function Auth({
           <Unicorn />
           beweft
         </div>
-        {initialized === null && !error ? (
-          <Busy />
+        {initialized === null ? (
+          statusError ? (
+            <div className="form-stack">
+              <ErrorNotice message={statusError} />
+              <Button
+                onClick={() => setStatusAttempt((attempt) => attempt + 1)}
+              >
+                Retry
+              </Button>
+            </div>
+          ) : (
+            <Busy />
+          )
         ) : (
           <>
             <div className="eyebrow">YOUR OWN CORNER OF THE INTERNET</div>
@@ -128,6 +184,16 @@ export function Auth({
               </Field>
               {(error || signOutError) && (
                 <ErrorNotice message={error || signOutError} />
+              )}
+              {sessionCheckFailed && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={busy || signingOut}
+                  onClick={onRetrySession}
+                >
+                  Retry session check
+                </Button>
               )}
               <Submit pending={busy || signingOut}>
                 {signingOut

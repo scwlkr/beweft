@@ -9,6 +9,7 @@ use axum::{
     extract::{Path, Query, State},
 };
 use chrono::{DateTime, Datelike, Duration, NaiveTime, TimeZone, Utc};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
@@ -73,7 +74,8 @@ pub async fn next_slot(tx: &mut Transaction<'_, Postgres>, channel: Uuid) -> Res
             .fetch_all(&mut **tx)
             .await?;
     if rules.is_empty() {
-        return Err(ApiError::bad(
+        return Err(ApiError::bad_code(
+            "missing_posting_schedule",
             "This channel needs a posting schedule or an exact date",
         ));
     }
@@ -115,7 +117,8 @@ pub async fn next_slot_after(
             return Ok(candidate);
         }
     }
-    Err(ApiError::conflict(
+    Err(ApiError::conflict_code(
+        "posting_slots_unavailable",
         "No free posting slot in the next 60 days",
     ))
 }
@@ -131,14 +134,24 @@ pub fn parse_future(value: &Value) -> Result<DateTime<Utc>> {
     }
     Ok(time)
 }
+#[derive(Deserialize, Default)]
+pub struct ScheduleResponseView {
+    view: Option<String>,
+}
 pub async fn schedule_post(
     State(state): State<AppState>,
     auth: Auth,
     Path(id): Path<Uuid>,
+    Query(view): Query<ScheduleResponseView>,
     Json(input): Json<crate::contracts::SchedulePostRequest>,
 ) -> Result<Json<Value>> {
     let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     auth.scope("publishing:write")?;
+    let summary = match view.view.as_deref() {
+        None => false,
+        Some("summary") => true,
+        _ => return Err(ApiError::bad("Unsupported schedule response view")),
+    };
     let mut channels: Vec<Uuid> = serde_json::from_value(body["channel_ids"].clone())
         .map_err(|_| ApiError::bad("channel_ids must be UUIDs"))?;
     if channels.is_empty() || channels.len() > 50 {
@@ -166,7 +179,8 @@ pub async fn schedule_post(
         .as_i64()
         .ok_or_else(|| ApiError::bad("version is required"))?;
     if expected_version != i64::from(post.get::<i32, _>("version")) {
-        return Err(ApiError::conflict(
+        return Err(ApiError::conflict_code(
+            "post_version_conflict",
             "Draft changed; reload before scheduling",
         ));
     }
@@ -198,7 +212,11 @@ pub async fn schedule_post(
     tx.commit().await?;
     let mut rows = Vec::new();
     for id in ids {
-        rows.push(crate::publications::get_publication(&state.db, id).await?);
+        rows.push(if summary {
+            crate::publications::get_publication_summary(&state.db, id).await?
+        } else {
+            crate::publications::get_publication(&state.db, id).await?
+        });
     }
     Ok(data(rows))
 }
