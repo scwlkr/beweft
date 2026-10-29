@@ -47,6 +47,7 @@ class RejectFixtureRequest(http.server.BaseHTTPRequestHandler):
         self.send_response(500)
         self.end_headers()
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = reject
+    do_HEAD = do_OPTIONS = do_CONNECT = do_TRACE = reject
 
     def log_message(self, *args):
         pass

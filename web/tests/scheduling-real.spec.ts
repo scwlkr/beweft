@@ -986,3 +986,77 @@ test("a lost retirement response recovers its durable rejection after reload", a
     );
   });
 });
+
+test("a rejected receipt survives a deleted draft and can be recovered as new content", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    await page.route(routeFor(f.post.id), (route) => route.abort("failed"));
+    await page.route("**/api/v1/schedule-requests/*/retire", async (route) => {
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBe(true);
+      await route.abort("failed");
+    });
+    await start(page);
+    const saved = await pending(page, f.key);
+    await page.getByRole("button", { name: "Stop original schedule" }).click();
+    await expect(page.getByRole("dialog").getByRole("alert")).toBeVisible();
+    expect(
+      (await read(context, `/schedule-requests/${saved.id}`)).outcome,
+    ).toBe("rejected");
+    const deleted = await context.request.delete(`/api/v1/posts/${f.post.id}`, {
+      headers: {
+        "X-Beweft-Request": "1",
+        Origin: process.env.BEWEFT_TEST_URL!,
+      },
+    });
+    expect(deleted.ok(), await deleted.text()).toBe(true);
+    await page.reload();
+    await page.getByRole("button", { name: "Review pending schedule" }).click();
+    await page
+      .getByRole("button", { name: "Check scheduling outcome" })
+      .click();
+    await expect(page.getByText(/draft was deleted/)).toBeVisible();
+    expect(await pending(page, f.key)).toBeNull();
+    await expect(page.getByLabel("Post text", { exact: true })).toHaveValue(
+      "Approved draft",
+    );
+    await page.getByLabel("When should this go out?").selectOption("draft");
+    await page.getByRole("button", { name: "Save draft" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    const posts = await read(context, `/posts?brand_id=${f.brand.id}`);
+    expect(posts).toHaveLength(1);
+    expect(posts[0].id).not.toBe(f.post.id);
+    expect(posts[0].text).toBe("Approved draft");
+    expect(await read(context, `/publications?brand_id=${f.brand.id}`)).toEqual(
+      [],
+    );
+  });
+});
+
+test("retirement of an unverifiable deleted draft leaves the outcome unresolved", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    await page.route(routeFor(f.post.id), (route) => route.abort("failed"));
+    await start(page);
+    const saved = await pending(page, f.key);
+    const deleted = await context.request.delete(`/api/v1/posts/${f.post.id}`, {
+      headers: {
+        "X-Beweft-Request": "1",
+        Origin: process.env.BEWEFT_TEST_URL!,
+      },
+    });
+    expect(deleted.ok(), await deleted.text()).toBe(true);
+    const stopped = page.waitForResponse((response) =>
+      response.url().endsWith(`/schedule-requests/${saved.id}/retire`),
+    );
+    await page.getByRole("button", { name: "Stop original schedule" }).click();
+    expect((await stopped).status()).toBe(404);
+    await expect(page.getByRole("dialog").getByRole("alert")).toBeVisible();
+    expect((await pending(page, f.key)).id).toBe(saved.id);
+    await expect(page.getByLabel("Post text", { exact: true })).toBeDisabled();
+    await page.reload();
+    await page.getByRole("button", { name: "Review pending schedule" }).click();
+    await expect(page.getByLabel("Post text", { exact: true })).toBeDisabled();
+    expect((await pending(page, f.key)).id).toBe(saved.id);
+  });
+});

@@ -261,6 +261,33 @@ export function useComposer({
     );
     if (!active(lockedSession, signal)) return;
     const mediaChanged = current.rejection_code === "media_version_conflict";
+    let draftMissing = false;
+    try {
+      const latest = await api(
+        `/posts/${saved.post.id}`,
+        PostSchema,
+        "GET",
+        undefined,
+        signal,
+      );
+      if (
+        latest.id !== saved.post.id ||
+        latest.brand_id !== saved.post.brand_id
+      )
+        throw new Error("The draft check returned a different post.");
+    } catch (failure) {
+      if (failure instanceof ApiError && failure.status === 404)
+        draftMissing = true;
+      else throw failure;
+    }
+    if (!active(lockedSession, signal)) return;
+    await requireSavedSchedule(
+      pendingSchedule.key,
+      saved,
+      lockedSession,
+      signal,
+    );
+    if (!active(lockedSession, signal)) return;
     for (const id of Object.keys(saved.media_versions ?? {})) {
       try {
         const row = await api(
@@ -303,6 +330,7 @@ export function useComposer({
       signal,
     );
     if (!active(lockedSession, signal)) return;
+    if (draftMissing) setPost(null);
     setRecovery("unchecked");
     setRecoveryMessage("");
     setError(
@@ -312,6 +340,10 @@ export function useComposer({
           ? "The original schedule was stopped. You can make changes and schedule again."
           : `The original schedule was not made: ${rejection.message} You can correct it and schedule again.`,
     );
+    if (draftMissing)
+      setError(
+        "The original schedule was not made and the draft was deleted. Save this content as a new draft or schedule it again.",
+      );
   };
   const recover = async (retry: boolean) => {
     if (running.current || !pendingSchedule.ready || !intent) return;
