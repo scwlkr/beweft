@@ -1,32 +1,26 @@
 # beweft project notes
 
-Status: the owner resumed the full autonomous build on 2026-10-29 with three
-implementation workers and the orchestrator. Current assignments, integration
-decisions and verification boundaries are in
+Status: the full build is active. The reviewed application stack through PR #23
+has landed on `main`, preserving its history. A healthy local Docker installation
+is running on loopback port 3000 with first-owner setup available. Current work,
+release qualification, remaining formats and review findings are in
 [the active delivery record](docs/orchestration-current.md).
-Brand/session fixes from PRs #9 and #11, CLI/MCP qualification from PR #10,
-named-worker health from PR #13, and provider removal fencing from PR #12 are
-merged into the integration branch. Media editing and idea organization have also merged. Production provider wiring has merged as well. Scheduling recovery and
-self-host delivery remain under correction/review;
-practical provider formats and remaining workflows still follow.
-Results and workflow improvements: [cycle 1](docs/orchestration-cycle-1.md).
-Start continuation with [the active delivery record](docs/orchestration-current.md);
-[ORCHESTRATOR-HANDOFF.md](ORCHESTRATOR-HANDOFF.md) preserves the original launch
-requirements and historical stack. Research decisions are
-in `docs/research/` and `docs/architecture.md`. REA is installed for local Codex;
-the authorized passive Buffer inventory is recorded in `docs/research/buffer.md`.
-Provider implementation and
-fixture verification do not establish live account access or publication.
 
-Owner decisions: unicorn mascot and feel; self-host deployment uses placeholders
+The practical local release target is 2026-10-29 at 16:30 America/Chicago. Core
+UI/API/worker use and a real schema-changing image upgrade/rollback passed;
+provider fixtures do not establish live account access or publication. Additional
+content/owner UI and Meta, Bluesky and LinkedIn formats remain active milestones.
+The full intended product scope stays open until its feasible work is finished.
+
+Owner decisions: original unicorn identity; self-host deployment uses placeholders
 until a server/domain is selected. No production deployment target is approved.
-Machine-specific browser configuration and approvals stay in the ignored local handoff.
-Repository: https://github.com/scwlkr/beweft (already public; admin access verified).
-
-Integrated: research/standards PR #2 and durable API/worker PR #3. Draft PRs #4–#7
-preserve the web, workflows, providers and CLI/operations checkpoints. They are
-not all ready to merge. See `docs/delivery.md` for the unfinished delivery work.
-`docs/operations-requirements.md` defines installation and recovery acceptance.
+Machine-specific browser configuration and private setup material stay ignored.
+Repository: https://github.com/scwlkr/beweft (public; admin access verified).
+Historical launch requirements and stack are preserved in
+[ORCHESTRATOR-HANDOFF.md](ORCHESTRATOR-HANDOFF.md); current status is the active
+record. Research is in `docs/research/`; [delivery.md](docs/delivery.md) records
+remaining requirements and known limitations. REA is installed; the authorized
+passive Buffer inventory is in `docs/research/buffer.md`.
 
 The [build brief](HANDOFF.md) describes the intended product. A local private
 handoff, when present, contains the owner's complete request for a build chat.

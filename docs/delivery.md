@@ -89,3 +89,22 @@ lookup and receipt responses; no duplicate public post was demonstrated. Common
 lost-response recovery passed. Retain partial identity observations field by
 field in a later narrow correction; do not claim every contradictory-response
 combination is covered.
+
+## Landed main and qualification update
+
+The preserved PR stack #4–#8 landed on main at `a60b531`, with the same application
+tree as independently reviewed `3b4445b`. The built image passed normal local
+UI/API/worker use. A real image/schema 7→14 upgrade and old-image/database/media/key
+restore passed, including subsequent upload and a held rollback worker. The
+retained local installation was upgraded backup-first and remains ready for the
+owner's first setup. This does not qualify live providers or finish the active
+#24–#27 and remaining format work.
+
+Additional nonblocking follow-ups: #18 helper cleanup can remove a deliberate
+same-name replacement container (future cleanup should use the inspected immutable
+ID); #21's server error omits its conservative video dimension limit (the UI shows
+it); #23 returns structurally incomplete but valid JSON as raw data, so callers
+must validate receipt identity/intent before treating an outcome as terminal.
+The raw CLI percent-encoded query restriction remains documented. #24's strict
+Facebook completion check does not reject a contradictory optional uploading
+phase; its publishing/status evidence remains fixture-qualified only.
