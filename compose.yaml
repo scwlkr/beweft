@@ -1,0 +1,80 @@
+name: ${COMPOSE_PROJECT_NAME:-beweft}
+x-app: &app
+  image: ${BEWEFT_IMAGE:-beweft:local}
+  build: .
+  restart: unless-stopped
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 6m
+  environment: &environment
+    BEWEFT_PUBLIC_URL: ${BEWEFT_PUBLIC_URL:-http://127.0.0.1:3000}
+    DATABASE_URL: postgres://beweft:${BEWEFT_DB_PASSWORD:?Run scripts/setup first}@db:5432/beweft
+    BEWEFT_SETUP_SECRET: ${BEWEFT_SETUP_SECRET:?Run scripts/setup first}
+    BEWEFT_ENCRYPTION_KEY: ${BEWEFT_ENCRYPTION_KEY:?Run scripts/setup first}
+    BEWEFT_ENABLE_FIXTURES: "false"
+    BEWEFT_MAX_UPLOAD_BYTES: ${BEWEFT_MAX_UPLOAD_BYTES:-268435456}
+    BEWEFT_MEDIA_QUOTA_BYTES: ${BEWEFT_MEDIA_QUOTA_BYTES:-10737418240}
+  volumes:
+    - media:/app/media
+  depends_on:
+    db:
+      condition: service_healthy
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: beweft
+      POSTGRES_USER: beweft
+      POSTGRES_PASSWORD: ${BEWEFT_DB_PASSWORD:?Run scripts/setup first}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U beweft -d beweft"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  api:
+    <<: *app
+    ports:
+      - "${BEWEFT_BIND_IP:-127.0.0.1}:${BEWEFT_PORT:-3000}:3000"
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:3000/healthz]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 6
+  worker:
+    <<: *app
+    command: [beweft-worker]
+    environment:
+      <<: *environment
+      BEWEFT_WORKER_ID: compose-primary
+    healthcheck:
+      # WIP: fail closed until per-instance worker healthcheck is implemented.
+      # Never invoke an unsupported flag: it would start another scheduler.
+      test: [CMD-SHELL, "exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 6
+  cli:
+    image: ${BEWEFT_IMAGE:-beweft:local}
+    profiles: [tools]
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    entrypoint: [beweft]
+    environment:
+      BEWEFT_URL: http://api:3000
+      BEWEFT_ALLOW_INTERNAL_HTTP: "true"
+      BEWEFT_TOKEN: ${BEWEFT_TOKEN:-}
+    command: [help]
+volumes:
+  database:
+  media:

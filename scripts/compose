@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+. "$(dirname -- "$0")/common.sh"
+[ "$#" -ge 2 ] || fail 'Usage: scripts/compose INSTALLATION_DIRECTORY compose-arguments...'
+installation "$1"
+shift
+# `config` can expand secrets; only quiet validation is permitted by this wrapper.
+if [ "$1" = config ] && [ "${2:-}" != --quiet ]; then fail 'Expanded Compose config exposes secrets. Use config --quiet for validation.'; fi
+dc "$@"
