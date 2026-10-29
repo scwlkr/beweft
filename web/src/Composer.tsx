@@ -345,6 +345,14 @@ export function Composer({
                 A selected media description is unconfirmed. Review it before
                 scheduling.
               </p>
+              {affectedMedia.map((id) =>
+                pendingMedia.assetErrors[id] ? (
+                  <p key={id}>
+                    {media.find((item) => item.id === id)?.name ?? "Media"}:{" "}
+                    {pendingMedia.assetErrors[id]}
+                  </p>
+                ) : null,
+              )}
               {affectedMedia.map((id) => (
                 <Button
                   key={id}

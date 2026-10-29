@@ -195,8 +195,8 @@ export default function App() {
             {brand && Object.keys(pendingMedia.assetErrors).length > 0 && (
               <div className="quiet-note" role="status">
                 <p>
-                  Some media descriptions could not be refreshed. Check them
-                  before scheduling posts that use them.
+                  Some media descriptions could not be checked. Posts using
+                  those assets remain blocked.
                 </p>
                 <Button variant="secondary" onClick={pendingMedia.retry}>
                   Check media again

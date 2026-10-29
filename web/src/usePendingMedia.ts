@@ -12,7 +12,7 @@ import {
 import {
   mediaIntentEvent,
   mediaIntentPrefix,
-  readMediaIntent,
+  scanMediaIntents,
   type MediaIntent,
 } from "./mediaIntent";
 
@@ -99,27 +99,17 @@ export function usePendingMedia(
       setState((previous) => ({ ...previous, ready: false, error: "" }));
       try {
         requireWorkspaceSession(session);
-        const intents: Record<string, MediaIntent> = {};
-        for (let i = 0; i < localStorage.length; i++) {
-          const key = localStorage.key(i);
-          if (!key?.startsWith(prefix)) continue;
-          const intent = readMediaIntent(key);
-          const mediaId = key.slice(prefix.length);
-          if (
-            !intent ||
-            intent.brand_id !== brand ||
-            intent.media_id !== mediaId
-          )
-            throw new Error(
-              "A pending media description could not be read safely.",
-            );
-          intents[mediaId] = intent;
-        }
+        const { intents, assetErrors, knownIds } = scanMediaIntents(
+          owner,
+          brand,
+        );
         recovery.current.lastIds.forEach((mediaId) => {
-          if (!intents[mediaId]) refreshIds.add(mediaId);
+          if (!knownIds.has(mediaId)) refreshIds.add(mediaId);
         });
-        recovery.current.lastIds = new Set(Object.keys(intents));
-        const settled = [...refreshIds].filter((mediaId) => !intents[mediaId]);
+        recovery.current.lastIds = knownIds;
+        const settled = [...refreshIds].filter(
+          (mediaId) => !knownIds.has(mediaId),
+        );
         const toRefresh = [...new Set([...settled, ...Object.keys(intents)])];
         setState({
           owner,
@@ -127,7 +117,7 @@ export function usePendingMedia(
           session,
           intents,
           checking: toRefresh,
-          assetErrors: {},
+          assetErrors,
           ready: true,
           error: "",
         });

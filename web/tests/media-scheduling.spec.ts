@@ -261,26 +261,290 @@ test("a delayed storage event cannot bypass the execution-time guard or schedule
   });
 });
 
-test("unreadable pending-media storage blocks scheduling until it can be checked", async () => {
+test("a corrupt known asset intent blocks only that asset and remains intact", async () => {
   await withWorkspace(async (page, context, write) => {
-    const brand = await write("/brands", { name: "Unreadable media intent" });
+    const brand = await write("/brands", { name: "Corrupt media intent" });
     const channel = await write("/channels", {
       brand_id: brand.id,
       provider: "manual",
-      name: "Unreadable channel",
+      name: "Corrupt intent channel",
       timezone: "UTC",
     });
-    const item = await upload(context, brand.id, "unreadable.png");
+    const damaged = await upload(context, brand.id, "damaged.png");
+    const clear = await upload(context, brand.id, "clear.png");
+    const damagedPost = await write("/posts", {
+      brand_id: brand.id,
+      title: "Damaged asset draft",
+      text: "Fixture",
+      media_ids: [damaged.id],
+      variants: [{ channel_id: channel.id }],
+    });
     await write("/posts", {
       brand_id: brand.id,
-      title: "Unreadable draft",
+      title: "Clear asset draft",
+      text: "Fixture",
+      media_ids: [clear.id],
+      variants: [{ channel_id: channel.id }],
+    });
+    const owner = (await (await context.request.get("/api/v1/auth/me")).json())
+      .data;
+    const key = `beweft.media-description:${owner.id}:${brand.id}:${damaged.id}`;
+    await context.addInitScript(
+      (id) => localStorage.setItem("beweft.brand", id),
+      brand.id,
+    );
+    await page.goto("/#drafts");
+    const good = {
+      id: crypto.randomUUID(),
+      brand_id: brand.id,
+      media_id: damaged.id,
+      metadata_version: 1,
+      alt_text: "Unknown outcome",
+    };
+    const corrupt = [
+      "{invalid",
+      "",
+      JSON.stringify({ ...good, brand_id: crypto.randomUUID() }),
+      JSON.stringify({ ...good, media_id: clear.id }),
+      JSON.stringify({ ...good, metadata_version: "invalid" }),
+    ];
+    // No event is delivered after the dialog becomes ready. The final storage
+    // scan must still prevent even a draft revision for the affected asset.
+    await page
+      .locator(".draft-content")
+      .filter({ hasText: "Damaged asset draft" })
+      .click();
+    await page.getByLabel("When should this go out?").selectOption("exact");
+    await page.getByLabel(/Date and time/).fill(future());
+    const staleDialog = page.getByRole("dialog");
+    await expect(
+      staleDialog.getByRole("button", { name: "Schedule post" }),
+    ).toBeEnabled();
+    await page.evaluate(({ key, raw }) => localStorage.setItem(key, raw), {
+      key,
+      raw: corrupt[0],
+    });
+    await staleDialog.getByRole("button", { name: "Schedule post" }).click();
+    await expect(staleDialog.getByRole("alert")).toContainText(
+      "could not be read",
+    );
+    expect(await publications(context, brand.id)).toEqual([]);
+    expect(
+      (
+        await (
+          await context.request.get(`/api/v1/posts/${damagedPost.id}`)
+        ).json()
+      ).data.version,
+    ).toBe(damagedPost.version);
+    expect(await page.evaluate((key) => localStorage.getItem(key), key)).toBe(
+      corrupt[0],
+    );
+    await staleDialog
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click();
+    for (const raw of corrupt) {
+      await page.evaluate(
+        ({ key, raw }) => {
+          localStorage.setItem(key, raw);
+          window.dispatchEvent(
+            new CustomEvent("beweft-media-intent", { detail: key }),
+          );
+        },
+        { key, raw },
+      );
+      await expect(
+        page.getByText(/Some media descriptions could not be checked/),
+      ).toBeVisible();
+      await page
+        .locator(".draft-content")
+        .filter({ hasText: "Damaged asset draft" })
+        .click();
+      await page.getByLabel("When should this go out?").selectOption("exact");
+      await page.getByLabel(/Date and time/).fill(future());
+      const dialog = page.getByRole("dialog");
+      await expect(
+        dialog.getByText(/Pending description information could not be read/),
+      ).toBeVisible();
+      await expect(
+        dialog.getByRole("button", { name: "Schedule post" }),
+      ).toBeDisabled();
+      await dialog.getByRole("button", { name: "Check media again" }).click();
+      await expect(
+        dialog.getByText(/Pending description information could not be read/),
+      ).toBeVisible();
+      await expect(
+        dialog.getByRole("button", { name: "Schedule post" }),
+      ).toBeDisabled();
+      expect(await page.evaluate((key) => localStorage.getItem(key), key)).toBe(
+        raw,
+      );
+      expect(
+        (
+          await (
+            await context.request.get(`/api/v1/media/${damaged.id}`)
+          ).json()
+        ).data.metadata_version,
+      ).toBe(1);
+      expect(await publications(context, brand.id)).toEqual([]);
+      await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    }
+    await page
+      .locator(".draft-content")
+      .filter({ hasText: "Clear asset draft" })
+      .click();
+    await page.getByLabel("When should this go out?").selectOption("exact");
+    await page.getByLabel(/Date and time/).fill(future());
+    await expect(
+      page.getByRole("button", { name: "Schedule post" }),
+    ).toBeEnabled();
+    await page.getByRole("button", { name: "Schedule post" }).click();
+    await expect
+      .poll(async () => (await publications(context, brand.id)).length)
+      .toBe(1);
+    expect(
+      (await publications(context, brand.id))[0].payload.media_metadata,
+    ).toEqual([{ id: clear.id, alt_text: "" }]);
+    expect(await page.evaluate((key) => localStorage.getItem(key), key)).toBe(
+      corrupt.at(-1),
+    );
+  });
+});
+
+for (const failure of ["enumeration", "record read"] as const) {
+  test(`unavailable media storage ${failure} blocks every schedule, including at execution time`, async () => {
+    await withWorkspace(async (page, context, write) => {
+      const brand = await write("/brands", {
+        name: `Unavailable media ${failure}`,
+      });
+      const channel = await write("/channels", {
+        brand_id: brand.id,
+        provider: "manual",
+        name: "Storage channel",
+        timezone: "UTC",
+      });
+      const pending = await upload(context, brand.id, "storage-pending.png");
+      const clear = await upload(context, brand.id, "storage-clear.png");
+      const post = await write("/posts", {
+        brand_id: brand.id,
+        title: "Storage clear draft",
+        text: "Fixture",
+        media_ids: [clear.id],
+        variants: [{ channel_id: channel.id }],
+      });
+      const owner = (
+        await (await context.request.get("/api/v1/auth/me")).json()
+      ).data;
+      const key = `beweft.media-description:${owner.id}:${brand.id}:${pending.id}`;
+      const raw = JSON.stringify({
+        id: crypto.randomUUID(),
+        brand_id: brand.id,
+        media_id: pending.id,
+        metadata_version: 1,
+        alt_text: "Still pending",
+      });
+      await context.addInitScript(
+        ({ id, key, raw, failure }) => {
+          localStorage.setItem("beweft.brand", id);
+          localStorage.setItem(key, raw);
+          const originalKey = Storage.prototype.key;
+          const originalGet = Storage.prototype.getItem;
+          Storage.prototype.key = function (index) {
+            if (
+              this === localStorage &&
+              (window as any).failMediaStorage &&
+              failure === "enumeration"
+            )
+              throw new Error("Media storage unavailable");
+            return originalKey.call(this, index);
+          };
+          Storage.prototype.getItem = function (name) {
+            if (
+              this === localStorage &&
+              (window as any).failMediaStorage &&
+              failure === "record read" &&
+              name === key
+            )
+              throw new Error("Media storage unavailable");
+            return originalGet.call(this, name);
+          };
+        },
+        { id: brand.id, key, raw, failure },
+      );
+      await page.goto("/#drafts");
+      await page
+        .locator(".draft-content")
+        .filter({ hasText: "Storage clear draft" })
+        .click();
+      await page.getByLabel("When should this go out?").selectOption("exact");
+      await page.getByLabel(/Date and time/).fill(future());
+      const dialog = page.getByRole("dialog");
+      await expect(
+        dialog.getByRole("button", { name: "Schedule post" }),
+      ).toBeEnabled();
+      // No storage event is delivered, so the execution-time scan must catch it.
+      await page.evaluate(() => {
+        (window as any).failMediaStorage = true;
+      });
+      await dialog.getByRole("button", { name: "Schedule post" }).click();
+      await expect(dialog.getByRole("alert")).toContainText(
+        "Media storage unavailable",
+      );
+      expect(await publications(context, brand.id)).toEqual([]);
+      expect(
+        (await (await context.request.get(`/api/v1/posts/${post.id}`)).json())
+          .data.version,
+      ).toBe(post.version);
+      await page.evaluate(
+        (key) =>
+          window.dispatchEvent(
+            new CustomEvent("beweft-media-intent", { detail: key }),
+          ),
+        key,
+      );
+      await expect(
+        dialog.getByText(/must be checked before scheduling/),
+      ).toBeVisible();
+      await expect(
+        dialog.getByRole("button", { name: "Schedule post" }),
+      ).toBeDisabled();
+      await page.evaluate(() => {
+        (window as any).failMediaStorage = false;
+      });
+      await dialog.getByRole("button", { name: "Check media again" }).click();
+      await expect(
+        dialog.getByRole("button", { name: "Schedule post" }),
+      ).toBeEnabled();
+      expect(await page.evaluate((key) => localStorage.getItem(key), key)).toBe(
+        raw,
+      );
+      await dialog.getByRole("button", { name: "Schedule post" }).click();
+      await expect
+        .poll(async () => (await publications(context, brand.id)).length)
+        .toBe(1);
+    });
+  });
+}
+
+test("an unidentifiable media key blocks the workspace without discarding it", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const brand = await write("/brands", { name: "Unidentifiable media key" });
+    const channel = await write("/channels", {
+      brand_id: brand.id,
+      provider: "manual",
+      name: "Unknown key channel",
+      timezone: "UTC",
+    });
+    const item = await upload(context, brand.id, "unknown-key.png");
+    await write("/posts", {
+      brand_id: brand.id,
+      title: "Unknown key draft",
       text: "Fixture",
       media_ids: [item.id],
       variants: [{ channel_id: channel.id }],
     });
     const owner = (await (await context.request.get("/api/v1/auth/me")).json())
       .data;
-    const key = `beweft.media-description:${owner.id}:${brand.id}:${item.id}`;
+    const key = `beweft.media-description:${owner.id}:${brand.id}:not-a-canonical-id`;
     await context.addInitScript(
       ({ id, key }) => {
         localStorage.setItem("beweft.brand", id);
@@ -292,24 +556,21 @@ test("unreadable pending-media storage blocks scheduling until it can be checked
     await page.getByRole("button", { name: "Edit draft" }).click();
     await page.getByLabel("When should this go out?").selectOption("exact");
     await page.getByLabel(/Date and time/).fill(future());
+    const dialog = page.getByRole("dialog");
     await expect(
-      page.getByRole("button", { name: "Schedule post" }),
-    ).toBeDisabled();
-    await expect(
-      page.getByRole("dialog").getByText(/must be checked before scheduling/),
+      dialog.getByText(/must be checked before scheduling/),
     ).toBeVisible();
-    expect(await publications(context, brand.id)).toEqual([]);
-    await page.evaluate(
-      (storageKey) => localStorage.removeItem(storageKey),
-      key,
-    );
-    await page
-      .getByRole("dialog")
-      .getByRole("button", { name: "Check media again" })
-      .click();
     await expect(
-      page.getByRole("button", { name: "Schedule post" }),
-    ).toBeEnabled();
+      dialog.getByRole("button", { name: "Schedule post" }),
+    ).toBeDisabled();
+    await dialog.getByRole("button", { name: "Check media again" }).click();
+    await expect(
+      dialog.getByRole("button", { name: "Schedule post" }),
+    ).toBeDisabled();
+    expect(await page.evaluate((key) => localStorage.getItem(key), key)).toBe(
+      "{invalid",
+    );
+    expect(await publications(context, brand.id)).toEqual([]);
   });
 });
 
@@ -371,7 +632,7 @@ test("a failed refresh for another pending asset does not block unaffected media
     );
     await page.goto("/#drafts");
     await expect(
-      page.getByText(/Some media descriptions could not be refreshed/),
+      page.getByText(/Some media descriptions could not be checked/),
     ).toBeVisible();
     await page
       .locator(".draft-content")

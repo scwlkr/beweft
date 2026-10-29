@@ -21,9 +21,47 @@ export const mediaIntentPrefix = (owner: string, brand: string) =>
   `beweft.media-description:${owner}:${brand}:`;
 export const mediaIntentKey = (owner: string, brand: string, media: string) =>
   `${mediaIntentPrefix(owner, brand)}${media}`;
+export function parseMediaIntent(raw: string) {
+  return MediaIntent.parse(JSON.parse(raw));
+}
 export function readMediaIntent(key: string) {
   const raw = localStorage.getItem(key);
-  return raw ? MediaIntent.parse(JSON.parse(raw)) : null;
+  return raw === null ? null : parseMediaIntent(raw);
+}
+
+// A damaged record under a canonical asset key affects that asset only. If
+// enumeration or a read fails, or the key cannot identify an asset, callers
+// must fail closed globally because another pending operation may be hidden.
+export function scanMediaIntents(owner: string, brand: string) {
+  const prefix = mediaIntentPrefix(owner, brand);
+  const intents: Record<string, MediaIntent> = {};
+  const assetErrors: Record<string, string> = {};
+  const knownIds = new Set<string>();
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key === null)
+      throw new Error("Media description storage could not be enumerated.");
+    if (!key.startsWith(prefix)) continue;
+    const mediaId = key.slice(prefix.length);
+    if (
+      !z.string().uuid().safeParse(mediaId).success ||
+      mediaId !== mediaId.toLowerCase()
+    )
+      throw new Error("A pending media description could not be read safely.");
+    const raw = localStorage.getItem(key);
+    if (raw === null) continue;
+    knownIds.add(mediaId);
+    try {
+      const intent = parseMediaIntent(raw);
+      if (intent.brand_id !== brand || intent.media_id !== mediaId)
+        throw new Error("Media intent scope does not match its key.");
+      intents[mediaId] = intent;
+    } catch {
+      assetErrors[mediaId] =
+        "Pending description information could not be read. This asset stays blocked until it can be restored.";
+    }
+  }
+  return { intents, assetErrors, knownIds };
 }
 export function announceMediaIntent(key: string) {
   window.dispatchEvent(new CustomEvent(mediaIntentEvent, { detail: key }));
@@ -106,11 +144,15 @@ export async function withMediaScheduleGuard<T>(
       session,
       () => {
         signal.throwIfAborted();
-        // Even an empty selection requires usable intent storage.
-        void localStorage.length;
+        // Recheck the entire scope after waiting: a delayed storage event must
+        // not hide an unidentifiable key or an unreadable record.
+        const { intents, assetErrors } = scanMediaIntents(owner, brand);
         for (const item of ordered) {
-          const intent = readMediaIntent(mediaIntentKey(owner, brand, item.id));
-          if (intent)
+          if (assetErrors[item.id])
+            throw new Error(
+              `The pending description for ${item.name} could not be read. It remains blocked.`,
+            );
+          if (intents[item.id])
             throw new Error(
               `A description for ${item.name} is still unconfirmed. Review it before scheduling.`,
             );

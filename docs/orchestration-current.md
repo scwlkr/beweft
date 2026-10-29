@@ -6,7 +6,7 @@ qualification or completed release is claimed.
 
 ## Integration
 
-Integration branch: `codex/orchestrator-handoff`, scheduling-receipt merge `6a351f0`.
+Integration branch: `codex/orchestrator-handoff`, ideas merge `9bcc379`.
 Main remains at durable-core PR #3. Open PRs #4–#8 preserve the original stack.
 Reviewed additions land through merge commits; the completed stack will land
 without squashing an ancestor beneath open descendants.
@@ -39,13 +39,18 @@ three active children plus the orchestrator. Each milestone freezes its SHA.
   removal only of orphaned access. Disconnect itself waits for channel locks.
   Provider routes and the pre-disconnect warning remain to wire into production.
 
+- PR #16, idea organization: `9bcc379`, reviewed head `a770e43`. Real API
+  browser scenarios cover board stages, groups, tags including literal `all`,
+  deletion, outages, mobile layout and delayed actions across brand changes.
+  Full screen-reader and keyboard qualification was not separately performed.
+
 ## Active contracts and checkpoints
 
 | Lane | Checkpoint | Next acceptance boundary |
 | --- | --- | --- |
 | Core/providers A+B | Scheduling receipts merged; metadata precondition contract next | Atomic metadata-version checks for exact selected-media snapshots; then production provider wiring and formats. |
-| Web C | PR #14 scheduling; #15 media descriptions; #16 idea organization | Media CAS fix `518d5e3` is back in implementation after review found a cross-view pending-save bypass and invalid-text recovery trap. Scheduling must use the real 0009 receipt API. Ideas and preserved manual guidance await review/integration. |
-| CLI/operations D+E | Self-host operations, based on named-worker health | Full image, fresh install, restart, safe backup/restore and upgrade rehearsal; then schedule receipt tools. |
+| Web C | PR #14 scheduling; #15 media descriptions; #16 idea organization | PR #15 `a8069f1` fixed pending-save bypass and NUL recovery, but fresh review found a malformed asset-specific intent blocks unrelated assets; that narrow fix is underway. Ideas #16 is merged. Scheduling and preserved manual guidance await integration. |
+| CLI/operations D+E | PR #18 `89edd85`, full image and rehearsal | Independent review found interruption/shutdown races, mutable image identity and a nondurable restored-worker hold; corrections and fresh review precede delivery. |
 
 Core owns server/worker/providers/migrations/generated exports. Web owns client
 and browser tests, plus a narrow loan for media metadata CAS and authorized GET:
@@ -71,7 +76,8 @@ client comparison must preserve microseconds, not truncate through Date.parse.
 The next schedule contract adds an optional normalized media-version map to the
 immutable request and receipt. New clients will supply the complete effective
 media union; the server will lock and check versions in the snapshot transaction.
-This is planned contract work, not yet implemented. It prevents an unknown
+This is implemented in PR #19 `74c3fa8` and undergoing independent review; it
+depends on media #15 and needs integration with later web changes. It prevents an unknown
 schedule after reload from silently snapshotting later description edits.
 
 Media saves persist owner/brand/asset/base-version/text before PATCH. Unknown
