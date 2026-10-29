@@ -526,6 +526,101 @@ async fn google_family_and_publication_boundaries(h: &Harness) {
         "uncertain"
     );
     let delivery = &status["data"]["google_delivery"];
+    for invalid in [
+        "https://example.invalid/post",
+        "accounts/g1/locations/other/localPosts/p1",
+        "accounts/g1/locations/l1/localPosts/../p1",
+        "accounts/g1/locations/l1/localPosts/%70",
+    ] {
+        let input: ReconcileRequest = serde_json::from_value(json!({"resolution":"published","note":"Inspected Google","external_id":invalid,"observed_attempt_id":delivery["attempt_id"],"observed_checkpoint_id":delivery["checkpoint_id"],"sender_stopped":true,"provider_inspected":true})).unwrap();
+        assert!(
+            beweft::publications::reconcile(
+                State(h.state.clone()),
+                auth.clone(),
+                Path(google_pub),
+                Json(input)
+            )
+            .await
+            .is_err(),
+            "{invalid}"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT state FROM publications WHERE id=$1")
+                .bind(google_pub)
+                .fetch_one(&h.state.db)
+                .await
+                .unwrap(),
+            "uncertain"
+        );
+    }
+    // A canonical owner-supplied resource for the same location is retained
+    // as an attestation, without presenting it as provider verification.
+    let owner_post = Uuid::new_v4();
+    let owner_pub = Uuid::new_v4();
+    let owner_attempt = Uuid::new_v4();
+    let owner_checkpoint = Uuid::new_v4();
+    sqlx::query("INSERT INTO posts(id,brand_id,text) VALUES($1,$2,'Owner observation')")
+        .bind(owner_post)
+        .bind(brand)
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO publications(id,post_id,brand_id,channel_id,post_version,scheduled_at,state,payload) VALUES($1,$2,$3,$4,1,now(),'uncertain',$5)")
+        .bind(owner_pub).bind(owner_post).bind(brand).bind(google).bind(json!({"text":"Owner observation","title":"","media_ids":[],"options":{}})).execute(&h.state.db).await.unwrap();
+    sqlx::query("INSERT INTO publication_attempts(id,publication_id,state,provider) VALUES($1,$2,'uncertain','google_business')")
+        .bind(owner_attempt).bind(owner_pub).execute(&h.state.db).await.unwrap();
+    let saved = json!({"stage":"google_post_started","parent":"accounts/g1/locations/l1","attempt_id":owner_attempt,"checkpoint_id":owner_checkpoint});
+    let encrypted = crypto::encrypt(&[13; 32], owner_pub, &saved.to_string()).unwrap();
+    sqlx::query("INSERT INTO provider_delivery_checkpoints(publication_id,encrypted_checkpoint,attempt_id,checkpoint_id) VALUES($1,$2,$3,$4)")
+        .bind(owner_pub).bind(encrypted).bind(owner_attempt).bind(owner_checkpoint).execute(&h.state.db).await.unwrap();
+    let owner_input: ReconcileRequest=serde_json::from_value(json!({"resolution":"published","note":"Inspected Google","external_id":"accounts/g2/locations/l1/localPosts/p1","observed_attempt_id":owner_attempt,"observed_checkpoint_id":owner_checkpoint,"sender_stopped":true,"provider_inspected":true})).unwrap();
+    let owner_result = beweft::publications::reconcile(
+        State(h.state.clone()),
+        auth.clone(),
+        Path(owner_pub),
+        Json(owner_input),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(
+        owner_result["data"]["external_id"],
+        "accounts/g2/locations/l1/localPosts/p1"
+    );
+    let owner_receipt: Value = sqlx::query_scalar(
+        "SELECT receipt FROM publication_attempts WHERE publication_id=$1 AND state='published'",
+    )
+    .bind(owner_pub)
+    .fetch_one(&h.state.db)
+    .await
+    .unwrap();
+    assert_eq!(owner_receipt["verification"], "owner_attestation");
+    let without_id = Uuid::new_v4();
+    let without_attempt = Uuid::new_v4();
+    let without_checkpoint = Uuid::new_v4();
+    sqlx::query("INSERT INTO publications(id,post_id,brand_id,channel_id,post_version,scheduled_at,state,payload) VALUES($1,$2,$3,$4,2,now(),'uncertain',$5)")
+        .bind(without_id).bind(owner_post).bind(brand).bind(google).bind(json!({"text":"Owner observation","title":"","media_ids":[],"options":{}})).execute(&h.state.db).await.unwrap();
+    sqlx::query("INSERT INTO publication_attempts(id,publication_id,state,provider) VALUES($1,$2,'uncertain','google_business')")
+        .bind(without_attempt).bind(without_id).execute(&h.state.db).await.unwrap();
+    let saved = json!({"stage":"google_post_started","parent":"accounts/g1/locations/l1","attempt_id":without_attempt,"checkpoint_id":without_checkpoint});
+    let encrypted = crypto::encrypt(&[13; 32], without_id, &saved.to_string()).unwrap();
+    sqlx::query("INSERT INTO provider_delivery_checkpoints(publication_id,encrypted_checkpoint,attempt_id,checkpoint_id) VALUES($1,$2,$3,$4)")
+        .bind(without_id).bind(encrypted).bind(without_attempt).bind(without_checkpoint).execute(&h.state.db).await.unwrap();
+    let without_input:ReconcileRequest=serde_json::from_value(json!({"resolution":"published","note":"Inspected Google","external_url":"https://example.invalid/owner","observed_attempt_id":without_attempt,"observed_checkpoint_id":without_checkpoint,"sender_stopped":true,"provider_inspected":true})).unwrap();
+    let without_result = beweft::publications::reconcile(
+        State(h.state.clone()),
+        auth.clone(),
+        Path(without_id),
+        Json(without_input),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(without_result["data"]["external_id"].is_null());
+    assert_eq!(
+        without_result["data"]["external_url"],
+        "https://example.invalid/owner"
+    );
     let reconciliation = |inspected: bool| {
         serde_json::from_value::<ReconcileRequest>(json!({"resolution":"not_published","note":"Remote operation definitively ended","observed_attempt_id":delivery["attempt_id"],"observed_checkpoint_id":delivery["checkpoint_id"],"sender_stopped":true,"provider_inspected":inspected})).unwrap()
     };
@@ -576,14 +671,8 @@ async fn google_family_and_publication_boundaries(h: &Harness) {
     tokio::fs::write(h.state.config.media_dir.join(media.to_string()), &bytes)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO media(id,brand_id,name,mime,size,storage_key) VALUES($1,$2,'google.jpg','image/jpeg',$3,$4)")
+    sqlx::query("INSERT INTO media(id,brand_id,name,mime,size,storage_key,alt_text) VALUES($1,$2,'google.jpg','image/jpeg',$3,$4,'Shared blue photo')")
         .bind(media).bind(brand).bind(bytes.len() as i64).bind(media.to_string()).execute(&h.state.db).await.unwrap();
-    sqlx::query("UPDATE publications SET payload=$2 WHERE id=$1")
-        .bind(google_pub)
-        .bind(json!({"text":"Fixture","title":"","media_ids":[media],"options":{}}))
-        .execute(&h.state.db)
-        .await
-        .unwrap();
     let old = &h.state.config;
     let payload =
         json!({"text":"Fixture","title":"Working title","media_ids":[media],"options":{}});
@@ -633,6 +722,82 @@ async fn google_family_and_publication_boundaries(h: &Harness) {
         .await
         .unwrap();
     tx.rollback().await.unwrap();
+    // Schedule the same asset to Google and X using the real snapshot path.
+    // Later library edits must not change either saved delivery description.
+    let x = Uuid::new_v4();
+    let shared_post = Uuid::new_v4();
+    sqlx::query("INSERT INTO channels(id,brand_id,name,provider,connection_status,paused) VALUES($1,$2,'X fixture','x','connected',true)")
+        .bind(x).bind(brand).execute(&h.state.db).await.unwrap();
+    sqlx::query("INSERT INTO posts(id,brand_id,text,media_ids) VALUES($1,$2,'Shared photo',$3)")
+        .bind(shared_post)
+        .bind(brand)
+        .bind(json!([media]))
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+    let schedule: beweft::contracts::SchedulePostRequest=serde_json::from_value(json!({"version":1,"channel_ids":[google,x],"scheduled_at":(chrono::Utc::now()+chrono::Duration::minutes(10)).to_rfc3339_opts(chrono::SecondsFormat::Micros,true)})).unwrap();
+    let scheduled = beweft::schedules::schedule_post(
+        State(public_state.clone()),
+        auth.clone(),
+        Path(shared_post),
+        Query(Default::default()),
+        Json(schedule),
+    )
+    .await
+    .unwrap()
+    .0;
+    let rows = scheduled["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(
+            row["payload"]["media_metadata"],
+            json!([{"id":media,"alt_text":"Shared blue photo"}])
+        );
+    }
+    let google_photo_pub: Uuid = rows
+        .iter()
+        .find(|row| row["channel_id"] == json!(google))
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let x_photo_pub: Uuid = rows
+        .iter()
+        .find(|row| row["channel_id"] == json!(x))
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    sqlx::query(
+        "UPDATE media SET alt_text='Edited later',metadata_version=metadata_version+1 WHERE id=$1",
+    )
+    .bind(media)
+    .execute(&h.state.db)
+    .await
+    .unwrap();
+    for id in [google_photo_pub, x_photo_pub] {
+        let frozen: Value =
+            sqlx::query_scalar("SELECT payload->'media_metadata' FROM publications WHERE id=$1")
+                .bind(id)
+                .fetch_one(&h.state.db)
+                .await
+                .unwrap();
+        assert_eq!(frozen, json!([{"id":media,"alt_text":"Shared blue photo"}]));
+    }
+    sqlx::query("UPDATE publications SET state='canceled' WHERE id=$1")
+        .bind(google_pub)
+        .execute(&h.state.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE publications SET scheduled_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+    )
+    .bind(google_photo_pub)
+    .execute(&h.state.db)
+    .await
+    .unwrap();
     let mut media_state = h.state.clone();
     media_state.config = Arc::new(Config {
         public_url: "https://fixture.google.com".into(),
@@ -665,9 +830,23 @@ async fn google_family_and_publication_boundaries(h: &Harness) {
     let _ = server.await;
     assert_eq!(h.provider.google_writes.load(Ordering::SeqCst), writes + 3);
     assert_eq!(*h.provider.media_received.lock().unwrap(), bytes);
+    let body = h.provider.google_body.lock().unwrap().clone();
+    assert_eq!(body["media"][0].as_object().unwrap().len(), 2);
+    assert_eq!(body["media"][0]["mediaFormat"], "PHOTO");
+    assert!(body["media"][0].get("description").is_none());
+    let still_frozen: Value =
+        sqlx::query_scalar("SELECT payload->'media_metadata' FROM publications WHERE id=$1")
+            .bind(google_photo_pub)
+            .fetch_one(&h.state.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        still_frozen,
+        json!([{"id":media,"alt_text":"Shared blue photo"}])
+    );
     assert_eq!(
         sqlx::query_scalar::<_, String>("SELECT state FROM publications WHERE id=$1")
-            .bind(google_pub)
+            .bind(google_photo_pub)
             .fetch_one(&h.state.db)
             .await
             .unwrap(),
@@ -690,13 +869,13 @@ async fn google_family_and_publication_boundaries(h: &Harness) {
         .execute(&h.state.db)
         .await
         .unwrap();
-    sqlx::query("DELETE FROM provider_delivery_checkpoints WHERE publication_id=ANY($1)")
-        .bind(&[google_pub, youtube_pub][..])
+    sqlx::query("DELETE FROM provider_delivery_checkpoints WHERE publication_id IN (SELECT id FROM publications WHERE brand_id=$1)")
+        .bind(brand)
         .execute(&h.state.db)
         .await
         .unwrap();
-    sqlx::query("DELETE FROM publication_attempts WHERE publication_id=ANY($1)")
-        .bind(&[google_pub, youtube_pub][..])
+    sqlx::query("DELETE FROM publication_attempts WHERE publication_id IN (SELECT id FROM publications WHERE brand_id=$1)")
+        .bind(brand)
         .execute(&h.state.db)
         .await
         .unwrap();

@@ -40,7 +40,7 @@ pub fn capabilities() -> Vec<Capabilities> {
             analytics: false,
             inbox: false,
             reply: false,
-            reason: "Approved Google Business Profile API access and an eligible location are required. Standard, event and offer posts support text and one JPEG/PNG photo; this adapter does not send photo descriptions.",
+            reason: "Approved Google Business Profile API access and an eligible location are required. Standard, event and offer posts support text and one JPEG/PNG photo; saved photo descriptions remain in beweft and are not sent to Google.",
         },
         Capabilities {
             id: "facebook",

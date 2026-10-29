@@ -150,12 +150,12 @@ pub(super) fn post_body(p: &Publication, delivery: bool) -> Result<Value> {
         ));
     }
     if p.media.len() > 1
-        || p.media.iter().any(|m| {
-            !matches!(m.mime.as_str(), "image/jpeg" | "image/png") || !m.alt_text.trim().is_empty()
-        })
+        || p.media
+            .iter()
+            .any(|m| !matches!(m.mime.as_str(), "image/jpeg" | "image/png"))
     {
         return Err(invalid(
-            "Google Business Profile supports one JPEG/PNG photo; photo descriptions and video are not supported by this adapter",
+            "Google Business Profile supports one JPEG/PNG photo; video is not supported by this adapter",
         ));
     }
     let mut body = json!({"topicType":options.topic_type,"summary":p.text});
@@ -255,8 +255,9 @@ pub(super) fn post_body(p: &Publication, delivery: bool) -> Result<Value> {
     Ok(body)
 }
 
-fn post_name(cp: &Value, c: &Channel) -> Result<String> {
-    let name = field(cp, "name")?;
+/// Validate the canonical LocalPost resource against the stable location.
+/// This checks identity only, not whether an owner-observed post exists.
+pub fn google_post_name_for_location(name: &str, expected_location: &str) -> Result<()> {
     let (parent, post) = name
         .split_once("/localPosts/")
         .ok_or_else(|| error(FailureKind::Uncertain, "Invalid saved Google post resource"))?;
@@ -273,12 +274,18 @@ fn post_name(cp: &Value, c: &Channel) -> Result<String> {
             "Invalid saved Google post identifier",
         )
     })?;
-    if c.identity.id != format!("locations/{location}") {
+    if expected_location != format!("locations/{location}") {
         return Err(error(
             FailureKind::Uncertain,
             "Saved Google post belongs to a different location",
         ));
     }
+    Ok(())
+}
+
+fn post_name(cp: &Value, c: &Channel) -> Result<String> {
+    let name = field(cp, "name")?;
+    google_post_name_for_location(&name, &c.identity.id)?;
     Ok(name)
 }
 

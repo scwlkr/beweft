@@ -36,6 +36,7 @@ struct Provider {
     bluesky_session_release: Notify,
     google_writes: AtomicUsize,
     google_mode: AtomicUsize,
+    google_body: std::sync::Mutex<Value>,
 }
 async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
     let path = r.uri().path().to_owned();
@@ -58,6 +59,7 @@ async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
                 let body: Value =
                     serde_json::from_slice(&to_bytes(r.into_body(), 100_000).await.unwrap())
                         .unwrap();
+                *s.google_body.lock().unwrap() = body.clone();
                 let origin = s.callback_origin.lock().unwrap().clone();
                 let url = body["media"][0]["sourceUrl"]
                     .as_str()
