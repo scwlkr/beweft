@@ -4,6 +4,7 @@
 !.env.example
 .local/
 **/installation.env
+**/demo-state.json
 **/database.dump
 **/media.tar
 **/key.sha256

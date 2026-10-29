@@ -16,7 +16,13 @@ case "${1:-help}" in
             '  activate DIRECTORY --handover-reviewed  Enable a reconciled restored worker' \
             '  upgrade DIRECTORY IMAGE BACKUP     Back up and start a different local image' \
             '  release DIRECTORY                  Release an empty project reservation'
+        printf '%s\n' \
+            '  demo create DIRECTORY PROJECT PORT IMAGE  Create an isolated example installation' \
+            '  demo resume DIRECTORY             Resume an interrupted example seed'
         exit 0 ;;
+    demo)
+        shift
+        exec python3 "$root/scripts/demo.py" "$@" ;;
     setup|build|image|compose|cli|backup|restore|activate|upgrade|release)
         command=$1
         shift
