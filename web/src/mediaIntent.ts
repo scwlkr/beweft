@@ -17,10 +17,18 @@ export const MediaIntent = z.object({
 });
 export type MediaIntent = z.infer<typeof MediaIntent>;
 export const mediaIntentEvent = "beweft-media-intent";
+export const mediaIntentScope = (owner: string, brand: string) =>
+  `beweft.media-description:${owner}:${brand}`;
 export const mediaIntentPrefix = (owner: string, brand: string) =>
-  `beweft.media-description:${owner}:${brand}:`;
+  `${mediaIntentScope(owner, brand)}:`;
+// UUID spellings are case-insensitive. A noncanonical spelling of this scope
+// is still ours, but cannot be treated as a canonical asset key.
+export const isMediaIntentScopeKey = (key: string, scope: string) =>
+  key.toLowerCase().startsWith(scope.toLowerCase());
 export const mediaIntentKey = (owner: string, brand: string, media: string) =>
   `${mediaIntentPrefix(owner, brand)}${media}`;
+export const isCanonicalMediaId = (id: string) =>
+  id === id.toLowerCase() && z.string().uuid().safeParse(id).success;
 export function parseMediaIntent(raw: string) {
   return MediaIntent.parse(JSON.parse(raw));
 }
@@ -33,6 +41,7 @@ export function readMediaIntent(key: string) {
 // enumeration or a read fails, or the key cannot identify an asset, callers
 // must fail closed globally because another pending operation may be hidden.
 export function scanMediaIntents(owner: string, brand: string) {
+  const scope = mediaIntentScope(owner, brand);
   const prefix = mediaIntentPrefix(owner, brand);
   const intents: Record<string, MediaIntent> = {};
   const assetErrors: Record<string, string> = {};
@@ -41,12 +50,13 @@ export function scanMediaIntents(owner: string, brand: string) {
     const key = localStorage.key(i);
     if (key === null)
       throw new Error("Media description storage could not be enumerated.");
-    if (!key.startsWith(prefix)) continue;
+    if (!isMediaIntentScopeKey(key, scope)) continue;
+    // The owner and brand are identifiable even if the asset delimiter or
+    // identifier was lost. No asset can safely be exempted in that case.
+    if (!key.startsWith(prefix))
+      throw new Error("A pending media description could not be read safely.");
     const mediaId = key.slice(prefix.length);
-    if (
-      !z.string().uuid().safeParse(mediaId).success ||
-      mediaId !== mediaId.toLowerCase()
-    )
+    if (!isCanonicalMediaId(mediaId))
       throw new Error("A pending media description could not be read safely.");
     const raw = localStorage.getItem(key);
     if (raw === null) continue;

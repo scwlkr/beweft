@@ -525,7 +525,7 @@ for (const failure of ["enumeration", "record read"] as const) {
   });
 }
 
-test("an unidentifiable media key blocks the workspace without discarding it", async () => {
+test("malformed current-scope keys block globally while other owners and brands stay isolated", async () => {
   await withWorkspace(async (page, context, write) => {
     const brand = await write("/brands", { name: "Unidentifiable media key" });
     const channel = await write("/channels", {
@@ -535,7 +535,7 @@ test("an unidentifiable media key blocks the workspace without discarding it", a
       timezone: "UTC",
     });
     const item = await upload(context, brand.id, "unknown-key.png");
-    await write("/posts", {
+    const post = await write("/posts", {
       brand_id: brand.id,
       title: "Unknown key draft",
       text: "Fixture",
@@ -544,13 +544,38 @@ test("an unidentifiable media key blocks the workspace without discarding it", a
     });
     const owner = (await (await context.request.get("/api/v1/auth/me")).json())
       .data;
-    const key = `beweft.media-description:${owner.id}:${brand.id}:not-a-canonical-id`;
-    await context.addInitScript(
-      ({ id, key }) => {
-        localStorage.setItem("beweft.brand", id);
-        localStorage.setItem(key, "{invalid");
+    const otherOwner = crypto.randomUUID();
+    const otherBrand = crypto.randomUUID();
+    const otherMedia = crypto.randomUUID();
+    const scope = `beweft.media-description:${owner.id}:${brand.id}`;
+    const foreign = [
+      {
+        key: `beweft.media-description:${otherOwner}:${brand.id}:${item.id}`,
+        value: JSON.stringify({
+          id: crypto.randomUUID(),
+          brand_id: brand.id,
+          media_id: item.id,
+          metadata_version: 1,
+          alt_text: "Another owner",
+        }),
       },
-      { id: brand.id, key },
+      {
+        key: `beweft.media-description:${owner.id}:${otherBrand}:${otherMedia}`,
+        value: JSON.stringify({
+          id: crypto.randomUUID(),
+          brand_id: otherBrand,
+          media_id: otherMedia,
+          metadata_version: 1,
+          alt_text: "Another brand",
+        }),
+      },
+    ];
+    await context.addInitScript(
+      ({ id, foreign }) => {
+        localStorage.setItem("beweft.brand", id);
+        foreign.forEach(({ key, value }) => localStorage.setItem(key, value));
+      },
+      { id: brand.id, foreign },
     );
     await page.goto("/#drafts");
     await page.getByRole("button", { name: "Edit draft" }).click();
@@ -558,19 +583,189 @@ test("an unidentifiable media key blocks the workspace without discarding it", a
     await page.getByLabel(/Date and time/).fill(future());
     const dialog = page.getByRole("dialog");
     await expect(
-      dialog.getByText(/must be checked before scheduling/),
-    ).toBeVisible();
-    await expect(
       dialog.getByRole("button", { name: "Schedule post" }),
-    ).toBeDisabled();
-    await dialog.getByRole("button", { name: "Check media again" }).click();
-    await expect(
-      dialog.getByRole("button", { name: "Schedule post" }),
-    ).toBeDisabled();
-    expect(await page.evaluate((key) => localStorage.getItem(key), key)).toBe(
-      "{invalid",
+    ).toBeEnabled();
+    // The storage event may be delayed. Submission must still detect this
+    // namespace before creating a new draft revision.
+    await page.evaluate(
+      (scope) => localStorage.setItem(scope, "{invalid"),
+      scope,
     );
+    await dialog.getByRole("button", { name: "Schedule post" }).click();
+    await expect(dialog.getByRole("alert")).toContainText(
+      "could not be read safely",
+    );
+    expect(
+      (await (await context.request.get(`/api/v1/posts/${post.id}`)).json())
+        .data.version,
+    ).toBe(post.version);
     expect(await publications(context, brand.id)).toEqual([]);
+    await page.evaluate((scope) => localStorage.removeItem(scope), scope);
+    const keys = [
+      scope,
+      `${scope}${item.id}`,
+      `${scope}:`,
+      `${scope}:not-a-canonical-id`,
+      `${scope}::${item.id}`,
+      `${scope}:${item.id}:extra`,
+      `${scope.toUpperCase()}:${item.id}`,
+    ];
+    if (owner.id !== owner.id.toUpperCase())
+      keys.push(
+        `beweft.media-description:${owner.id.toUpperCase()}:${brand.id}:${item.id}`,
+      );
+    if (brand.id !== brand.id.toUpperCase())
+      keys.push(
+        `beweft.media-description:${owner.id}:${brand.id.toUpperCase()}:${item.id}`,
+      );
+    for (const key of keys) {
+      await page.evaluate((key) => {
+        localStorage.setItem(key, "{invalid");
+        window.dispatchEvent(
+          new CustomEvent("beweft-media-intent", { detail: key }),
+        );
+      }, key);
+      await expect(
+        dialog.getByText(/must be checked before scheduling/),
+      ).toBeVisible();
+      await expect(
+        dialog.getByRole("button", { name: "Schedule post" }),
+      ).toBeDisabled();
+      await dialog.getByRole("button", { name: "Check media again" }).click();
+      await expect(
+        dialog.getByText(/must be checked before scheduling/),
+      ).toBeVisible();
+      expect(await page.evaluate((key) => localStorage.getItem(key), key)).toBe(
+        "{invalid",
+      );
+      expect(await publications(context, brand.id)).toEqual([]);
+      // Remove only the synthetic fixture so the next malformed spelling can be tested.
+      await page.evaluate((key) => {
+        localStorage.removeItem(key);
+        window.dispatchEvent(
+          new CustomEvent("beweft-media-intent", { detail: key }),
+        );
+      }, key);
+      await expect(
+        dialog.getByRole("button", { name: "Schedule post" }),
+      ).toBeEnabled();
+    }
+    for (const { key, value } of foreign)
+      expect(await page.evaluate((key) => localStorage.getItem(key), key)).toBe(
+        value,
+      );
+    await dialog.getByRole("button", { name: "Schedule post" }).click();
+    await expect
+      .poll(async () => (await publications(context, brand.id)).length)
+      .toBe(1);
+  });
+});
+
+test("a delimiterless record keeps an in-flight media write blocked across tabs", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const brand = await write("/brands", { name: "Held media namespace" });
+    const channel = await write("/channels", {
+      brand_id: brand.id,
+      provider: "manual",
+      name: "Namespace channel",
+      timezone: "UTC",
+    });
+    const item = await upload(context, brand.id, "held-namespace.png");
+    await write("/posts", {
+      brand_id: brand.id,
+      title: "Held namespace draft",
+      text: "Fixture",
+      media_ids: [item.id],
+      variants: [{ channel_id: channel.id }],
+    });
+    const owner = (await (await context.request.get("/api/v1/auth/me")).json())
+      .data;
+    const scope = `beweft.media-description:${owner.id}:${brand.id}`;
+    const key = `${scope}:${item.id}`;
+    await context.addInitScript(
+      (id) => localStorage.setItem("beweft.brand", id),
+      brand.id,
+    );
+    await page.goto("/#drafts");
+    await page.getByRole("button", { name: "Edit draft" }).click();
+    await page.getByLabel("When should this go out?").selectOption("exact");
+    await page.getByLabel(/Date and time/).fill(future());
+    const dialog = page.getByRole("dialog");
+    await expect(
+      dialog.getByRole("button", { name: "Schedule post" }),
+    ).toBeEnabled();
+    const writer = await context.newPage();
+    const started = deferred(),
+      release = deferred();
+    await writer.route(`**/api/v1/media/${item.id}`, async (route) => {
+      if (route.request().method() !== "PATCH") return route.continue();
+      started.resolve();
+      await release.promise;
+      await route.continue().catch(() => {});
+    });
+    try {
+      await writer.goto("/#media");
+      await writer
+        .locator(".media-grid")
+        .getByRole("button", { name: /held-namespace\.png/ })
+        .click();
+      await writer
+        .getByLabel("Description", { exact: true })
+        .fill("The held description");
+      await writer.getByRole("button", { name: "Save description" }).click();
+      await started.promise;
+      await expect(
+        dialog.getByRole("button", { name: "Schedule post" }),
+      ).toBeDisabled();
+      const raw = await writer.evaluate(
+        ({ key, scope }) => {
+          const raw = localStorage.getItem(key);
+          if (raw === null) throw new Error("Expected a pending intent");
+          localStorage.setItem(scope, raw);
+          localStorage.removeItem(key);
+          return raw;
+        },
+        { key, scope },
+      );
+      await expect(
+        dialog.getByText(/must be checked before scheduling/),
+      ).toBeVisible();
+      await expect(
+        dialog.getByRole("button", { name: "Schedule post" }),
+      ).toBeDisabled();
+      const before = (
+        await (await context.request.get(`/api/v1/media/${item.id}`)).json()
+      ).data;
+      expect({
+        alt_text: before.alt_text,
+        metadata_version: before.metadata_version,
+      }).toEqual({ alt_text: "", metadata_version: 1 });
+      expect(await publications(context, brand.id)).toEqual([]);
+      expect(
+        await page.evaluate((scope) => localStorage.getItem(scope), scope),
+      ).toBe(raw);
+      release.resolve();
+      await expect
+        .poll(
+          async () =>
+            (
+              await (
+                await context.request.get(`/api/v1/media/${item.id}`)
+              ).json()
+            ).data.metadata_version,
+        )
+        .toBe(2);
+      await expect(
+        dialog.getByRole("button", { name: "Schedule post" }),
+      ).toBeDisabled();
+      expect(
+        await page.evaluate((scope) => localStorage.getItem(scope), scope),
+      ).toBe(raw);
+      expect(await publications(context, brand.id)).toEqual([]);
+    } finally {
+      release.resolve();
+      await writer.close();
+    }
   });
 });
 

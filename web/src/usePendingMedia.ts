@@ -10,8 +10,11 @@ import {
   type Media,
 } from "./api";
 import {
+  isCanonicalMediaId,
+  isMediaIntentScopeKey,
   mediaIntentEvent,
   mediaIntentPrefix,
+  mediaIntentScope,
   scanMediaIntents,
   type MediaIntent,
 } from "./mediaIntent";
@@ -55,6 +58,7 @@ export function usePendingMedia(
     if (!brand) return;
     let active = true,
       owner = "",
+      scope = "",
       prefix = "",
       sequence = 0;
     let controller: AbortController | null = null;
@@ -90,8 +94,10 @@ export function usePendingMedia(
       if (!current() || !prefix) return;
       if (changed === null) {
         recovery.current.lastIds.forEach((id) => refreshIds.add(id));
-      } else if (changed?.startsWith(prefix))
-        refreshIds.add(changed.slice(prefix.length));
+      } else if (changed?.startsWith(prefix)) {
+        const mediaId = changed.slice(prefix.length);
+        if (isCanonicalMediaId(mediaId)) refreshIds.add(mediaId);
+      }
       const id = ++sequence;
       controller?.abort();
       controller = new AbortController();
@@ -171,12 +177,15 @@ export function usePendingMedia(
       }
     };
     const storage = (event: StorageEvent) => {
-      if (event.key === null || event.key.startsWith(prefix))
+      if (
+        event.key === null ||
+        (scope && isMediaIntentScopeKey(event.key, scope))
+      )
         void scan(event.key);
     };
     const local = (event: Event) => {
       const key = (event as CustomEvent<string>).detail;
-      if (key?.startsWith(prefix)) void scan(key);
+      if (scope && key && isMediaIntentScopeKey(key, scope)) void scan(key);
     };
     window.addEventListener("storage", storage);
     window.addEventListener(mediaIntentEvent, local);
@@ -191,6 +200,7 @@ export function usePendingMedia(
       .then((identity) => {
         if (!current()) return;
         owner = identity.id;
+        scope = mediaIntentScope(owner, brand);
         prefix = mediaIntentPrefix(owner, brand);
         void scan();
       })

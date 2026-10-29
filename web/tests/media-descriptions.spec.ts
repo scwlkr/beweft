@@ -1,4 +1,4 @@
-import { expect, test, type BrowserContext } from "@playwright/test";
+import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import { withWorkspace } from "./helpers";
 
 const pixel = Buffer.from(
@@ -18,6 +18,32 @@ async function upload(context: BrowserContext, brandId: string, name: string) {
   );
   expect(response.ok(), await response.text()).toBe(true);
   return (await response.json()).data;
+}
+
+async function expectSavedDescription(
+  page: Page,
+  context: BrowserContext,
+  id: string,
+  text: string,
+  version: number,
+) {
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("status")).toHaveText(
+    /^(Description saved\.|The description changed\. Showing the current saved version\.)$/,
+  );
+  await expect(dialog.getByLabel("Description", { exact: true })).toHaveValue(
+    text,
+  );
+  await expect(dialog.getByLabel("Description", { exact: true })).toBeEnabled();
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+  await expect
+    .poll(async () => {
+      const response = await context.request.get(`/api/v1/media/${id}`);
+      if (!response.ok()) return null;
+      const { alt_text, metadata_version } = (await response.json()).data;
+      return { alt_text, metadata_version };
+    })
+    .toEqual({ alt_text: text, metadata_version: version });
 }
 
 test("media descriptions remain distinct and scheduled snapshots keep their saved versions", async () => {
@@ -67,8 +93,12 @@ test("media descriptions remain distinct and scheduled snapshots keep their save
     expect(patches).toBe(0);
     await description.fill("A bright star over a blue field.");
     await page.getByRole("button", { name: "Save description" }).click();
-    await expect(page.getByRole("dialog").getByRole("status")).toHaveText(
-      "Description saved.",
+    await expectSavedDescription(
+      page,
+      context,
+      alpha.id,
+      "A bright star over a blue field.",
+      alpha.metadata_version + 1,
     );
     await expect(
       page.getByRole("button", { name: "Save description" }),
@@ -87,8 +117,12 @@ test("media descriptions remain distinct and scheduled snapshots keep their save
       .getByLabel("Description", { exact: true })
       .fill("A small white pixel.");
     await page.getByRole("button", { name: "Save description" }).click();
-    await expect(page.getByRole("dialog").getByRole("status")).toHaveText(
-      "Description saved.",
+    await expectSavedDescription(
+      page,
+      context,
+      beta.id,
+      "A small white pixel.",
+      beta.metadata_version + 1,
     );
     await expect(
       page.getByRole("button", { name: "Save description" }),
@@ -145,8 +179,12 @@ test("media descriptions remain distinct and scheduled snapshots keep their save
       .getByLabel("Description", { exact: true })
       .fill("A later edit to the description.");
     await page.getByRole("button", { name: "Save description" }).click();
-    await expect(page.getByRole("dialog").getByRole("status")).toHaveText(
-      "Description saved.",
+    await expectSavedDescription(
+      page,
+      context,
+      alpha.id,
+      "A later edit to the description.",
+      alpha.metadata_version + 2,
     );
     await expect(
       page.getByRole("button", { name: "Save description" }),
