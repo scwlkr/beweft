@@ -1650,6 +1650,145 @@ test("a saved choice with the wrong scope requires an explicit queue choice", as
   });
 });
 
+for (const replacement of ["exact", "queue"] as const) {
+  test(`an empty corrupt-time edit survives reload until a valid ${replacement} choice`, async () => {
+    await withWorkspace(async (page, context, write) => {
+      const f = await setup(page, context, write);
+      const key = `beweft.schedule-correction:${f.owner.id}:${f.brand.id}:${f.post.id}`;
+      if (replacement === "queue")
+        await write("/schedules", {
+          channel_id: f.channel.id,
+          days: [1, 2, 3, 4, 5, 6, 7],
+          time: "23:58",
+          timezone: "UTC",
+        });
+      const requests: any[] = [];
+      await page.route(routeFor(f.post.id), (route) => {
+        requests.push(route.request().postDataJSON());
+        return route.continue();
+      });
+      await page.goto("/#drafts");
+      await page.evaluate((key) => localStorage.setItem(key, "{damaged"), key);
+      await page
+        .getByRole("button", { name: "Edit draft", exact: true })
+        .click();
+      await page.getByLabel("When should this go out?").selectOption("exact");
+      await page.getByLabel(/Date and time/).fill(localTime(-86400_000));
+      await expect(
+        page.getByRole("button", { name: "Schedule post" }),
+      ).toBeDisabled();
+      expect(await page.evaluate((key) => localStorage.getItem(key), key)).toBe(
+        "{damaged",
+      );
+      await page.getByLabel(/Date and time/).fill("");
+      await expect(
+        page.getByRole("button", { name: "Schedule post" }),
+      ).toBeDisabled();
+      expect(await page.evaluate((key) => localStorage.getItem(key), key)).toBe(
+        "{damaged",
+      );
+      await page.getByRole("button", { name: "Cancel", exact: true }).click();
+      await page.reload();
+      await page
+        .getByRole("button", { name: "Edit draft", exact: true })
+        .click();
+      await expect(
+        page.getByText(/saved scheduling time could not be understood/),
+      ).toBeVisible();
+      await page.getByLabel("When should this go out?").selectOption("exact");
+      await expect(
+        page.getByRole("button", { name: "Schedule post" }),
+      ).toBeDisabled();
+      if (replacement === "exact")
+        await page.getByLabel(/Date and time/).fill(localTime(6 * 86400_000));
+      else
+        await page.getByLabel("When should this go out?").selectOption("queue");
+      expect(
+        await page.evaluate((key) => localStorage.getItem(key), key),
+      ).toBeNull();
+      await page
+        .getByRole("button", {
+          name: replacement === "exact" ? "Schedule post" : "Add to queue",
+        })
+        .click();
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      expect(requests).toHaveLength(1);
+      expect(requests[0].scheduled_at === null).toBe(replacement === "queue");
+      expect(
+        await read(
+          context,
+          `/publications?brand_id=${f.brand.id}&view=summary`,
+        ),
+      ).toHaveLength(1);
+    });
+  });
+}
+
+test("a newer same-choice correction is preserved when real retirement completes", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    const correctionKey = `beweft.schedule-correction:${f.owner.id}:${f.brand.id}:${f.post.id}`;
+    const held = deferred(),
+      release = deferred();
+    await page.route(routeFor(f.post.id), (route) => route.abort("failed"));
+    await page.route("**/api/v1/schedule-requests/*/retire", async (route) => {
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBe(true);
+      held.resolve();
+      await release.promise;
+      await route.fulfill({ response }).catch(() => {});
+    });
+    const other = await context.newPage();
+    try {
+      await other.goto("/#drafts");
+      await start(page);
+      await expect(
+        page.getByRole("button", { name: "Stop original schedule" }),
+      ).toBeEnabled();
+      const saved = await pending(page, f.key);
+      await page
+        .getByRole("button", { name: "Stop original schedule" })
+        .click();
+      await held.promise;
+      const newer = {
+        revision: crypto.randomUUID(),
+        owner_id: f.owner.id,
+        brand_id: f.brand.id,
+        post_id: f.post.id,
+        mode: saved.mode,
+        scheduled_at: saved.scheduled_at,
+      };
+      const raw = JSON.stringify(newer);
+      await other.evaluate(({ key, raw }) => localStorage.setItem(key, raw), {
+        key: correctionKey,
+        raw,
+      });
+      release.resolve();
+      await expect(
+        page.getByText(/original schedule was stopped/),
+      ).toBeVisible();
+      expect(await pending(page, f.key)).toBeNull();
+      expect(
+        await other.evaluate((key) => localStorage.getItem(key), correctionKey),
+      ).toBe(raw);
+      await page.getByRole("button", { name: "Cancel", exact: true }).click();
+      await page.reload();
+      await page
+        .getByRole("button", { name: "Edit draft", exact: true })
+        .click();
+      await expect(
+        page.getByText(`Exact saved time: ${saved.scheduled_at}`),
+      ).toBeVisible();
+      expect(
+        await other.evaluate((key) => localStorage.getItem(key), correctionKey),
+      ).toBe(raw);
+    } finally {
+      release.resolve();
+      await other.close();
+    }
+  });
+});
+
 test("unreadable saved-time storage blocks scheduling until it can be checked", async () => {
   await withWorkspace(async (page, context, write) => {
     const f = await setup(page, context, write);
@@ -1679,6 +1818,109 @@ test("unreadable saved-time storage blocks scheduling until it can be checked", 
     await expect(page.getByRole("dialog")).toHaveCount(0);
   });
 });
+
+for (const source of ["post", "get", "retire"] as const) {
+  for (const contradiction of [false, true]) {
+    test(`an ID with malformed ${source.toUpperCase()} metadata ${contradiction ? "blocks a contradictory rejection" : "recovers through independent verification"}`, async () => {
+      await withWorkspace(async (page, context, write) => {
+        const f = await setup(page, context, write);
+        let original: any;
+        let reads = 0;
+        const damage = (row: any) => {
+          const damaged = { ...row };
+          if (source === "post") delete damaged.post_version;
+          if (source === "get") damaged.channel_id = "not-a-uuid";
+          if (source === "retire") delete damaged.brand_id;
+          return damaged;
+        };
+        await page.route(routeFor(f.post.id), async (route) => {
+          const response = await route.fetch();
+          expect(response.ok(), await response.text()).toBe(true);
+          original = (await response.json()).data[0];
+          if (source === "post")
+            await route.fulfill({ json: { data: [damage(original)] } });
+          else await route.abort("failed");
+        });
+        await page.route("**/api/v1/schedule-requests/*", async (route) => {
+          const response = await route.fetch();
+          expect(response.ok(), await response.text()).toBe(true);
+          const data = (await response.json()).data;
+          reads++;
+          if (source === "get" && reads === 1)
+            data.publications = data.publications.map(damage);
+          else if (contradiction) {
+            data.outcome = "rejected";
+            data.error = {
+              code: "schedule_request_retired",
+              message: "Stopped",
+            };
+            data.publications = [];
+          }
+          await route.fulfill({ json: { data } });
+        });
+        if (source === "retire")
+          await page.route(
+            "**/api/v1/schedule-requests/*/retire",
+            async (route) => {
+              const response = await route.fetch();
+              expect(response.ok(), await response.text()).toBe(true);
+              const data = (await response.json()).data;
+              data.publications = data.publications.map(damage);
+              await route.fulfill({ json: { data } });
+            },
+          );
+        await start(page);
+        await expect(
+          page.getByRole("button", { name: "Check scheduling outcome" }),
+        ).toBeEnabled();
+        if (source === "get")
+          await page
+            .getByRole("button", { name: "Check scheduling outcome" })
+            .click();
+        if (source === "retire")
+          await page
+            .getByRole("button", { name: "Stop original schedule" })
+            .click();
+        await expect
+          .poll(
+            async () => (await pending(page, f.key))?.observed_publication_ids,
+          )
+          .toEqual([original.id]);
+        const saved = await pending(page, f.key);
+        expect(saved.unverified_publication_ids).toEqual([original.id]);
+        expect(saved.observed_publications ?? []).toEqual([]);
+        await page
+          .getByRole("button", { name: "Check scheduling outcome" })
+          .click();
+        if (contradiction) {
+          await expect(
+            page.getByRole("status").getByText(/server record does not match/),
+          ).toBeVisible();
+          const locked = await pending(page, f.key);
+          expect(locked.rejection_code).toBe("schedule_request_conflict");
+          expect(locked.observed_publication_ids).toEqual([original.id]);
+          expect(locked.observed_publications).toEqual([
+            { channel_id: original.channel_id, publication_id: original.id },
+          ]);
+        } else {
+          await expect(
+            page.getByText(/original request is confirmed/),
+          ).toBeVisible();
+          expect(await pending(page, f.key)).toBeNull();
+        }
+        expect(
+          (
+            await read(
+              context,
+              `/publications?brand_id=${f.brand.id}&view=summary`,
+            )
+          ).map((row: any) => row.id),
+        ).toEqual([original.id]);
+        expect(f.patches()).toBe(1);
+      });
+    });
+  }
+}
 
 test("a malformed sibling cannot discard a validated publication binding", async () => {
   await withWorkspace(async (page, context, write) => {

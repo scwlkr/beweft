@@ -263,10 +263,11 @@ function saveCorrectionForRejectedIntent(intent: ScheduleIntent) {
   const sameChoice =
     existing.value?.mode === intent.mode &&
     existing.value.scheduled_at === (intent.scheduled_at ?? null);
-  if (
-    existing.corrupt ||
-    (existing.raw !== (intent.correction_baseline ?? null) && !sameChoice)
-  )
+  if (existing.corrupt) throw new ScheduleCorrectionConflict();
+  // A newer tab may already have stored the same choice. Preserve its exact
+  // record instead of replacing its revision while resolving this request.
+  if (sameChoice) return existing;
+  if (existing.raw !== (intent.correction_baseline ?? null))
     throw new ScheduleCorrectionConflict();
   return persistCorrection(intent, existing.key);
 }
@@ -576,6 +577,7 @@ const PublicationBinding = z.object({
   channel_id: z.string().uuid(),
   post_version: z.number().int(),
 });
+const PublicationIdentity = z.object({ id: z.string().uuid() });
 function hasPublicationEvidence(intent: ScheduleIntent) {
   return !!(
     intent.observed_publication_ids?.length ||
@@ -596,12 +598,15 @@ function unverifiedPublicationIds(intent: ScheduleIntent) {
 function analyzePublicationRows(intent: ScheduleIntent, rows: unknown[]) {
   const channels = new Set(intent.channel_ids);
   const ids = new Set<string>(),
+    observedIds = new Set<string>(),
     seen = new Set<string>();
   const bindings: ObservedPublication[] = [];
   const publications: PublicationSummary[] = [];
   let mismatch = false,
     incomplete = false;
   for (const raw of rows) {
+    const identity = PublicationIdentity.safeParse(raw);
+    if (identity.success) observedIds.add(identity.data.id.toLowerCase());
     const result = PublicationBinding.safeParse(raw);
     if (!result.success) {
       incomplete = true;
@@ -635,6 +640,7 @@ function analyzePublicationRows(intent: ScheduleIntent, rows: unknown[]) {
       });
   }
   return {
+    ids: [...observedIds],
     bindings,
     publications,
     mismatch,
@@ -728,12 +734,14 @@ async function recordPublicationObservations(
         a.publication_id.localeCompare(b.publication_id),
     );
     const ids = [...legacyIds];
-    for (const row of bindings)
-      if (!ids.includes(row.publication_id)) {
+    for (const id of analyzed.ids)
+      if (!ids.includes(id)) {
         if (ids.length >= 1000) mismatch = true;
-        else ids.push(row.publication_id);
+        else ids.push(id);
       }
     ids.sort();
+    const boundIds = new Set(bindings.map((row) => row.publication_id));
+    for (const id of ids) if (!boundIds.has(id)) unverified.add(id);
     const updated: ScheduleIntent = {
       ...saved,
       ...(bindings.length ? { observed_publications: bindings } : {}),

@@ -211,6 +211,17 @@ export function useComposer({
       correction.kind === "error"
     )
       return;
+    if ("date" in next) {
+      const instant = next.date ? new Date(next.date).getTime() : NaN;
+      if (!Number.isFinite(instant) || instant <= Date.now()) {
+        // An empty or invalid edit is not a reviewed replacement. Keep the
+        // saved record so closing or reloading cannot silently pick a default.
+        editedChoice.current = true;
+        setDateValue(next.date);
+        setPreservedExact(null);
+        return;
+      }
+    }
     if (
       correction.kind === "corrupt" &&
       "mode" in next &&
@@ -864,7 +875,9 @@ export function useComposer({
     }
     if (
       mode === "exact" &&
-      (!date || new Date(preservedExact ?? date).getTime() < Date.now())
+      (!date ||
+        !Number.isFinite(new Date(preservedExact ?? date).getTime()) ||
+        new Date(preservedExact ?? date).getTime() <= Date.now())
     ) {
       setError("Choose a future date and time.");
       return;
