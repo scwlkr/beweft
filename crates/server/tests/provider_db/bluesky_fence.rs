@@ -276,6 +276,18 @@ async fn bluesky_connection_obeys_provider_and_brand_fences(h: &Harness) {
         StatusCode::OK
     );
 
+    // A near-expiry browser session cannot begin a remote session creation.
+    sqlx::query("UPDATE sessions SET expires_at=clock_timestamp()+interval '0.9 seconds' WHERE token_hash=$1")
+        .bind(crypto::digest(&h.session)).execute(&h.state.db).await.unwrap();
+    let before_near = h.provider.bluesky_session_requests.load(Ordering::SeqCst);
+    let near = connect(Some(connected)).send().await.unwrap();
+    assert_eq!(near.status(), StatusCode::CONFLICT);
+    let message = near.text().await.unwrap();
+    assert!(message.contains("before the provider request") && message.contains("First inspect your connected channels"));
+    assert_eq!(h.provider.bluesky_session_requests.load(Ordering::SeqCst), before_near);
+    sqlx::query("UPDATE sessions SET expires_at=clock_timestamp()+interval '1 hour' WHERE token_hash=$1")
+        .bind(crypto::digest(&h.session)).execute(&h.state.db).await.unwrap();
+
     // If the originating browser session expires or is revoked during the
     // external call, the stored grant update rolls back in both cases.
     for revoked in [false, true] {

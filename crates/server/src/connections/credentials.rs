@@ -99,9 +99,14 @@ pub async fn bluesky(
     if let Some(id) = reconnect {
         check_bluesky_reconnect(&mut tx, id, brand, false).await?;
     }
-    let channel = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+    let started = std::time::Instant::now();
+    let remaining: Option<f64> = sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM (expires_at-clock_timestamp()))::double precision FROM sessions WHERE token_hash=$1 AND owner_id=$2")
+        .bind(&browser_session).bind(auth.owner_id).fetch_optional(&mut *tx).await?;
+    let deadline = super::flows::authorization_deadline(started, remaining)?;
+    let channel = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
         adapter_for(&app)
             .await?
+            .with_monotonic_deadline(deadline)
             .connect_bluesky(&app, &identifier, &password)
             .await
             .map_err(provider_error)
@@ -157,7 +162,7 @@ pub async fn load_channel_tx(
     state: &AppState,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: Uuid,
-    deadline: Option<chrono::DateTime<chrono::Utc>>,
+    deadline: Option<std::time::Instant>,
 ) -> Result<Channel> {
     load_channel_inner(state, tx, id, deadline, true).await
 }
@@ -173,7 +178,7 @@ async fn load_channel_inner(
     state: &AppState,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: Uuid,
-    deadline: Option<chrono::DateTime<chrono::Utc>>,
+    deadline: Option<std::time::Instant>,
     refresh: bool,
 ) -> Result<Channel> {
     let row=sqlx::query("SELECT provider,encrypted_credentials,connection_status FROM channels WHERE id=$1 FOR UPDATE").bind(id).fetch_one(&mut **tx).await?;
@@ -203,9 +208,23 @@ async fn load_channel_inner(
             .expires_at
             .is_some_and(|t| t < chrono::Utc::now().timestamp() + 300)
     {
-        let mut adapter = adapter_for(&channel.app).await?;
+        let mut adapter = if let Some(deadline) = deadline {
+            if deadline <= std::time::Instant::now() {
+                return Err(ApiError::conflict(
+                    "Delivery lease expired before provider setup",
+                ));
+            }
+            tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                adapter_for(&channel.app),
+            )
+            .await
+            .map_err(|_| ApiError::conflict("Delivery lease expired during provider setup"))??
+        } else {
+            adapter_for(&channel.app).await?
+        };
         if let Some(deadline) = deadline {
-            adapter = adapter.with_deadline(deadline);
+            adapter = adapter.with_monotonic_deadline(deadline);
         }
         match adapter.refresh(&channel.app, &channel.tokens).await {
             Ok(tokens) => {

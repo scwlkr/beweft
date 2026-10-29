@@ -3,7 +3,7 @@ use crate::*;
 pub struct Adapter {
     pub(crate) http: Client,
     pub(crate) fixture_origin: Option<String>,
-    pub(crate) deadline: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) deadline: Option<std::time::Instant>,
 }
 impl Adapter {
     pub fn new() -> Result<Self> {
@@ -139,8 +139,9 @@ impl Adapter {
             status: Some(s.as_u16()),
         })
     }
-    /// Absolute wall-clock deadline follows the durable worker lease, including suspended processes.
-    pub fn with_deadline(mut self, deadline: chrono::DateTime<chrono::Utc>) -> Self {
+    /// Provider deadlines are derived from the database's remaining time,
+    /// never by comparing its timestamp with the application host's clock.
+    pub fn with_monotonic_deadline(mut self, deadline: std::time::Instant) -> Self {
         self.deadline = Some(deadline);
         self
     }
@@ -150,7 +151,7 @@ impl Adapter {
         write: bool,
     ) -> Result<reqwest::Response> {
         if let Some(deadline) = self.deadline {
-            let remaining = (deadline - chrono::Utc::now()).to_std().ok().filter(|d| !d.is_zero()).ok_or_else(|| error(FailureKind::Uncertain,"Delivery lease expired before the provider request; reconcile before retrying"))?;
+            let remaining = deadline.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero()).ok_or_else(|| error(FailureKind::Uncertain,"The provider operation reached its time limit before the next request; inspect the outcome before retrying"))?;
             b = b.timeout(remaining.min(Duration::from_secs(60)));
         }
         b.send().await.map_err(|_| {

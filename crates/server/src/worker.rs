@@ -1,12 +1,11 @@
 use crate::state::AppState;
-use chrono::{Duration, Utc};
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
 /// Recover only by quarantine. A lease expiring never authorizes a second external call.
 pub async fn recover_stale(state: &AppState) -> anyhow::Result<()> {
     let mut tx = state.db.begin().await?;
-    let ids:Vec<Uuid>=sqlx::query_scalar("UPDATE publications SET state='uncertain',last_error='Worker stopped while an attempt was in flight. Reconcile before retrying.',lease_until=NULL,updated_at=now() WHERE state='sending' AND lease_until<now() RETURNING id").fetch_all(&mut *tx).await?;
+    let ids:Vec<Uuid>=sqlx::query_scalar("UPDATE publications SET state='uncertain',last_error='Worker stopped while an attempt was in flight. Reconcile before retrying.',lease_until=NULL,updated_at=clock_timestamp() WHERE state='sending' AND lease_until<=clock_timestamp() RETURNING id").fetch_all(&mut *tx).await?;
     if !ids.is_empty() {
         sqlx::query("UPDATE publication_attempts SET state='uncertain',finished_at=now(),error='Worker lease expired; external outcome is unknown' WHERE publication_id=ANY($1) AND state='sending'").bind(ids).execute(&mut *tx).await?;
     }
@@ -38,10 +37,9 @@ pub async fn tick(state: &AppState, worker_id: &str) -> anyhow::Result<bool> {
     let provider: String = row.get("provider");
     let attempt = Uuid::new_v4();
     sqlx::query(
-        "UPDATE publications SET state='sending',lease_until=$2,updated_at=now() WHERE id=$1",
+        "UPDATE publications SET state='sending',lease_until=clock_timestamp()+interval '5 minutes',updated_at=clock_timestamp() WHERE id=$1",
     )
     .bind(id)
-    .bind(Utc::now() + Duration::minutes(5))
     .execute(&mut *tx)
     .await?;
     sqlx::query("INSERT INTO publication_attempts(id,publication_id,state,provider) VALUES($1,$2,'sending',$3)").bind(attempt).bind(id).bind(&provider).execute(&mut *tx).await?;

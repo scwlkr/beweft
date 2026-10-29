@@ -66,11 +66,19 @@ pub async fn reply(
     let adapter = connections::adapter_for(&c.app).await?;
     let item: providers::InboxItem =
         serde_json::from_value(row.get("item")).map_err(ApiError::internal)?;
-    let deadline:Option<chrono::DateTime<chrono::Utc>>=sqlx::query_scalar("INSERT INTO provider_replies(id,inbox_id,owner_id,text,state,created_at,updated_at,delivery_deadline) VALUES($1,$2,$3,$4,'sending',clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '90 seconds') ON CONFLICT(id) DO NOTHING RETURNING delivery_deadline").bind(request_id).bind(id).bind(auth.owner_id).bind(&text).fetch_optional(&mut *tx).await?;
-    let deadline = deadline.ok_or_else(|| {
+    let started = std::time::Instant::now();
+    let remaining:Option<f64>=sqlx::query_scalar("INSERT INTO provider_replies(id,inbox_id,owner_id,text,state,created_at,updated_at,delivery_deadline) VALUES($1,$2,$3,$4,'sending',clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '90 seconds') ON CONFLICT(id) DO NOTHING RETURNING EXTRACT(EPOCH FROM (delivery_deadline-clock_timestamp()))::double precision").bind(request_id).bind(id).bind(auth.owner_id).bind(&text).fetch_optional(&mut *tx).await?;
+    let remaining = remaining.ok_or_else(|| {
         ApiError::conflict("Reply request already exists; inspect its original result")
     })?;
-    let adapter = adapter.with_deadline(deadline);
+    // Do not compare a PostgreSQL timestamp to the API host's wall clock.
+    // Account for query and commit time, and leave a one-second safety margin.
+    let deadline = if remaining.is_finite() && remaining > 1.0 {
+        started + std::time::Duration::from_secs_f64((remaining - 1.0).min(90.0))
+    } else {
+        started
+    };
+    let adapter = adapter.with_monotonic_deadline(deadline);
     tx.commit().await?;
     let (status, receipt, error) = match adapter
         .reply(&c, &item, &text, &request_id.to_string())
@@ -100,17 +108,20 @@ pub async fn reply(
             Some(e.message),
         ),
     };
-    let result:Option<Value>=sqlx::query_scalar("UPDATE provider_replies SET state=$2,receipt=$3,error=$4,updated_at=now() WHERE id=$1 AND state='sending' RETURNING to_jsonb(provider_replies.*)-'owner_id'-'history_order'-'delivery_deadline'").bind(request_id).bind(status).bind(receipt).bind(error).fetch_optional(&state.db).await?;
-    let result =
-        match result {
-            Some(value) => value,
-            None => sqlx::query_scalar(
-                "SELECT to_jsonb(r)-'owner_id'-'history_order'-'delivery_deadline' FROM provider_replies r WHERE id=$1 AND owner_id=$2",
-            )
-            .bind(request_id)
-            .bind(auth.owner_id)
-            .fetch_one(&state.db)
-            .await?,
-        };
+    let result:Option<Value>=sqlx::query_scalar("UPDATE provider_replies SET state=$2,receipt=$3,error=$4,updated_at=clock_timestamp() WHERE id=$1 AND state='sending' AND delivery_deadline>clock_timestamp() RETURNING to_jsonb(provider_replies.*)-'owner_id'-'history_order'-'delivery_deadline'").bind(request_id).bind(status).bind(receipt).bind(error).fetch_optional(&state.db).await?;
+    let result = match result {
+        Some(value) => value,
+        None => {
+            // A response arriving after its deadline cannot install a receipt
+            // or override an owner's later resolution. Quarantine it instead.
+            let expired:Option<Value>=sqlx::query_scalar("UPDATE provider_replies SET state='uncertain',error='Reply deadline elapsed; inspect the network before resolving the outcome',updated_at=clock_timestamp() WHERE id=$1 AND state='sending' AND delivery_deadline<=clock_timestamp() RETURNING to_jsonb(provider_replies.*)-'owner_id'-'history_order'-'delivery_deadline'")
+                .bind(request_id).fetch_optional(&state.db).await?;
+            match expired {
+                Some(value) => value,
+                None => sqlx::query_scalar("SELECT to_jsonb(r)-'owner_id'-'history_order'-'delivery_deadline' FROM provider_replies r WHERE id=$1 AND owner_id=$2")
+                    .bind(request_id).bind(auth.owner_id).fetch_one(&state.db).await?,
+            }
+        }
+    };
     Ok(data(result))
 }

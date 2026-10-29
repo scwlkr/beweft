@@ -6,6 +6,23 @@ pub(super) fn recovery(message: &str) -> String {
     format!("{message} {RECOVERY_GUIDANCE}")
 }
 
+/// Bound an authorization operation by PostgreSQL's flow/session lifetime,
+/// accounting for query latency without consulting the application host clock.
+pub(super) fn authorization_deadline(
+    started: std::time::Instant,
+    remaining: Option<f64>,
+) -> Result<std::time::Instant> {
+    remaining
+        .filter(|seconds| seconds.is_finite() && *seconds > 1.0)
+        .map(|seconds| started + std::time::Duration::from_secs_f64((seconds - 1.0).min(60.0)))
+        .filter(|deadline| *deadline > std::time::Instant::now())
+        .ok_or_else(|| {
+            ApiError::conflict(recovery(
+                "Authorization or its browser session expired before the provider request.",
+            ))
+        })
+}
+
 // After provider consent, even a local validation or database failure can
 // leave remote access behind. Preserve the original status and safe message.
 pub(super) fn post_grant_error(error: ApiError) -> ApiError {
@@ -228,8 +245,12 @@ pub async fn callback(
         ));
     }
 
-    let candidates = tokio::time::timeout(std::time::Duration::from_secs(60), async {
-        let adapter = adapter_for(&app).await?;
+    let started = std::time::Instant::now();
+    let remaining: Option<f64> = sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM (LEAST(f.expires_at,s.expires_at)-clock_timestamp()))::double precision FROM connection_flows f JOIN sessions s ON s.token_hash=f.session_hash AND s.owner_id=f.owner_id WHERE f.id=$1 AND f.consumed_at IS NOT NULL AND f.completed_at IS NULL AND f.oauth_generation=$2")
+        .bind(id).bind(generation).fetch_optional(&mut *tx).await?;
+    let deadline = authorization_deadline(started, remaining)?;
+    let candidates = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+        let adapter = adapter_for(&app).await?.with_monotonic_deadline(deadline);
         let tokens = adapter
             .exchange(
                 &app,
