@@ -7,6 +7,7 @@ Uses a uniquely named database in the configured test PostgreSQL container and
 removes that database and its temporary files on exit. No worker or provider is run.
 """
 import base64
+import datetime as dt
 import http.cookiejar
 import http.server
 import json
@@ -261,6 +262,123 @@ def lost_response_test(env, origin, brand):
         thread.join(timeout=5)
 
 
+def lost_upload_response_test(env, origin, brand, path):
+    """Commit the multipart upload, then close before returning its response."""
+    calls = []
+    class Proxy(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+        def do_GET(self):
+            request = urllib.request.Request(origin + self.path, headers={"Authorization": self.headers["Authorization"]})
+            with urllib.request.urlopen(request, timeout=10) as response:
+                body = response.read()
+                self.send_response(response.status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+        def do_POST(self):
+            calls.append(self.path)
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            request = urllib.request.Request(origin + self.path, data=body, headers={
+                "Authorization": self.headers["Authorization"],
+                "Content-Type": self.headers["Content-Type"], "X-Beweft-Request": "1",
+            })
+            with urllib.request.urlopen(request, timeout=10) as response:
+                assert response.status == 200
+                response.read()
+            self.connection.shutdown(socket.SHUT_RDWR)
+            self.connection.close()
+    proxy = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+    thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+    thread.start()
+    mcp = Mcp(dict(env, BEWEFT_URL=f"http://127.0.0.1:{proxy.server_port}"))
+    try:
+        mcp.initialize()
+        error = mcp.call("media_upload", {"brand_id": brand, "path": str(path)}, error=True)
+        assert "inspect media before retrying" in error and calls == ["/api/v1/media?brand_id=" + brand]
+    finally:
+        mcp.close()
+        proxy.shutdown()
+        proxy.server_close()
+        thread.join(timeout=5)
+
+
+def pagination_test(env, unrestricted_env, call, brand, other, channel):
+    """Read 170 maximum-size drafts, including tied timestamps, exactly once."""
+    draft_ids = set()
+    for index in range(170):
+        text = f"{index:04d}" + "x" * 99996
+        draft = call("/posts", {"brand_id": brand, "title": "Pagination fixture", "text": text})
+        draft_ids.add(draft["id"])
+    outside = call("/posts", {"brand_id": other, "text": "outside scope"})["id"]
+    subprocess.run(["docker", "exec", CONTAINER, "psql", "-U", DB_USER, "-d", DB, "-v", "ON_ERROR_STOP=1", "-c",
+                    "UPDATE posts SET created_at='2098-12-31T00:00:00Z' WHERE title='Pagination fixture'"],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    queued, history = set(), set()
+    for index in range(24):
+        post = call("/posts", {"brand_id": brand, "text": f"queue fixture {index}"})
+        scheduled_at = (dt.datetime(2099, 1, 2, tzinfo=dt.timezone.utc) + dt.timedelta(minutes=index)).isoformat()
+        publication = call(f"/posts/{post['id']}/schedule", {"version": post["version"], "channel_ids": [channel], "scheduled_at": scheduled_at})[0]
+        if index % 2:
+            call(f"/publications/{publication['id']}/cancel", {})
+            history.add(publication["id"])
+        else:
+            queued.add(publication["id"])
+    other_channel = call("/channels", {"brand_id": other, "name": "Other manual", "provider": "manual"})
+    other_post = call("/posts", {"brand_id": other, "text": "outside queue scope"})
+    other_publication = call(f"/posts/{other_post['id']}/schedule", {"version": other_post["version"], "channel_ids": [other_channel["id"]], "scheduled_at": "2099-01-03T00:00:00Z"})[0]["id"]
+    mcp = Mcp(env)
+    try:
+        mcp.initialize()
+        first = mcp.call("drafts", {"brand_id": brand, "limit": 10})
+        cursor = first["next_cursor"]
+        assert cursor and "400" in mcp.call("drafts", {"limit": 10, "cursor": cursor}, error=True)
+        assert "400" in mcp.call("media", {"brand_id": brand, "limit": 10, "cursor": cursor}, error=True)
+        assert "403" in mcp.call("drafts", {"brand_id": other, "cursor": cursor}, error=True)
+        assert "HTTP 400" in cli(env, "api", "GET", "/posts?limit=10&status=draft&view=summary&cursor=bad", success=False)
+        assert "HTTP 400" in cli(env, "api", "GET", "/posts?limit=10&brand_id=" + brand + "&view=summary&cursor=" + cursor, success=False)
+        assert "HTTP 400" in cli(env, "api", "GET", "/posts?limit=10&brand_id=" + brand + "&status=draft&cursor=" + cursor, success=False)
+        assert "HTTP 400" in cli(env, "api", "GET", "/posts?limit=11", success=False)
+        rows = list(first["data"])
+        while cursor:
+            page = mcp.call("drafts", {"brand_id": brand, "limit": 10, "cursor": cursor})
+            rows.extend(page["data"])
+            cursor = page["next_cursor"]
+            assert len(rows) < 250
+        ids = [row["id"] for row in rows]
+        assert len(ids) == len(set(ids)) and draft_ids.issubset(ids) and outside not in ids
+        assert all(row["status"] == "draft" and "variants" not in row and "options" not in row for row in rows)
+        assert len([item for item in ids if item in draft_ids]) == 170
+        for tool, expected in (("queue", queued), ("history", history)):
+            rows, cursor = [], None
+            while True:
+                args = {"brand_id": brand, "limit": 3}
+                if cursor:
+                    args["cursor"] = cursor
+                page = mcp.call(tool, args)
+                if tool == "queue" and not rows and page["next_cursor"]:
+                    assert "400" in mcp.call("history", {"brand_id": brand, "limit": 3, "cursor": page["next_cursor"]}, error=True)
+                rows.extend(page["data"])
+                cursor = page["next_cursor"]
+                if not cursor:
+                    break
+            ids = [row["id"] for row in rows]
+            assert len(ids) == len(set(ids)) and expected.issubset(ids)
+            assert all((row["state"] in ("queued", "sending")) == (tool == "queue") and "payload" not in row for row in rows)
+        detail = mcp.call("publication", {"id": next(iter(queued))})["data"]
+        assert detail["payload"]["text"].startswith("queue fixture ")
+        assert other_publication not in [row["id"] for row in mcp.call("queue")["data"]]
+        assert "inaccessible" in mcp.call("publication", {"id": other_publication}, error=True)
+        other_mcp = Mcp(unrestricted_env)
+        try:
+            other_mcp.initialize()
+            assert "400" in other_mcp.call("drafts", {"brand_id": brand, "limit": 10, "cursor": first["next_cursor"]}, error=True)
+        finally:
+            other_mcp.close()
+    finally:
+        mcp.close()
+
+
 def run(temporary):
     port = unused_port()
     origin = f"http://127.0.0.1:{port}"
@@ -301,6 +419,8 @@ def run(temporary):
         channel = call("/channels", {"brand_id": brand["id"], "name": "Manual fixture", "provider": "manual"})
         read = call("/tokens", {"name": "Read fixture", "scopes": ["read"], "brand_ids": [brand["id"]]})["token"]
         write = call("/tokens", {"name": "Write fixture", "scopes": ["read", "drafts:write", "publishing:write"], "brand_ids": [brand["id"]]})["token"]
+        unrestricted = call("/tokens", {"name": "Unrestricted read fixture", "scopes": ["read"]})["token"]
+        other_write = call("/tokens", {"name": "Other brand fixture", "scopes": ["read", "drafts:write"], "brand_ids": [other["id"]]})["token"]
         env = dict(clean_env, BEWEFT_URL=origin, BEWEFT_TOKEN=write,
                    BEWEFT_UPLOAD_ROOT=str(upload_root), BEWEFT_MCP_CALLS_PER_MINUTE="120")
         read_env = dict(env, BEWEFT_TOKEN=read)
@@ -323,8 +443,15 @@ def run(temporary):
         token_file.chmod(0o600)
         assert cli(file_env, "brands")["data"][0]["id"] == brand["id"]
         assert "only one" in cli(dict(file_env, BEWEFT_TOKEN=write), "brands", success=False)
-        created = cli(env, "draft-create", "--json", "-", body={"body": {"brand_id": brand["id"], "text": "CLI draft"}})["data"]
+        created = cli(env, "draft-create", "--json", "-", body={"body": {"brand_id": brand["id"], "text": "CLI draft", "options": {"source": "fixture"}, "variants": [{"channel_id": channel["id"], "text": "fixture variant"}]}})["data"]
         assert created["status"] == "draft" and not cli(env, "queue")["data"]
+        summary = cli(env, "drafts")["data"][0]
+        assert summary["id"] == created["id"] and "variants" not in summary and "options" not in summary
+        full = cli(env, "post", "--json", "-", body={"id": created["id"]})["data"]
+        assert full["options"]["source"] == "fixture" and full["variants"][0]["text"] == "fixture variant"
+        with client.open(origin + "/api/v1/posts?brand_id=" + brand["id"], timeout=10) as response:
+            legacy = json.load(response)
+            assert "next_cursor" not in legacy and legacy["data"][0]["variants"][0]["text"] == "fixture variant"
         updated = cli(env, "draft-update", "--json", "-", body={"id": created["id"], "body": {"version": created["version"], "text": "CLI revised"}})["data"]
         assert cli(env, "post", "--json", "-", body={"id": created["id"]})["data"]["text"] == "CLI revised"
         schedule = {"id": created["id"], "intent": "exact", "body": {"version": updated["version"], "channel_ids": [channel["id"]], "scheduled_at": "2099-01-01T00:00:00Z"}}
@@ -332,6 +459,9 @@ def run(temporary):
         assert "403" in cli(read_env, "schedule", "--json", "-", body=schedule, success=False)
         publication = cli(env, "schedule", "--json", "-", body=schedule)["data"][0]
         assert cli(env, "queue")["data"][0]["id"] == publication["id"]
+        with client.open(origin + "/api/v1/publications?brand_id=" + brand["id"], timeout=10) as response:
+            legacy = json.load(response)
+            assert "next_cursor" not in legacy and legacy["data"][0]["payload"]["text"] == "fixture variant"
         assert not cli(env, "attempts", "--json", "-", body={"id": publication["id"]})["data"]
         assert not cli(env, "history")["data"] and not cli(env, "health")["data"]["worker_healthy"]
         lost_response_test(env, origin, brand["id"])
@@ -367,6 +497,34 @@ def run(temporary):
             req = urllib.request.Request(origin + uploaded["url"], headers={"Authorization": "Bearer " + write})
             with urllib.request.urlopen(req, timeout=10) as response:
                 assert response.read() == image_bytes
+            for _ in range(9):
+                mcp.call("media_upload", {"brand_id": brand["id"], "path": str(image)})
+            media_rows, media_cursor = [], None
+            while True:
+                args = {"brand_id": brand["id"], "limit": 3}
+                if media_cursor:
+                    args["cursor"] = media_cursor
+                page = mcp.call("media", args)
+                media_rows.extend(page["data"])
+                media_cursor = page["next_cursor"]
+                if not media_cursor:
+                    break
+            media_ids = [row["id"] for row in media_rows]
+            assert len(media_ids) == 10 and len(set(media_ids)) == 10 and all(row["brand_id"] == brand["id"] for row in media_rows)
+            lost_image = upload_root / "lost-response.png"
+            lost_image.write_bytes(image_bytes)
+            lost_upload_response_test(env, origin, brand["id"], lost_image)
+            other_image = upload_root / "outside-brand.png"
+            other_image.write_bytes(image_bytes)
+            cli(dict(env, BEWEFT_TOKEN=other_write), "media-upload", "--json", "-", body={"brand_id": other["id"], "path": str(other_image)})
+            recovered = mcp.call("media", {"brand_id": brand["id"]})["data"]
+            assert len([row for row in recovered if row["name"] == lost_image.name]) == 1
+            assert not any(row["name"] == other_image.name for row in mcp.call("media")["data"])
+            assert "403" in mcp.call("media", {"brand_id": other["id"]}, error=True)
+            recovered_id = next(row["id"] for row in recovered if row["name"] == lost_image.name)
+            req = urllib.request.Request(origin + "/api/v1/media/" + recovered_id + "/file", headers={"Authorization": "Bearer " + write})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                assert response.read() == image_bytes
         finally:
             mcp.close()
         limited = Mcp(dict(read_env, BEWEFT_MCP_CALLS_PER_MINUTE="1"))
@@ -385,7 +543,8 @@ def run(temporary):
             restricted.close()
         redirect_test(env)
         race_test(env, upload_root, temp / "race-secret", brand["id"])
-        print("PASS: isolated API CLI/MCP, scoped reads and write rejection, draft/update/schedule/authoritative reads, upload bytes and confinement race, token files, redirect refusal, protocol errors and rate limit")
+        pagination_test(env, dict(env, BEWEFT_TOKEN=unrestricted), call, brand["id"], other["id"], channel["id"])
+        print("PASS: isolated API CLI/MCP, scoped reads and write rejection, lost draft/upload response recovery, 170 large-draft pagination, scoped cursors, queue/history detail, upload confinement race, token files, redirect refusal, protocol errors and rate limit")
     finally:
         stop(server)
 

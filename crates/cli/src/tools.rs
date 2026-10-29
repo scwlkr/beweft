@@ -9,8 +9,10 @@ pub const NAMES: &[&str] = &[
     "channels",
     "drafts",
     "post",
+    "media",
     "queue",
     "history",
+    "publication",
     "attempts",
     "health",
     "draft_create",
@@ -59,6 +61,10 @@ fn request_schema(name: &str) -> Value {
 pub fn description(name: &str) -> Value {
     let id = json!({"type":"string","format":"uuid"});
     let filter = object(json!({"brand_id":id}), &[]);
+    let paged = object(
+        json!({"brand_id":id,"limit":{"type":"integer","minimum":1,"maximum":10,"default":10},"cursor":{"type":"string","maxLength":2048}}),
+        &[],
+    );
     let (summary, schema, read) = match name {
         "brands" => (
             "List brands accessible to this token.",
@@ -67,8 +73,8 @@ pub fn description(name: &str) -> Value {
         ),
         "channels" => ("List channels and connection health.", filter, true),
         "drafts" => (
-            "List posts whose authoritative status is draft.",
-            filter,
+            "Read a page of draft summaries (variants and options omitted); use post for complete content. Follow next_cursor for more.",
+            paged,
             true,
         ),
         "post" => (
@@ -76,14 +82,24 @@ pub fn description(name: &str) -> Value {
             object(json!({"id":id}), &["id"]),
             true,
         ),
+        "media" => (
+            "Read a page of media records, including IDs and file URLs. Follow next_cursor for more; use after an unknown upload outcome.",
+            paged,
+            true,
+        ),
         "queue" => (
-            "Read queued and sending publications, including immutable content and timing.",
-            filter,
+            "Read a page of queued and sending publication summaries, newest created first; use publication for full immutable content. Follow next_cursor for more.",
+            paged,
             true,
         ),
         "history" => (
-            "Read completed, failed, manual, uncertain and canceled publication outcomes.",
-            filter,
+            "Read a page of completed, failed, manual, uncertain and canceled publication summaries; use publication for details. Follow next_cursor for more.",
+            paged,
+            true,
+        ),
+        "publication" => (
+            "Read one publication including its immutable content, external receipt fields and error detail.",
+            object(json!({"id":id}), &["id"]),
             true,
         ),
         "attempts" => (
@@ -168,10 +184,8 @@ pub async fn invoke(
     ensure!(NAMES.contains(&name), "Unknown tool");
     validate_args(name, &args)?;
     match name {
-        "brands" | "channels" | "drafts" | "queue" | "history" | "health" => {
+        "brands" | "channels" | "health" => {
             let path = match name {
-                "drafts" => "posts",
-                "queue" | "history" => "publications",
                 "health" => "jobs/health",
                 other => other,
             };
@@ -180,20 +194,50 @@ pub async fn invoke(
             } else {
                 String::new()
             };
-            let mut response = api
-                .request(Method::GET, &format!("/{path}{query}"), None)
-                .await?;
-            if matches!(name, "drafts" | "queue" | "history") {
-                let values = response["data"]
-                    .as_array_mut()
-                    .context("Unexpected API list response")?;
-                values.retain(|row| match name {
-                    "drafts" => row["status"] == "draft",
-                    "queue" => matches!(row["state"].as_str(), Some("queued" | "sending")),
-                    _ => !matches!(row["state"].as_str(), Some("queued" | "sending")),
-                });
+            api.request(Method::GET, &format!("/{path}{query}"), None)
+                .await
+        }
+        "drafts" | "media" | "queue" | "history" => {
+            let limit = match args.get("limit") {
+                None => 10,
+                Some(value) => value
+                    .as_u64()
+                    .filter(|n| (1..=10).contains(n))
+                    .context("limit must be between 1 and 10")?,
+            };
+            let mut query = format!("limit={limit}");
+            if args.get("brand_id").is_some() {
+                query.push_str(&format!("&brand_id={}", uuid(&args, "brand_id")?));
             }
-            Ok(response)
+            if let Some(cursor) = args.get("cursor") {
+                let cursor = cursor.as_str().context("cursor must be a string")?;
+                ensure!(
+                    !cursor.is_empty()
+                        && cursor.len() <= 2048
+                        && cursor
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_')),
+                    "Invalid cursor"
+                );
+                query.push_str(&format!("&cursor={cursor}"));
+            }
+            let path = match name {
+                "drafts" => {
+                    query.push_str("&status=draft&view=summary");
+                    "posts"
+                }
+                "queue" => {
+                    query.push_str("&group=queue&view=summary");
+                    "publications"
+                }
+                "history" => {
+                    query.push_str("&group=history&view=summary");
+                    "publications"
+                }
+                _ => "media",
+            };
+            api.request(Method::GET, &format!("/{path}?{query}"), None)
+                .await
         }
         "post" | "attempts" => {
             let id = uuid(&args, "id")?;
@@ -203,6 +247,17 @@ pub async fn invoke(
                 format!("/publications/{id}/attempts")
             };
             api.request(Method::GET, &path, None).await
+        }
+        "publication" => {
+            let id = uuid(&args, "id")?;
+            let response = api
+                .request(Method::GET, &format!("/publications?limit=1&id={id}"), None)
+                .await?;
+            let record = response["data"]
+                .as_array()
+                .and_then(|rows| rows.first())
+                .context("Publication not found or inaccessible")?;
+            Ok(json!({"data":record}))
         }
         "draft_create" | "draft_update" | "schedule" => {
             let body = args["body"].as_object().context("body must be an object")?;

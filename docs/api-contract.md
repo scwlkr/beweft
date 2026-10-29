@@ -4,6 +4,34 @@ Additional implemented content and account workflows are specified in [workflows
 
 Base `/api/v1`. Success `{ "data": ... }`; failure `{ "error": { "code": "...", "message": "..." } }`. Lists return arrays in `data`. IDs are UUID strings; timestamps RFC3339 UTC. JSON requests set `Content-Type: application/json` and `X-Beweft-Request: 1`. Browser calls use cookie credentials. State-changing browser requests must have matching Origin when present; authenticated cookie mutations require the custom header. All endpoints except auth/status, auth/bootstrap and auth/login need authentication. API tokens use `Authorization: Bearer ...`. Read APIs accept valid tokens except token management; writes need the listed scope. Token listing/creation/revocation and logout require an owner cookie session and reject bearer tokens, including admin tokens. Tokens may restrict `brand_ids`; UI sessions have all owner access.
 
+## Bounded list inspection
+
+GET `/posts`, `/media`, and `/publications` accept optional `limit` (1–10) and
+`cursor`. A request with `limit` returns `{data:[...],next_cursor:string|null}`;
+the cursor is null on the last page. Supply the returned cursor with a limit and
+the same route, filters, view, and authorized brand scope. Malformed or
+incompatible cursors return 400. A cursor is opaque and limited to 2048
+characters; it does not grant access. Every page applies authorization and
+brand filters before pagination. Pages use `created_at DESC, id DESC`, with
+the UUID breaking timestamp ties. They are live views rather than snapshots;
+refresh from the beginning after concurrent changes. Without `limit`, existing
+list order and response shape remain unchanged for the web application.
+
+- `/posts` additionally accepts `status=draft` and `view=summary`. The summary
+  is `{id,brand_id,title,text,media_ids,version,status,created_at,updated_at}`;
+  variants and options are omitted. GET `/posts/:id` returns the full post.
+- `/media` returns the normal media record on each page.
+- `/publications` additionally accepts `group=queue|history`, `view=summary`,
+  and `id=UUID`. Queue means queued/sending; history means every other state.
+  The summary is `{id,post_id,brand_id,channel_id,channel_name,provider,post_version,scheduled_at,scheduling_mode,state,created_at,updated_at}`;
+  payload and external/error fields are omitted. GET
+  `/publications?id=UUID&limit=1` without `view=summary` reads one full,
+  authorized record in the usual `data` array.
+
+The generated OpenAPI and TypeScript query annotations for these additions
+will be refreshed with the core integration; this prose and the running routes
+describe the current change.
+
 ## Authentication
 - GET `/auth/status` → `{initialized:boolean}`.
 - POST `/auth/bootstrap` `{setup_secret,email,password}` → `{id,email}` + session cookie. Password minimum 12 characters. Setup secret is `BEWEFT_SETUP_SECRET` on server. Only available before first owner.

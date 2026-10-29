@@ -1,33 +1,92 @@
 use crate::{
     auth::Auth,
-    catalog::Filter,
     error::{ApiError, Result, data, uuid},
+    listing::Page,
     state::AppState,
 };
 use axum::{
     Json,
     extract::{Path, Query, State},
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
-const POST_SELECT: &str = "SELECT to_jsonb(p)||jsonb_build_object('status',CASE WHEN EXISTS(SELECT 1 FROM publications u WHERE u.post_id=p.id AND u.state IN ('failed','uncertain','manual_required')) THEN 'attention' WHEN EXISTS(SELECT 1 FROM publications u WHERE u.post_id=p.id AND u.state IN ('queued','sending')) THEN 'scheduled' WHEN EXISTS(SELECT 1 FROM publications u WHERE u.post_id=p.id AND u.state='published') THEN 'published' ELSE 'draft' END) FROM posts p";
+const POST_STATUS: &str = "CASE WHEN EXISTS(SELECT 1 FROM publications u WHERE u.post_id=p.id AND u.state IN ('failed','uncertain','manual_required')) THEN 'attention' WHEN EXISTS(SELECT 1 FROM publications u WHERE u.post_id=p.id AND u.state IN ('queued','sending')) THEN 'scheduled' WHEN EXISTS(SELECT 1 FROM publications u WHERE u.post_id=p.id AND u.state='published') THEN 'published' ELSE 'draft' END";
+#[derive(Deserialize, Default)]
+pub struct PostListFilter {
+    brand_id: Option<Uuid>,
+    limit: Option<u32>,
+    cursor: Option<String>,
+    status: Option<String>,
+    view: Option<String>,
+}
 pub async fn get_post(db: &PgPool, id: Uuid) -> Result<Value> {
-    Ok(sqlx::query_scalar(&format!("{POST_SELECT} WHERE p.id=$1"))
-        .bind(id)
-        .fetch_one(db)
-        .await?)
+    Ok(sqlx::query_scalar(&format!(
+        "SELECT to_jsonb(p)||jsonb_build_object('status',{POST_STATUS}) FROM posts p WHERE p.id=$1"
+    ))
+    .bind(id)
+    .fetch_one(db)
+    .await?)
 }
 pub async fn list(
     State(state): State<AppState>,
     auth: Auth,
-    Query(filter): Query<Filter>,
+    Query(filter): Query<PostListFilter>,
 ) -> Result<Json<Value>> {
     if let Some(id) = filter.brand_id {
         auth.brand(id)?;
     }
-    let rows:Vec<Value>=sqlx::query_scalar(&format!("{POST_SELECT} WHERE ($1::uuid IS NULL OR p.brand_id=$1) AND (cardinality($2::uuid[])=0 OR p.brand_id=ANY($2)) ORDER BY p.updated_at DESC")).bind(filter.brand_id).bind(&auth.brand_ids).fetch_all(&state.db).await?;
-    Ok(data(rows))
+    if filter.status.as_deref().is_some_and(|s| s != "draft")
+        || filter.view.as_deref().is_some_and(|v| v != "summary")
+    {
+        return Err(ApiError::bad("Unsupported post status or view"));
+    }
+    let summary = filter.view.as_deref() == Some("summary");
+    let only_drafts = filter.status.as_deref() == Some("draft");
+    let value = if summary {
+        format!(
+            "jsonb_build_object('id',p.id,'brand_id',p.brand_id,'title',p.title,'text',p.text,'media_ids',p.media_ids,'version',p.version,'status',{POST_STATUS},'created_at',p.created_at,'updated_at',p.updated_at)"
+        )
+    } else {
+        format!("to_jsonb(p)||jsonb_build_object('status',{POST_STATUS})")
+    };
+    let filters = json!({"brand_id":filter.brand_id,"status":filter.status,"view":filter.view});
+    let page = Page::new(
+        "posts",
+        filter.limit,
+        filter.cursor.as_deref(),
+        filters,
+        &auth,
+    )?;
+    let condition = format!(
+        "($1::uuid IS NULL OR p.brand_id=$1) AND (cardinality($2::uuid[])=0 OR p.brand_id=ANY($2)) AND (NOT $3::boolean OR ({POST_STATUS})='draft')"
+    );
+    if let Some(page) = page {
+        let query = format!(
+            "SELECT {value},p.created_at,p.id FROM posts p WHERE {condition} AND ($4::timestamptz IS NULL OR (p.created_at,p.id)<($4,$5)) ORDER BY p.created_at DESC,p.id DESC LIMIT $6"
+        );
+        let rows = sqlx::query_as(&query)
+            .bind(filter.brand_id)
+            .bind(&auth.brand_ids)
+            .bind(only_drafts)
+            .bind(page.created_at)
+            .bind(page.id)
+            .bind(page.limit + 1)
+            .fetch_all(&state.db)
+            .await?;
+        page.finish(rows)
+    } else {
+        let query =
+            format!("SELECT {value} FROM posts p WHERE {condition} ORDER BY p.updated_at DESC");
+        let rows: Vec<Value> = sqlx::query_scalar(&query)
+            .bind(filter.brand_id)
+            .bind(&auth.brand_ids)
+            .bind(only_drafts)
+            .fetch_all(&state.db)
+            .await?;
+        Ok(data(rows))
+    }
 }
 pub async fn get(
     State(state): State<AppState>,

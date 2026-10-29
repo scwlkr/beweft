@@ -40,10 +40,25 @@ Replace example IDs with actual IDs. `draft-create` creates a draft only.
 `draft-update` requires the current version. `schedule` requires the post ID,
 version, channel IDs and an explicit `intent`: `queue` omits `scheduled_at`
 and reserves the next posting-rule slot; `exact` supplies a future timestamp
-with an offset. Scheduling can publish when the job is due. The `queue`,
-`history`, `post`, `attempts` and `health` commands inspect authoritative
-server state. The `api METHOD /path` escape hatch is limited to the same API
-origin and bearer scopes.
+with an offset. Scheduling can publish when the job is due. The `drafts`,
+`media`, `queue`, `history`, `post`, `publication`, `attempts` and `health`
+commands inspect authoritative server state. The `api METHOD /path` escape
+hatch is limited to the same API origin and bearer scopes.
+
+`drafts`, `media`, `queue` and `history` return one page at a time, with up to
+10 records by default. Their JSON arguments accept `brand_id`, `limit` (1–10)
+and `cursor`. Results have a `data` array and `next_cursor`, which is null on
+the last page. Supply that cursor with the same filters to read the next page;
+the tools do not aggregate a library in memory. Pages are newest-created first,
+including queue pages, so use `scheduled_at` for scheduled order. A page is a
+live view, not a snapshot: refresh from the start after concurrent changes.
+
+Draft list items include text and media IDs but omit channel variants and
+options; use `post` for a complete draft. Queue and history items omit the
+immutable payload and external/error details; use `publication` for one full
+record and `attempts` for its attempt history. Use `media` to inspect the
+scoped library after an upload response is lost, and follow every relevant
+page before deciding what to do next.
 
 Writes are not automatically retried. If a request times out or its response is
 lost, its outcome can be unknown. Inspect the post, queue, history and attempts
@@ -101,4 +116,6 @@ The harness removes its own database, temporary files, processes and local HTTP
 fixtures when it finishes. It covers scoped rejection, drafts and scheduling,
 readback after a committed response is lost, token-file permissions, redirect
 refusal, MCP protocol errors and rate limiting, and a symlink replacement during
-an upload. It does not prove provider access or a self-host installation.
+an upload. It also checks recovery of a committed upload with a lost response
+and complete pagination of 170 large drafts and scoped queue, history and media
+records. It does not prove provider access or a self-host installation.

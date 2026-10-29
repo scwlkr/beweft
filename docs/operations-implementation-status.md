@@ -14,8 +14,8 @@ other slices. Do not treat these new packaging files as a verified installation.
 - `scripts/common.sh`, `setup`, `compose`, `backup`, `container-entrypoint`: initial
   operator helpers. No host Cargo/Node required by these helpers.
 
-No `worker.rs`, `worker_main.rs`, server state, business logic, provider modules,
-frontend, or project CLI wrapper was changed by this slice.
+This slice adds scoped paged server list queries. It does not change the worker,
+server state, provider modules, frontend, or project CLI wrapper.
 
 ## Implemented in source, still requiring independent review
 
@@ -23,7 +23,9 @@ The CLI exposes brands, channels, drafts, one post, queue, history, attempts,
 worker health, draft create/update, explicit queue/exact scheduling and media
 upload. It uses scoped bearer HTTP requests, disallows redirects and off-origin
 escape-hatch paths, supports protected token files, bounds input/output sizes,
-and never retries a failed write. MCP includes initialize/initialized, ping,
+and never retries a failed write. Paged draft, media, queue and history reads
+filter in the scoped API; full post and publication details are separate reads.
+MCP includes initialize/initialized, ping,
 tools/list and tools/call; its upload root is opened at startup and file paths
 cannot follow symlinks. `crates/cli/tests/integration.py` exercises the real
 isolated API and MCP subprocess, including scope rejection, lost write response,

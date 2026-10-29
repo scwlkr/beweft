@@ -2,6 +2,7 @@ use crate::{
     auth::Auth,
     catalog::Filter,
     error::{ApiError, Result, data},
+    listing::Page,
     state::AppState,
 };
 use axum::{
@@ -11,6 +12,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::Row;
 use tokio::io::AsyncWriteExt;
@@ -33,16 +35,34 @@ fn detect(bytes: &[u8]) -> Option<&'static str> {
         None
     }
 }
+#[derive(Deserialize, Default)]
+pub struct MediaListFilter {
+    brand_id: Option<Uuid>,
+    limit: Option<u32>,
+    cursor: Option<String>,
+}
 pub async fn list(
     State(state): State<AppState>,
     auth: Auth,
-    Query(filter): Query<Filter>,
+    Query(filter): Query<MediaListFilter>,
 ) -> Result<Json<Value>> {
     if let Some(id) = filter.brand_id {
         auth.brand(id)?;
     }
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT (to_jsonb(m)-'storage_key')||jsonb_build_object('url','/api/v1/media/'||id||'/file') FROM media m WHERE ($1::uuid IS NULL OR brand_id=$1) AND (cardinality($2::uuid[])=0 OR brand_id=ANY($2)) ORDER BY created_at DESC").bind(filter.brand_id).bind(&auth.brand_ids).fetch_all(&state.db).await?;
-    Ok(data(rows))
+    let page = Page::new(
+        "media",
+        filter.limit,
+        filter.cursor.as_deref(),
+        json!({"brand_id":filter.brand_id}),
+        &auth,
+    )?;
+    if let Some(page) = page {
+        let rows = sqlx::query_as("SELECT (to_jsonb(m)-'storage_key')||jsonb_build_object('url','/api/v1/media/'||m.id||'/file'),m.created_at,m.id FROM media m WHERE ($1::uuid IS NULL OR m.brand_id=$1) AND (cardinality($2::uuid[])=0 OR m.brand_id=ANY($2)) AND ($3::timestamptz IS NULL OR (m.created_at,m.id)<($3,$4)) ORDER BY m.created_at DESC,m.id DESC LIMIT $5").bind(filter.brand_id).bind(&auth.brand_ids).bind(page.created_at).bind(page.id).bind(page.limit + 1).fetch_all(&state.db).await?;
+        page.finish(rows)
+    } else {
+        let rows:Vec<Value>=sqlx::query_scalar("SELECT (to_jsonb(m)-'storage_key')||jsonb_build_object('url','/api/v1/media/'||id||'/file') FROM media m WHERE ($1::uuid IS NULL OR brand_id=$1) AND (cardinality($2::uuid[])=0 OR brand_id=ANY($2)) ORDER BY created_at DESC").bind(filter.brand_id).bind(&auth.brand_ids).fetch_all(&state.db).await?;
+        Ok(data(rows))
+    }
 }
 pub async fn limits(State(state): State<AppState>, _auth: Auth) -> Result<Json<Value>> {
     let used: i64 = sqlx::query_scalar("SELECT COALESCE(sum(size),0)::bigint FROM media")
