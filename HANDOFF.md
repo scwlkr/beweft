@@ -55,6 +55,18 @@ Use Buffer as the benchmark for usability and polish, and give beweft its own
 name and identity. Study Postiz and other open-source projects for useful
 integration and product lessons, respecting their licenses.
 
+For social connections, examine [Postiz](https://github.com/gitroomhq/postiz-app)
+and two other open-source social managers: [OpenPost](https://github.com/getopenpost/openpost)
+and [Mixpost](https://github.com/inovector/mixpost). Read their source and
+documentation directly, and use REA to inspect connection workflows when
+runtime behavior would add useful insight. Compare how self-hosters configure
+provider apps and credentials, how users connect accounts, OAuth callbacks and
+permissions, token storage and refresh, reconnecting and disconnecting, and
+the guidance and errors shown when setup or provider access fails. Record a
+concise, source-backed comparison and use the best ideas to make beweft's own
+bring-your-own-connections experience clear and easy. Follow project licenses
+if reusing code; no examined service becomes a required publishing backend.
+
 ## Preferred stack
 
 Follow Wstack's current instructions and technical preferences. Read the
