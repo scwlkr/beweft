@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) const PROVIDER_BUSY_MESSAGE: &str = "A provider operation is in progress. Wait for it to finish, then retry and check the current provider status before any manual removal.";
-pub(super) const PENDING_REMOVAL_MESSAGE: &str = "Provider removal is pending. Wait for any provider operation still in progress to finish. Removing access at the provider may affect other channels and unrelated accounts. First inspect your channels, then remove the affected access in the provider's connected-app settings. Only after removal is complete, confirm it before connecting again.";
+pub(super) const PENDING_REMOVAL_MESSAGE: &str = "Provider removal is pending. Wait for any provider operation still in progress to finish. Removing access at the provider may affect other channels and unrelated accounts. First inspect your channels, then remove the affected access in the provider's access settings (such as connected apps or app passwords). Only after removal is complete, confirm it before connecting again.";
 
 pub(super) fn provider_operation_key(provider: &str) -> String {
     format!("provider-operation:{provider}")
@@ -11,12 +11,11 @@ pub(super) fn provider_busy_error() -> ApiError {
     ApiError::conflict(PROVIDER_BUSY_MESSAGE)
 }
 
-/// Serialize OAuth completion and revocation for the provider, including remote I/O.
+/// Serialize grant operations and disconnect for a provider, including remote I/O.
 /// A busy gate fails promptly so other requests do not wait on the provider timeout.
 pub(super) async fn oauth_gate(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     provider: &str,
-    wait: bool,
 ) -> Result<Option<(i64, Option<Uuid>)>> {
     fn gate_error(error: sqlx::Error) -> ApiError {
         if matches!(&error, sqlx::Error::Database(db) if db.code().as_deref() == Some("55P03")) {
@@ -29,8 +28,7 @@ pub(super) async fn oauth_gate(
         .execute(&mut **tx)
         .await
         .map_err(gate_error)?;
-    // Disconnect holds the same key at session scope across its local commit
-    // and remote revoke. All other gate users fail promptly while it is held.
+    // Every provider grant operation and disconnect uses this nonblocking key.
     let admitted: bool =
         sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))")
             .bind(provider_operation_key(provider))
@@ -40,43 +38,23 @@ pub(super) async fn oauth_gate(
     if !admitted {
         return Err(provider_busy_error());
     }
-    let query = if wait {
-        "SELECT oauth_generation,revocation_id FROM provider_oauth_fences WHERE provider=$1 FOR UPDATE"
-    } else {
-        "SELECT oauth_generation,revocation_id FROM provider_oauth_fences WHERE provider=$1 FOR UPDATE NOWAIT"
-    };
+    let query = "SELECT oauth_generation,revocation_id FROM provider_oauth_fences WHERE provider=$1 FOR UPDATE NOWAIT";
     let mut row = sqlx::query(query)
         .bind(provider)
         .fetch_optional(&mut **tx)
         .await
         .map_err(gate_error)?;
     if row.is_none() {
-        // An uncommitted first insert is invisible to SELECT. Serialize only
-        // fence creation with a nonblocking provider-specific advisory lock so
-        // a concurrent first save never waits on INSERT's unique constraint.
-        let creator: bool =
-            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))")
-                .bind(format!("provider-fence-init:{provider}"))
-                .fetch_one(&mut **tx)
-                .await
-                .map_err(gate_error)?;
-        if !creator {
-            return Err(provider_busy_error());
-        }
+        // The provider advisory lock also serializes creation of the first
+        // fence, so a concurrent app save fails promptly rather than waiting
+        // on the INSERT's unique constraint.
+        sqlx::query("INSERT INTO provider_oauth_fences(provider) VALUES($1) ON CONFLICT(provider) DO NOTHING")
+            .bind(provider).execute(&mut **tx).await.map_err(gate_error)?;
         row = sqlx::query(query)
             .bind(provider)
             .fetch_optional(&mut **tx)
             .await
             .map_err(gate_error)?;
-        if row.is_none() {
-            sqlx::query("INSERT INTO provider_oauth_fences(provider) VALUES($1) ON CONFLICT(provider) DO NOTHING")
-                .bind(provider).execute(&mut **tx).await.map_err(gate_error)?;
-            row = sqlx::query(query)
-                .bind(provider)
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(gate_error)?;
-        }
     }
     Ok(row.map(|row| (row.get("oauth_generation"), row.get("revocation_id"))))
 }
@@ -216,7 +194,7 @@ pub async fn save_app(
     // Do not queue configuration writes behind an exchange holding the app
     // row; the same gate rejects concurrent edits promptly and preserves the
     // stored revocation fence even when configuration is changed.
-    oauth_gate(&mut tx, &provider, false).await?;
+    oauth_gate(&mut tx, &provider).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
         .bind(format!("provider-app:{provider}"))
         .execute(&mut *tx)

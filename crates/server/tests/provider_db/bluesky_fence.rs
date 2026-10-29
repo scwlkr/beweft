@@ -81,7 +81,7 @@ async fn bluesky_connection_obeys_provider_and_brand_fences(h: &Harness) {
             .json(&json!({"client_id":"","instance_url":origin}))
     };
 
-    // The fixture does not implement deleteSession, so real disconnect leaves
+    // Disconnect leaves provider access for owner-managed removal and leaves
     // a durable pending fence. A new app-password request must not be sent.
     let result: Value = disconnect().send().await.unwrap().json().await.unwrap();
     assert_eq!(result["data"]["provider_revoked"], false);

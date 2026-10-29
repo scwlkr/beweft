@@ -123,10 +123,15 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
         }
         let value: Value = serde_json::from_str(&body).unwrap();
         let message = value["error"]["message"].as_str().unwrap();
-        assert!(message.contains("First inspect your connected channels"));
-        assert!(message.contains("If it did not connect"));
-        assert!(message.contains("remove only orphaned access"));
-        assert!(message.contains("before starting a new authorization"));
+        if message.contains("check the provider status") {
+            assert!(message.contains("inspect your connected channels"));
+            assert!(!message.contains("remove"));
+        } else {
+            assert!(message.contains("First inspect your connected channels"));
+            assert!(message.contains("If it did not connect"));
+            assert!(message.contains("remove only orphaned access"));
+            assert!(message.contains("before starting a new authorization"));
+        }
     }
     let callback = |state: &str, cookie: &str| {
         client

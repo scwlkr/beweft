@@ -16,9 +16,6 @@ struct Provider {
     probe_release: Notify,
     revoke_requests: AtomicUsize,
     masto_revoke_requests: AtomicUsize,
-    revoke_block: AtomicUsize,
-    revoke_started: Notify,
-    revoke_release: Notify,
     sync_mode: AtomicUsize,
     sync_requests: AtomicUsize,
     sync_started: Notify,
@@ -38,7 +35,7 @@ struct Provider {
 async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
     let path = r.uri().path().to_owned();
     match path.as_str() {
-        "/2/oauth2/token" | "/token" | "/oauth/v2/accessToken" => {
+        "/2/oauth2/token" | "/token" | "/oauth/token" | "/oauth/v2/accessToken" => {
             let body = to_bytes(r.into_body(), 10000).await.unwrap();
             let form: std::collections::HashMap<String, String> =
                 url::form_urlencoded::parse(&body).into_owned().collect();
@@ -108,6 +105,9 @@ async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
             Json(json!({"data":{"id":"destination","name":"Fixture"}})).into_response()
         }
         "/v2/userinfo" => Json(json!({"sub":"shared-account","name":"Fixture"})).into_response(),
+        "/api/v1/accounts/verify_credentials" => {
+            Json(json!({"id":"masto-destination","display_name":"Fixture"})).into_response()
+        }
         "/api/v1/statuses" => {
             s.writes.fetch_add(1, Ordering::SeqCst);
             s.reply_started.notify_one();
@@ -123,7 +123,10 @@ async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
                 .insert(header::RANGE, "bytes=0-4".parse().unwrap());
             r
         }
-        "/revoke" => {
+        "/revoke"
+        | "/2/oauth2/revoke"
+        | "/v23.0/me/permissions"
+        | "/xrpc/com.atproto.server.deleteSession" => {
             s.revoke_requests.fetch_add(1, Ordering::SeqCst);
             StatusCode::OK.into_response()
         }
@@ -152,11 +155,8 @@ async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
             Json(json!({"items":[]})).into_response()
         }
         "/oauth/revoke" => {
+            s.revoke_requests.fetch_add(1, Ordering::SeqCst);
             s.masto_revoke_requests.fetch_add(1, Ordering::SeqCst);
-            if s.revoke_block.load(Ordering::SeqCst) != 0 {
-                s.revoke_started.notify_one();
-                s.revoke_release.notified().await;
-            }
             Json(json!({})).into_response()
         }
         _ => StatusCode::NOT_FOUND.into_response(),

@@ -49,7 +49,8 @@ async fn provider_database_security_and_recovery() {
     bluesky_connection_obeys_provider_and_brand_fences(&h).await;
     first_provider_save_rejects_concurrent_creators(&h).await;
     disconnect_fences_shared_provider_channels(&h).await;
-    provider_latch_spans_remote_revoke_and_commit_gap(&h).await;
+    provider_gate_orders_manual_removal_and_recovery(&h).await;
+    every_direct_provider_uses_owner_managed_removal(&h).await;
     post_grant_failures_preserve_status_and_recovery(&h).await;
     oauth_revocation_fences_reconnects(&h).await;
     populated_oauth_fence_upgrade(&h).await;

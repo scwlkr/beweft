@@ -1,5 +1,4 @@
 use super::*;
-use sqlx::Acquire;
 pub(super) async fn store_channel(
     state: &AppState,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -91,9 +90,7 @@ pub async fn bluesky(
     let mut tx = state.db.begin().await?;
     // Keep the open generation and app authority locked across session creation
     // and storage, so a disconnect/configuration change cannot cross them.
-    super::apps::require_open_oauth_gate(
-        super::apps::oauth_gate(&mut tx, "bluesky", false).await?,
-    )?;
+    super::apps::require_open_oauth_gate(super::apps::oauth_gate(&mut tx, "bluesky").await?)?;
     // Check before the remote write, then serialize and recheck after it.
     // An archive can therefore finish while the provider is slow; it wins
     // and prevents the new session from being stored.
@@ -244,29 +241,16 @@ pub async fn disconnect(
         .bind(id)
         .fetch_one(&state.db)
         .await?;
-    // Retain this session-level provider latch across both transactions. A
-    // cancelled lock request may already have succeeded on the server, so
-    // never return this connection to the pool with a session lock attached.
-    let mut db = state.db.acquire().await?;
-    db.close_on_drop();
-    let admitted: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtextextended($1,0))")
-        .bind(super::apps::provider_operation_key(&provider))
-        .fetch_one(&mut *db)
-        .await?;
-    if !admitted {
-        return Err(super::apps::provider_busy_error());
-    }
-    let mut tx = db.begin().await?;
-    sqlx::query("SET LOCAL lock_timeout = '5s'")
-        .execute(&mut *tx)
-        .await?;
-    let gate = super::apps::oauth_gate(&mut tx, &provider, false).await?;
+    // The provider transaction gate orders local credential removal with
+    // authorization and configuration. Disconnect never sends a revoke.
+    let mut tx = state.db.begin().await?;
+    let gate = super::apps::oauth_gate(&mut tx, &provider).await?;
     if gate.is_some_and(|(_, pending)| pending.is_some()) {
         return Err(super::apps::pending_removal_error());
     }
-    // Provider grant sharing is not reliably known. A stored grant (and every
-    // Google disconnect) may affect any channel for that provider. Read the
-    // hint without a row lock, then acquire channel locks in stable order.
+    // Direct grants may be shared. An unhealthy or otherwise unknown direct
+    // channel can still have provider access even without stored ciphertext.
+    // Read a hint, then acquire the channel locks in stable order.
     let target = sqlx::query(
         "SELECT encrypted_credentials IS NOT NULL AS has_grant,connection_status FROM channels WHERE id=$1",
     )
@@ -285,7 +269,9 @@ pub async fn disconnect(
             "next_action":"This channel is already disconnected. No new provider access removal was started."
         })));
     }
-    let provider_wide = provider == "youtube" || has_grant_hint;
+    let provider_wide = has_grant_hint
+        || (providers::known(&provider)
+            && target.get::<String, _>("connection_status") != "disconnected");
     let affected: Vec<Uuid> = if provider_wide {
         sqlx::query_scalar("SELECT id FROM channels WHERE provider=$1 ORDER BY id")
             .bind(&provider)
@@ -297,13 +283,16 @@ pub async fn disconnect(
     for channel_id in &affected {
         crate::schedules::lock_channel(&mut tx, *channel_id).await?;
     }
-    let has_grant: bool = sqlx::query_scalar(
-        "SELECT encrypted_credentials IS NOT NULL FROM channels WHERE id=$1 FOR UPDATE",
+    let target = sqlx::query(
+        "SELECT encrypted_credentials IS NOT NULL AS has_grant,connection_status FROM channels WHERE id=$1 FOR UPDATE",
     )
     .bind(id)
     .fetch_one(&mut *tx)
     .await?;
-    if has_grant && !provider_wide {
+    let grant_may_exist = target.get::<bool, _>("has_grant")
+        || (providers::known(&provider)
+            && target.get::<String, _>("connection_status") != "disconnected");
+    if grant_may_exist && !provider_wide {
         return Err(ApiError::conflict(
             "Channel access changed during disconnect; try again",
         ));
@@ -322,14 +311,10 @@ pub async fn disconnect(
             "A delivery is in progress. Wait for its outcome before disconnecting.",
         ));
     }
-    // Readiness, decryptability and app configuration do not establish whether
-    // the provider still holds a grant. Google removal is always owner-managed.
-    let channel = if provider == "youtube" || !has_grant {
-        None
-    } else {
-        load_stored_channel_tx(&state, &mut tx, id).await.ok()
-    };
-    let revocation_id = (provider == "youtube" || has_grant).then(Uuid::new_v4);
+    // Readiness, decryptability and missing ciphertext do not establish that
+    // provider access is absent. Owner-managed removal is required for any
+    // known or possible direct grant, regardless of provider.
+    let revocation_id = grant_may_exist.then(Uuid::new_v4);
     let affected_channels = if revocation_id.is_some() {
         sqlx::query("UPDATE channels SET connection_status='reconnect_required',connection_error='Provider access may change; reconnect this channel after removal is resolved' WHERE provider=$2 AND id<>$1 AND connection_status='connected'")
             .bind(id).bind(&provider).execute(&mut *tx).await?.rows_affected()
@@ -346,59 +331,23 @@ pub async fn disconnect(
     sqlx::query("UPDATE channels SET encrypted_credentials=NULL,connection_status='disconnected',paused=true,connection_error=NULL WHERE id=$1").bind(id).execute(&mut *tx).await?;
     sqlx::query("UPDATE publications SET state='canceled',last_error='Channel disconnected by owner',updated_at=now() WHERE channel_id=$1 AND state='queued'").bind(id).execute(&mut *tx).await?;
     tx.commit().await?;
-    let revoked = if let (Some(c), Some(revocation_id)) = (channel, revocation_id) {
-        // Keep the provider gate locked until remote I/O returns. The committed marker
-        // survives crashes and uncertain outcomes; an owner must resolve those manually.
-        let mut revoke_tx = db.begin().await?;
-        sqlx::query("SET LOCAL lock_timeout = '5s'")
-            .execute(&mut *revoke_tx)
-            .await?;
-        let gate = super::apps::oauth_gate(&mut revoke_tx, &provider, true).await?;
-        let revoked = if gate.is_some_and(|(_, pending)| pending == Some(revocation_id)) {
-            tokio::time::timeout(std::time::Duration::from_secs(60), async {
-                match adapter_for(&c.app).await {
-                    Ok(adapter) => adapter.revoke(&c).await.unwrap_or(false),
-                    Err(_) => false,
-                }
-            })
-            .await
-            .unwrap_or(false)
-        } else {
-            false
-        };
-        if revoked {
-            sqlx::query("UPDATE provider_oauth_fences SET revocation_id=NULL WHERE provider=$1 AND revocation_id=$2")
-                .bind(&provider)
-                .bind(revocation_id)
-                .execute(&mut *revoke_tx)
-                .await?;
+    let next_action = match (affected_channels > 0, revocation_id.is_some()) {
+        (true, true) => {
+            "Other channels for this provider, including unrelated accounts, were conservatively marked for reconnection. Removing provider access may affect them. First inspect your channels, remove beweft access in the provider account's access settings (such as connected apps or app passwords), then confirm removal before connecting again; their saved credentials and queued work were retained."
         }
-        revoke_tx.commit().await?;
-        revoked
-    } else {
-        false
-    };
-    let next_action = match (revoked, affected_channels > 0, revocation_id.is_some()) {
-        (true, true, _) => {
-            "Other channels for this provider, including unrelated accounts, were conservatively marked for reconnection. Reconnect them; their saved credentials and queued work were retained."
+        (false, true) => {
+            "Provider access removal can affect other channels or accounts. First inspect connected channels, remove beweft access in the provider account's access settings (such as connected apps or app passwords), then confirm removal before connecting again."
         }
-        (true, false, _) => "No action needed",
-        (false, true, true) => {
-            "Other channels for this provider, including unrelated accounts, were conservatively marked for reconnection. Removing provider access may affect them. Remove beweft access in the provider account's connected-app settings, then confirm removal before connecting again; their saved credentials and queued work were retained."
-        }
-        (false, false, true) => {
-            "Provider access removal can affect other channels or accounts. Inspect connected channels, remove beweft access in the provider account's connected-app settings, then confirm removal before connecting again."
-        }
-        (false, _, false) => {
+        (_, false) => {
             "No remote removal was attempted. Inspect existing connected channels before removing only orphaned provider access."
         }
     };
     Ok(data(
-        json!({"disconnected":true,"provider_revoked":revoked,"channels_requiring_reconnection":affected_channels,"next_action":next_action}),
+        json!({"disconnected":true,"provider_revoked":false,"channels_requiring_reconnection":affected_channels,"next_action":next_action}),
     ))
 }
 
-/// Explicit recovery after an unsupported, failed, or interrupted remote revoke.
+/// Record the owner’s attestation that provider access was removed manually.
 pub async fn acknowledge_revocation(
     State(state): State<AppState>,
     auth: Auth,
@@ -412,7 +361,7 @@ pub async fn acknowledge_revocation(
         ));
     }
     let mut tx = state.db.begin().await?;
-    let gate = super::apps::oauth_gate(&mut tx, &provider, false).await?;
+    let gate = super::apps::oauth_gate(&mut tx, &provider).await?;
     if !gate.is_some_and(|(_, pending)| pending.is_some()) {
         return Err(ApiError::conflict(
             "There is no unresolved provider revocation",
