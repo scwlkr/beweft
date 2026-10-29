@@ -107,7 +107,10 @@ export function useComposer({
     ...new Set(selected.flatMap((id) => variantMedia[id] ?? mediaIds)),
   ];
   const affectedMedia = scheduledMediaIds.filter(
-    (id) => !!pendingMedia.intents[id],
+    (id) =>
+      !!pendingMedia.intents[id] ||
+      pendingMedia.checking.includes(id) ||
+      !!pendingMedia.assetErrors[id],
   );
   const missingMedia = scheduledMediaIds.filter(
     (id) => !media.some((item) => item.id === id),

@@ -356,6 +356,11 @@ export function Composer({
                     "media description"}
                 </Button>
               ))}
+              {affectedMedia.some((id) => !!pendingMedia.assetErrors[id]) && (
+                <Button variant="secondary" onClick={pendingMedia.retry}>
+                  Check media again
+                </Button>
+              )}
             </div>
           )}
           {mode !== "draft" && missingMedia.length > 0 && (

@@ -192,6 +192,17 @@ export default function App() {
                 </Button>
               </div>
             )}
+            {brand && Object.keys(pendingMedia.assetErrors).length > 0 && (
+              <div className="quiet-note" role="status">
+                <p>
+                  Some media descriptions could not be refreshed. Check them
+                  before scheduling posts that use them.
+                </p>
+                <Button variant="secondary" onClick={pendingMedia.retry}>
+                  Check media again
+                </Button>
+              </div>
+            )}
             <div className="content-body" key={brandId}>
               {loading && !brand ? (
                 <Busy />

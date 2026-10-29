@@ -313,6 +313,95 @@ test("unreadable pending-media storage blocks scheduling until it can be checked
   });
 });
 
+test("a failed refresh for another pending asset does not block unaffected media", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const brand = await write("/brands", {
+      name: "Independent media recovery",
+    });
+    const channel = await write("/channels", {
+      brand_id: brand.id,
+      provider: "manual",
+      name: "Independent channel",
+      timezone: "UTC",
+    });
+    const pending = await upload(context, brand.id, "pending-other.png");
+    const clear = await upload(context, brand.id, "unaffected.png");
+    await write("/posts", {
+      brand_id: brand.id,
+      title: "Pending asset draft",
+      text: "Fixture",
+      media_ids: [pending.id],
+      variants: [{ channel_id: channel.id }],
+    });
+    await write("/posts", {
+      brand_id: brand.id,
+      title: "Unaffected asset draft",
+      text: "Fixture",
+      media_ids: [clear.id],
+      variants: [{ channel_id: channel.id }],
+    });
+    const owner = (await (await context.request.get("/api/v1/auth/me")).json())
+      .data;
+    const key = `beweft.media-description:${owner.id}:${brand.id}:${pending.id}`;
+    await context.addInitScript(
+      ({ id, key, mediaId }) => {
+        localStorage.setItem("beweft.brand", id);
+        localStorage.setItem(
+          key,
+          JSON.stringify({
+            id: crypto.randomUUID(),
+            brand_id: id,
+            media_id: mediaId,
+            metadata_version: 1,
+            alt_text: "Unconfirmed elsewhere",
+          }),
+        );
+      },
+      { id: brand.id, key, mediaId: pending.id },
+    );
+    await page.route(`**/api/v1/media/${pending.id}`, (route) =>
+      route.request().method() === "GET"
+        ? route.fulfill({
+            status: 503,
+            json: {
+              error: { code: "unavailable", message: "Asset read unavailable" },
+            },
+          })
+        : route.continue(),
+    );
+    await page.goto("/#drafts");
+    await expect(
+      page.getByText(/Some media descriptions could not be refreshed/),
+    ).toBeVisible();
+    await page
+      .locator(".draft-content")
+      .filter({ hasText: "Pending asset draft" })
+      .click();
+    await page.getByLabel("When should this go out?").selectOption("exact");
+    await page.getByLabel(/Date and time/).fill(future());
+    await expect(
+      page.getByRole("button", { name: "Schedule post" }),
+    ).toBeDisabled();
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page
+      .locator(".draft-content")
+      .filter({ hasText: "Unaffected asset draft" })
+      .click();
+    await page.getByLabel("When should this go out?").selectOption("exact");
+    await page.getByLabel(/Date and time/).fill(future());
+    await expect(
+      page.getByRole("button", { name: "Schedule post" }),
+    ).toBeEnabled();
+    await page.getByRole("button", { name: "Schedule post" }).click();
+    await expect
+      .poll(async () => (await publications(context, brand.id)).length)
+      .toBe(1);
+    expect(
+      (await publications(context, brand.id))[0].payload.media_metadata,
+    ).toEqual([{ id: clear.id, alt_text: "" }]);
+  });
+});
+
 test("an active schedule holds the asset guard without stranding a later media edit", async () => {
   await withWorkspace(async (page, context, write) => {
     const brand = await write("/brands", { name: "Schedule media lock" });
@@ -323,6 +412,9 @@ test("an active schedule holds the asset guard without stranding a later media e
       timezone: "UTC",
     });
     const item = await upload(context, brand.id, "locked.png");
+    const owner = (await (await context.request.get("/api/v1/auth/me")).json())
+      .data;
+    const key = `beweft.media-description:${owner.id}:${brand.id}:${item.id}`;
     const edit = await context.request.patch(`/api/v1/media/${item.id}`, {
       data: { metadata_version: 1, alt_text: "Before scheduling" },
       headers: {
@@ -359,17 +451,28 @@ test("an active schedule holds the asset guard without stranding a later media e
       await page.getByRole("button", { name: "Schedule post" }).click();
       await committed.promise;
       await other.goto("/#media");
+      await expect
+        .poll(() =>
+          other.evaluate(
+            async (lockKey) =>
+              (await navigator.locks.query()).held.some(
+                (lock) => lock.name === lockKey,
+              ),
+            key,
+          ),
+        )
+        .toBe(true);
       await other
         .locator(".media-grid")
         .getByRole("button", { name: /locked\.png/ })
         .click();
-      await other
-        .getByLabel("Description", { exact: true })
-        .fill("After scheduling");
-      await other.getByRole("button", { name: "Save description" }).click();
       await expect(other.getByRole("dialog").getByRole("alert")).toContainText(
         "Media is busy",
+        { timeout: 15000 },
       );
+      await expect(
+        other.getByLabel("Description", { exact: true }),
+      ).toBeDisabled();
       expect(
         (await (await context.request.get(`/api/v1/media/${item.id}`)).json())
           .data.metadata_version,
@@ -381,7 +484,10 @@ test("an active schedule holds the asset guard without stranding a later media e
       ).toBeEnabled();
       await expect(
         other.getByLabel("Description", { exact: true }),
-      ).toHaveValue("After scheduling");
+      ).toHaveValue("Before scheduling");
+      await other
+        .getByLabel("Description", { exact: true })
+        .fill("After scheduling");
       await other.getByRole("button", { name: "Save description" }).click();
       await expect(other.getByRole("dialog").getByRole("status")).toHaveText(
         "Description saved.",

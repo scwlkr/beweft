@@ -21,6 +21,8 @@ export type PendingMedia = {
   brand: string;
   session: ApiSession | null;
   intents: Record<string, MediaIntent>;
+  checking: string[];
+  assetErrors: Record<string, string>;
   ready: boolean;
   error: string;
   retry: () => void;
@@ -37,6 +39,8 @@ export function usePendingMedia(
     brand: "",
     session: null,
     intents: {},
+    checking: [],
+    assetErrors: {},
     ready: false,
     error: "",
   });
@@ -77,6 +81,8 @@ export function usePendingMedia(
       brand,
       session: null,
       intents: {},
+      checking: [],
+      assetErrors: {},
       ready: false,
       error: "",
     });
@@ -109,22 +115,59 @@ export function usePendingMedia(
             );
           intents[mediaId] = intent;
         }
+        recovery.current.lastIds.forEach((mediaId) => {
+          if (!intents[mediaId]) refreshIds.add(mediaId);
+        });
         recovery.current.lastIds = new Set(Object.keys(intents));
         const settled = [...refreshIds].filter((mediaId) => !intents[mediaId]);
         const toRefresh = [...new Set([...settled, ...Object.keys(intents)])];
-        const rows = await Promise.all(
-          toRefresh.map((mediaId) =>
-            api(`/media/${mediaId}`, MediaSchema, "GET", undefined, signal),
-          ),
-        );
-        if (!current() || signal.aborted || id !== sequence) return;
-        rows.forEach((row, index) => {
-          if (row.id !== toRefresh[index] || row.brand_id !== brand)
-            throw new Error("Media recovery returned a different asset.");
-          reconcile(row, session);
-          if (!intents[row.id]) refreshIds.delete(row.id);
+        setState({
+          owner,
+          brand,
+          session,
+          intents,
+          checking: toRefresh,
+          assetErrors: {},
+          ready: true,
+          error: "",
         });
-        setState({ owner, brand, session, intents, ready: true, error: "" });
+        await Promise.all(
+          toRefresh.map(async (mediaId) => {
+            let refreshed: Media | null = null;
+            try {
+              const row = await api(
+                `/media/${mediaId}`,
+                MediaSchema,
+                "GET",
+                undefined,
+                signal,
+              );
+              if (row.id === mediaId && row.brand_id === brand) refreshed = row;
+            } catch {
+              /* Keep only this asset blocked and offer a retry. */
+            }
+            if (!current() || signal.aborted || id !== sequence) return;
+            if (refreshed) {
+              reconcile(refreshed, session);
+              if (!intents[mediaId]) refreshIds.delete(mediaId);
+            }
+            setState((previous) => {
+              if (id !== sequence) return previous;
+              const assetErrors = { ...previous.assetErrors };
+              if (refreshed) delete assetErrors[mediaId];
+              else
+                assetErrors[mediaId] =
+                  "This media description could not be refreshed.";
+              return {
+                ...previous,
+                checking: previous.checking.filter(
+                  (value) => value !== mediaId,
+                ),
+                assetErrors,
+              };
+            });
+          }),
+        );
       } catch (failure) {
         if (!current() || signal.aborted || id !== sequence) return;
         setState((previous) => ({
@@ -168,6 +211,8 @@ export function usePendingMedia(
             brand,
             session: null,
             intents: {},
+            checking: [],
+            assetErrors: {},
             ready: false,
             error: `${(failure as Error).message} Media descriptions must be checked before scheduling.`,
           });
