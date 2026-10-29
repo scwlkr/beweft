@@ -8,6 +8,7 @@ fn required_scopes(provider: &str, action: &str) -> Vec<&'static str> {
         ("youtube", "reply" | "inbox") => vec!["https://www.googleapis.com/auth/youtube.force-ssl"],
         ("youtube", "metrics") => vec!["https://www.googleapis.com/auth/youtube.readonly"],
         ("facebook", "publish" | "media") => vec!["pages_manage_posts"],
+        ("facebook", "reel") => vec!["pages_manage_posts", "pages_read_engagement"],
         ("facebook", "reply") => vec!["pages_manage_engagement"],
         ("facebook", "inbox") => vec!["pages_read_engagement"],
         ("facebook", "metrics") => vec!["pages_read_engagement"],
@@ -19,14 +20,18 @@ fn required_scopes(provider: &str, action: &str) -> Vec<&'static str> {
         ("threads", "metrics") => vec!["threads_manage_insights"],
         ("mastodon", "publish" | "media" | "reply") => vec!["write"],
         ("mastodon", "metrics" | "inbox") => vec!["read"],
-        ("linkedin", "publish") => vec!["w_member_social"],
+        ("linkedin", "publish" | "media") => vec!["w_member_social"],
         ("pinterest", "publish" | "media") => vec!["pins:write"],
         _ => vec![],
     }
 }
 pub fn grant_permissions(c: &Channel) -> Value {
     let mut actions = serde_json::Map::new();
-    for action in ["publish", "media", "metrics", "inbox", "reply"] {
+    let mut supported_actions = vec!["publish", "media", "metrics", "inbox", "reply"];
+    if c.app.provider == "facebook" {
+        supported_actions.push("reel");
+    }
+    for action in supported_actions {
         let required = required_scopes(&c.app.provider, action);
         let missing: Vec<_> = required
             .iter()

@@ -159,7 +159,7 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
             ("instagram" | "threads", t) if t.starts_with("image/") => 8 * 1024 * 1024,
             ("mastodon", t) if t.starts_with("image/") => 16 * 1024 * 1024,
             ("mastodon", _) => 99 * 1024 * 1024,
-            ("facebook", _) => 10 * 1024 * 1024,
+            ("facebook", t) if t.starts_with("image/") => 10 * 1024 * 1024,
             ("pinterest", _) => 20 * 1024 * 1024,
             _ => 256 * 1024 * 1024,
         };
@@ -205,6 +205,11 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
         if expected.is_some_and(|e| e != codec) {
             return Err(invalid("Image bytes do not match the declared MIME type"));
         }
+        if provider == "linkedin" && image(m) && width.saturating_mul(height) >= 36_152_320 {
+            return Err(invalid(
+                "LinkedIn images must have fewer than 36,152,320 pixels",
+            ));
+        }
         if provider == "threads" && image(m) {
             let ratio = width as f64 / height as f64;
             if !matches!(m.mime.as_str(), "image/jpeg" | "image/png")
@@ -237,6 +242,7 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
                 .unwrap_or(0.0);
             let max_duration = match provider {
                 "instagram" => 900.0,
+                "facebook" => 60.0,
                 "threads" => 300.0,
                 "mastodon" => 3600.0,
                 "youtube" => 43200.0,
@@ -246,6 +252,7 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
             };
             let minimum = match provider {
                 "instagram" => 3.0,
+                "facebook" => 4.0,
                 "x" => 0.5,
                 _ => 0.0,
             };
@@ -269,6 +276,28 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
                 return Err(invalid(
                     "Meta video requires MP4, H.264/HEVC, optional AAC audio, and maximum width 1920",
                 ));
+            }
+            if provider == "facebook" {
+                let rate = visual["avg_frame_rate"].as_str().and_then(|s| {
+                    let (n, d) = s.split_once('/')?;
+                    let n: f64 = n.parse().ok()?;
+                    let d: f64 = d.parse().ok()?;
+                    (d > 0.0).then_some(n / d)
+                });
+                if m.mime != "video/mp4"
+                    || !matches!(codec, "h264" | "hevc")
+                    || width < 540
+                    || height < 960
+                    || width * 16 != height * 9
+                    || !rate.is_some_and(|fps| fps.is_finite() && (23.0..=60.0).contains(&fps))
+                    || streams
+                        .iter()
+                        .any(|s| s["codec_type"] == "audio" && s["codec_name"] != "aac")
+                {
+                    return Err(invalid(
+                        "Facebook Reels require MP4 H.264/HEVC, optional AAC, at least 540×960 in 9:16, and 23–60 fps",
+                    ));
+                }
             }
             if provider == "x" {
                 let rate = visual["avg_frame_rate"].as_str().and_then(|s| {

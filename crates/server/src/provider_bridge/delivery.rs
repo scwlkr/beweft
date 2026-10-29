@@ -28,13 +28,17 @@ pub(super) async fn save_attempt_checkpoint_tx(
     wait_seconds: Option<u64>,
 ) -> Result<Value> {
     let mut cp = cp.clone();
-    let x_checkpoint = cp["stage"]
-        .as_str()
-        .is_some_and(|stage| stage.starts_with("x_"));
     let bluesky_checkpoint = cp["stage"]
         .as_str()
         .is_some_and(|stage| stage.starts_with("bsky_"));
-    if x_checkpoint || bluesky_checkpoint {
+    let managed_checkpoint = cp["stage"].as_str().is_some_and(|stage| {
+        stage.starts_with("x_")
+            || stage.starts_with("meta_")
+            || stage.starts_with("fb_reel_")
+            || stage.starts_with("linkedin_")
+            || stage.starts_with("bsky_")
+    });
+    if managed_checkpoint {
         cp["attempt_id"] = json!(attempt);
         cp["checkpoint_id"] = json!(Uuid::new_v4());
         if let Some(object) = cp.as_object_mut() {
@@ -42,7 +46,7 @@ pub(super) async fn save_attempt_checkpoint_tx(
         }
     }
     let bluesky_processing = cp["stage"] == "bsky_video_processing";
-    let expiry = if x_checkpoint || bluesky_processing {
+    let expiry = if (managed_checkpoint && !bluesky_checkpoint) || bluesky_processing {
         cp["expires_after_secs"]
             .as_i64()
             .filter(|seconds| *seconds > 0)
