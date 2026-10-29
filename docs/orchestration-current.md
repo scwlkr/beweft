@@ -60,7 +60,10 @@ publication IDs even after cancellation/replacement. GET receipts return bounded
 publication summaries. A missing receipt cannot prove an in-flight write ended.
 PR #17 at `56fb0ba` passed its focused fixtures but fresh review found a pool
 exhaustion defect: dropping a timed-out SQLx lock query did not end its database
-wait. Nonblocking request admission and repeated-retry recovery are being fixed.
+wait. Nonblocking request admission passed fresh review at `ec5305f`; repeated
+retries leave receipt/auth reads usable. That review found one further receipt
+bound: provider-derived or existing channel names can exceed the client response
+limit. Explicit summary display-field bounds are being added.
 Timestamps accept at most six fractional digits and normalize exactly to UTC;
 client comparison must preserve microseconds, not truncate through Date.parse.
 
