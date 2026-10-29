@@ -31,13 +31,11 @@ pub async fn get_publication(db: &PgPool, id: Uuid) -> Result<Value> {
         .fetch_one(db)
         .await?)
 }
-pub(crate) async fn get_publication_summary(db: &PgPool, id: Uuid) -> Result<Value> {
-    Ok(sqlx::query_scalar(&format!(
-        "SELECT {SUMMARY} FROM publications p JOIN channels c ON c.id=p.channel_id WHERE p.id=$1"
-    ))
-    .bind(id)
-    .fetch_one(db)
-    .await?)
+pub(crate) async fn get_publication_summaries(db: &PgPool, ids: &[Uuid]) -> Result<Vec<Value>> {
+    let query = format!(
+        "SELECT {SUMMARY} FROM unnest($1::uuid[]) WITH ORDINALITY AS wanted(id,position) JOIN publications p ON p.id=wanted.id JOIN channels c ON c.id=p.channel_id ORDER BY wanted.position"
+    );
+    Ok(sqlx::query_scalar(&query).bind(ids).fetch_all(db).await?)
 }
 pub async fn list(
     State(state): State<AppState>,

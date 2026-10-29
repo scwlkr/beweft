@@ -104,6 +104,18 @@ pub struct Post {
     pub updated_at: DateTime<Utc>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
+pub struct PostSummary {
+    pub id: Uuid,
+    pub brand_id: Uuid,
+    pub title: String,
+    pub text: String,
+    pub media_ids: Vec<Uuid>,
+    pub version: i32,
+    pub status: PostStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct Media {
     pub alt_text: String,
     pub id: Uuid,
@@ -179,6 +191,37 @@ pub struct Publication {
     pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct PublicationSummary {
+    pub id: Uuid,
+    pub post_id: Uuid,
+    pub brand_id: Uuid,
+    pub channel_id: Uuid,
+    pub channel_name: String,
+    pub provider: String,
+    pub post_version: i32,
+    pub scheduled_at: DateTime<Utc>,
+    pub scheduling_mode: SchedulingMode,
+    pub state: PublicationState,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ScheduleRequestIntent {
+    pub version: i32,
+    pub channel_ids: Vec<Uuid>,
+    /// UTC RFC3339, rendered to microsecond precision; null means a posting-rule slot.
+    #[schema(required = true)]
+    pub scheduled_at: Option<DateTime<Utc>>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ScheduleRequestResult {
+    pub request_id: Uuid,
+    pub post_id: Uuid,
+    pub brand_id: Uuid,
+    pub request: ScheduleRequestIntent,
+    pub publications: Vec<PublicationSummary>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct PublicationAttempt {
