@@ -41,6 +41,37 @@ excludes canceled publications and cannot alone make request replay safe.
 The worker health interface must check a named instance's fresh heartbeat and
 exit without starting a scheduler; core implements it and operations wires it.
 
+## Review checkpoints
+
+Focused PRs are open against the preserved stack; none of these checkpoints is
+a delivered release:
+
+- PR #10: CLI/MCP qualification and safe upload handles. Fresh review exposed
+  missing media inspection and unbounded list reads; the second checkpoint adds
+  scoped media reads and bounded cursor pages. Further review found upload
+  timeout and request/response envelope limits that reject valid API operations.
+  The worker is fixing these before another brand-new review.
+- PR #11: brand-list ordering and browser sessions, targeting PR #9's branch.
+  Fresh review reproduced cross-tab stale 401s, a queued sign-out revoking a
+  later login, and repeated first-brand submission. The worker is fixing those
+  boundaries using a non-secret shared authentication epoch under the existing
+  same-origin lock. Scheduling WIP is separately preserved on
+  `codex/web-schedule-recovery`; it must not be merged as completed recovery.
+- PR #12: disconnect/reconnect revocation fencing. Fresh review reproduced
+  missing fencing for already-unusable grants and sync callers exhausting the
+  database pool before reaching the nonblocking sync guard. The revised policy
+  makes Google access removal an explicit owner action, keeps a durable fence
+  until confirmation, and initiates no Google grant-wide revoke itself. It does
+  not claim Google propagation or live qualification has been verified.
+
+Every consequential revision goes to a new read-only reviewer. Prior reviewers'
+temporary resources have been cleaned and their managed worktrees retired
+through Codex. Implementation worktrees remain active and owned by their lanes.
+Operations may implement the narrow named-worker health interface; core retains
+provider dispatch and schema ownership. The compact scheduling response added
+for agent clients must preserve the default full web response and remain
+compatible with the upcoming durable request-ID contract.
+
 ## Runtime and resources
 
 The existing local API at `http://localhost:3000/healthz` returned `status: ok`
