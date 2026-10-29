@@ -1558,3 +1558,40 @@ test("a partial successful POST is recorded after the composer closes", async ()
     }
   });
 });
+
+test("a complete matching receipt safely resolves a partially observed POST", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await twoChannelSetup(page, context, write);
+    let originals: any[] = [];
+    await page.route(routeFor(f.post.id), async (route) => {
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBe(true);
+      originals = (await response.json()).data;
+      await route.fulfill({ json: { data: [originals[0]] } });
+    });
+    await start(page);
+    await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+      "incomplete",
+    );
+    const saved = await pending(page, f.key);
+    expect(saved.observed_publications).toEqual([
+      { channel_id: originals[0].channel_id, publication_id: originals[0].id },
+    ]);
+    await page
+      .getByRole("button", { name: "Check scheduling outcome" })
+      .click();
+    await expect(page.getByText(/original request is confirmed/)).toBeVisible();
+    expect(await pending(page, f.key)).toBeNull();
+    const rows = await read(
+      context,
+      `/publications?brand_id=${f.brand.id}&view=summary`,
+    );
+    expect(rows.map((row: any) => row.id).sort()).toEqual(
+      originals.map((row: any) => row.id).sort(),
+    );
+    expect((await read(context, `/posts/${f.post.id}`)).version).toBe(
+      saved.post.version,
+    );
+    expect(f.patches()).toBe(1);
+  });
+});
