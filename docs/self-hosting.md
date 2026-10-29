@@ -195,6 +195,13 @@ media is re-emitted with fixed ownership into the empty volume. Restore records
 a persistent worker hold and starts only the database and API. Ordinary startup,
 worker restart and host reboot do not release that hold. Verify owner login,
 media bytes, drafts, queue and publication history before switching traffic.
+Restore's volume initializer and media extractor use uniquely named helpers
+labeled with the installation and operation identity. The wrapper checks those
+labels before removing a helper and its anonymous mounts; it keeps the named
+media volume. If cleanup or a pending create cannot be confirmed, the error
+identifies the helper to inspect before retrying.
+Image build cache is separate from helper cleanup and is not pruned by these
+commands.
 Stop the original worker, then reconcile **every restored queued and overdue
 publication as well as sending and uncertain publications** against the original
 installation and the providers. A queued item in the backup may have published

@@ -49,7 +49,8 @@ Compose projects, ports, volumes, owner and manual-channel fixtures. It exercise
 installation, competing project reservations, restart, backup, helper volume
 cleanup, interrupted Docker client groups and blocked media streams, bounded
 metadata reads, a live MCP session during backup, archive/key/image/destination
-rejection, restore, byte-identical media and queued data, worker-off recovery,
+rejection, restore initializer interruption/failure and exact-helper cleanup,
+empty and nonempty media recovery, byte-identical media and queued data, worker-off recovery,
 image upgrade and rollback. The synthetic upgrade image differs by a label, so this rehearsal
 validates deployment and rollback mechanics rather than a schema-changing
 application release. A PostgreSQL migration and a physical host reboot remain

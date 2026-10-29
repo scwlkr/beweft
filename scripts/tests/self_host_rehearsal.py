@@ -261,6 +261,25 @@ stall_suffix = os.environ.get("OPS_TEST_STALL_SUFFIX")
 if stall_suffix and args[-len(json.loads(stall_suffix)):] == json.loads(stall_suffix):
     pathlib.Path(os.environ["OPS_TEST_STALL_MARKER"]).write_text("waiting")
     time.sleep(90)
+init_mode = os.environ.get("OPS_TEST_INITIALIZER_MODE")
+if init_mode == "remove-fail" and len(args) == 3 and args[:2] == ["rm", "-fv"] and "-restore-init-" in args[2]:
+    sys.exit(1)
+if len(args) >= 3 and args[:2] == ["create", "--name"] and "-restore-" in args[2]:
+    name = args[2]
+    if "-restore-init-" in name and init_mode == "delay-start":
+        args[-1] = "sleep 10; " + args[-1]
+    if "-restore-init-" in name and init_mode == "start-fail":
+        args[-1] = "exit 7"
+    result = subprocess.run([real, *args])
+    if result.returncode == 0:
+        details = json.loads(subprocess.check_output([real, "inspect", "--format", "{{json .}}", name]))
+        with open(os.environ["OPS_TEST_RESTORE_LOG"], "a") as file:
+            file.write(json.dumps({"name": name, "labels": details["Config"]["Labels"], "mounts": details["Mounts"],
+                                   "configured": details["HostConfig"]["Mounts"]}) + "\\n")
+        if "-restore-init-" in name and init_mode in ("delay-create", "delay-create-overdue"):
+            pathlib.Path(os.environ["OPS_TEST_INITIALIZER_MARKER"]).write_text(name)
+            time.sleep(20 if init_mode == "delay-create-overdue" else 8)
+    sys.exit(result.returncode)
 kind = os.environ.get("OPS_TEST_PASSTHROUGH")
 selected = ((kind == "compose" and "compose" in args and "restart" in args) or
             (kind == "cli" and "compose" in args and "run" in args and "--name" in args) or
@@ -292,15 +311,26 @@ if len(args) >= 3 and args[:2] == ["create", "--name"] and "-dump-" in args[2]:
         name = args[2]
         mounts = json.loads(subprocess.check_output([real, "inspect", "--format", "{{json .Mounts}}", name]))
         image = subprocess.check_output([real, "inspect", "--format", "{{.Image}}", name], text=True).strip()
+        labels = json.loads(subprocess.check_output([real, "inspect", "--format", "{{json .Config.Labels}}", name]))
         with open(os.environ["OPS_TEST_DOCKER_LOG"], "a") as file:
-            file.write(json.dumps({"name": name, "image": image, "mounts": mounts}) + "\\n")
+            file.write(json.dumps({"name": name, "image": image, "mounts": mounts, "labels": labels}) + "\\n")
+    sys.exit(result.returncode)
+if len(args) >= 3 and args[:2] == ["create", "--name"] and "-media-" in args[2]:
+    result = subprocess.run([real, *args])
+    if result.returncode == 0:
+        name = args[2]
+        details = json.loads(subprocess.check_output([real, "inspect", "--format", "{{json .}}", name]))
+        with open(os.environ["OPS_TEST_BACKUP_MEDIA_LOG"], "a") as file:
+            file.write(json.dumps({"name": name, "labels": details["Config"]["Labels"], "mounts": details["Mounts"],
+                                   "configured": details["HostConfig"]["Mounts"]}) + "\\n")
     sys.exit(result.returncode)
 os.execv(real, [real, *args])
 ''' % real)
     script.chmod(0o755)
     log = temp / "docker-helper-log.jsonl"
     env = dict(CLEAN_ENV, PATH=str(directory) + os.pathsep + CLEAN_ENV.get("PATH", ""),
-               OPS_TEST_DOCKER_LOG=str(log))
+               OPS_TEST_DOCKER_LOG=str(log), OPS_TEST_RESTORE_LOG=str(temp / "restore-helper-log.jsonl"),
+               OPS_TEST_BACKUP_MEDIA_LOG=str(temp / "backup-media-helper-log.jsonl"))
     return env, log
 
 
@@ -309,12 +339,36 @@ def assert_helpers_removed(log, offset, image):
     assert records, "No owned dump helper was observed"
     for record in records:
         assert record["image"] == image, "Dump helper did not use the pinned PostgreSQL image"
+        assert re.fullmatch(r"[a-f0-9]{64}", record["labels"]["org.beweft.installation"])
+        assert record["labels"]["org.beweft.operation"] == "backup-database"
+        assert record["labels"]["org.beweft.operation-id"] == record["name"]
         volumes = [mount["Name"] for mount in record["mounts"] if mount.get("Type") == "volume"]
         assert volumes and all(re.fullmatch(r"[a-f0-9]{64}", volume) for volume in volumes)
         docker("container", "inspect", record["name"], success=False)
         for volume in volumes:
             docker("volume", "inspect", volume, success=False)
     return offset + len(records)
+
+
+def check_backup_media_helpers(env, directory):
+    path = Path(env["OPS_TEST_BACKUP_MEDIA_LOG"])
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    values = settings(directory)
+    assert records
+    for record in records:
+        assert record["labels"]["org.beweft.installation"] == values["BEWEFT_INSTALLATION_ID"]
+        assert record["labels"]["org.beweft.operation"] == "backup-media"
+        assert record["labels"]["org.beweft.operation-id"] == record["name"]
+        assert any(mount.get("Target") == "/media" and mount.get("VolumeOptions", {}).get("NoCopy") is True
+                   for mount in record["configured"])
+        assert any(mount.get("Name") == values["COMPOSE_PROJECT_NAME"] + "_media" and mount.get("Destination") == "/media"
+                   for mount in record["mounts"])
+        docker("container", "inspect", record["name"], success=False)
+        for mount in record["mounts"]:
+            if mount.get("Type") == "volume" and mount["Name"] != values["COMPOSE_PROJECT_NAME"] + "_media":
+                assert re.fullmatch(r"[a-f0-9]{64}", mount["Name"])
+                docker("volume", "inspect", mount["Name"], success=False)
+    docker("volume", "inspect", values["COMPOSE_PROJECT_NAME"] + "_media")
 
 
 def cleanup_process_group(source, temp, env, *, admitted, interrupted=None):
@@ -613,6 +667,227 @@ def restore_interruption(source, backup, image, temp, env, signum=None):
                 process.kill()
                 process.wait(timeout=5)
     finally:
+        remove_fixture_helpers(directory, env, name)
+        project("compose", directory, "down", "--volumes", "--remove-orphans", timeout=120)
+        no_resources(name)
+        project("release", directory, timeout=30)
+
+
+def restore_helper_records(env, project_name):
+    path = Path(env["OPS_TEST_RESTORE_LOG"])
+    if not path.exists():
+        return []
+    records = []
+    for line in path.read_text().splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # A fixture process may still be appending the last line.
+        if record["name"].startswith(project_name + "-restore-"):
+            records.append(record)
+    return records
+
+
+def check_restore_helper(record, directory, *, removed):
+    name = record["name"]
+    values = settings(directory)
+    labels = record["labels"]
+    expected_role = "restore-media-initialize" if "-restore-init-" in name else "restore-media-extract"
+    assert labels["org.beweft.installation"] == values["BEWEFT_INSTALLATION_ID"]
+    assert labels["org.beweft.operation"] == expected_role and labels["org.beweft.operation-id"] == name
+    volume = values["COMPOSE_PROJECT_NAME"] + "_media"
+    mounted = [mount for mount in record["mounts"] if mount.get("Type") == "volume"]
+    assert any(mount.get("Name") == volume and mount.get("Destination") == "/media" for mount in mounted)
+    assert any(mount.get("Target") == "/media" and mount.get("VolumeOptions", {}).get("NoCopy") is True
+               for mount in record["configured"])
+    if removed:
+        docker("container", "inspect", name, success=False)
+        for mount in mounted:
+            if mount["Name"] != volume:
+                assert re.fullmatch(r"[a-f0-9]{64}", mount["Name"])
+                docker("volume", "inspect", mount["Name"], success=False)
+    docker("volume", "inspect", volume)  # Removing a helper must preserve this named volume.
+
+
+def remove_fixture_helpers(directory, env, project_name):
+    values = settings(directory)
+    for record in restore_helper_records(env, project_name):
+        name = record["name"]
+        inspected = subprocess.run(["docker", "container", "inspect", "--format", "{{json .Config.Labels}}", name],
+                                   env=CLEAN_ENV, capture_output=True, text=True, timeout=15)
+        if inspected.returncode:
+            continue
+        labels = json.loads(inspected.stdout)
+        assert labels.get("org.beweft.installation") == values["BEWEFT_INSTALLATION_ID"]
+        assert labels.get("org.beweft.operation-id") == name
+        docker("rm", "-fv", name)
+
+
+def volume_fixture(image, volume, *command):
+    name = f"beweft-ops-{RUN_ID}-volume-check-{uuid.uuid4().hex[:8]}"
+    try:
+        return docker("run", "--rm", "--name", name, "--network", "none", "--user", "0:0", "--mount",
+                      f"type=volume,src={volume},dst=/media,volume-nocopy", *command)
+    finally:
+        subprocess.run(["docker", "rm", "-fv", name], env=CLEAN_ENV, capture_output=True, timeout=15)
+
+
+def media_volume_status(directory, image):
+    volume = settings(directory)["COMPOSE_PROJECT_NAME"] + "_media"
+    result = volume_fixture(image, volume, "--read-only", "--entrypoint", "sh", image,
+                            "-c", 'stat -c "%u:%g" /media; ls -A /media')
+    return result.stdout.strip().splitlines()
+
+
+def initializer_interruption(source, backup, image, temp, env, mode, signum):
+    suffix = mode.replace("-", "") + str(signum)
+    name = f"beweft-ops-{RUN_ID}-init-{suffix}"
+    directory = temp / ("initializer-interrupt-" + suffix)
+    project("setup", directory, name, str(free_port()))
+    project("image", directory, image)
+    set_values(directory, {"BEWEFT_ENCRYPTION_KEY": settings(source)["BEWEFT_ENCRYPTION_KEY"]})
+    marker = temp / ("initializer-marker-" + suffix)
+    wrapped = dict(env, OPS_TEST_INITIALIZER_MODE=mode, OPS_TEST_INITIALIZER_MARKER=str(marker))
+    process = subprocess.Popen([ROOT / "project", "restore", directory, backup], cwd=ROOT, env=wrapped,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        record = None
+        for _ in range(900):
+            records = [item for item in restore_helper_records(env, name) if "-restore-init-" in item["name"]]
+            if records and (not mode.startswith("delay-create") or marker.exists()):
+                record = records[0]
+                if mode.startswith("delay-create") or docker("inspect", "--format", "{{.State.Running}}", record["name"]).stdout.strip() == "true":
+                    break
+            assert process.poll() is None, "Restore exited before the owned initializer reached the intended phase"
+            time.sleep(0.1)
+        else:
+            raise AssertionError("Owned initializer did not reach the intended phase")
+        check_restore_helper(record, directory, removed=False)
+        assert media_volume_status(directory, image) == ["0:0"]
+        if signum == signal.SIGINT:
+            os.killpg(process.pid, signum)
+        else:
+            process.send_signal(signum)
+        _out, stderr = process.communicate(timeout=60)
+        assert process.returncode != 0 and record["name"].encode() in stderr and b"daemon" in stderr.lower()
+        check_restore_helper(record, directory, removed=True)
+        if mode == "delay-start":
+            time.sleep(10.5)
+        assert media_volume_status(directory, image) == ["0:0"], "A canceled initializer changed the target later"
+    finally:
+        if process.poll() is None:
+            process.send_signal(signal.SIGTERM)
+            try:
+                process.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        remove_fixture_helpers(directory, env, name)
+        project("compose", directory, "down", "--volumes", "--remove-orphans", timeout=120)
+        no_resources(name)
+        project("release", directory, timeout=30)
+
+
+def initializer_failure(source, backup, image, temp, env, mode):
+    name = f"beweft-ops-{RUN_ID}-init-{mode.replace('-', '')}"
+    directory = temp / ("initializer-failure-" + mode)
+    project("setup", directory, name, str(free_port()))
+    project("image", directory, image)
+    set_values(directory, {"BEWEFT_ENCRYPTION_KEY": settings(source)["BEWEFT_ENCRYPTION_KEY"]})
+    wrapped = dict(env, OPS_TEST_INITIALIZER_MODE=mode)
+    record = None
+    try:
+        result = project("restore", directory, backup, success=False, env=wrapped, timeout=180)
+        records = [item for item in restore_helper_records(env, name) if "-restore-init-" in item["name"]]
+        assert len(records) == 1
+        record = records[0]
+        assert record["name"] in result.stderr
+        assert ("initializer" if mode == "start-fail" else "cleanup") in result.stderr.lower()
+        check_restore_helper(record, directory, removed=mode == "start-fail")
+        assert len(restore_helper_records(env, name)) == 1, "Extraction must not start after initializer failure"
+    finally:
+        if record is not None and mode == "remove-fail":
+            # Only this recorded, label-verified helper belongs to the fixture.
+            check_restore_helper(record, directory, removed=False)
+            docker("rm", "-fv", record["name"])
+            check_restore_helper(record, directory, removed=True)
+        remove_fixture_helpers(directory, env, name)
+        project("compose", directory, "down", "--volumes", "--remove-orphans", timeout=120)
+        no_resources(name)
+        project("release", directory, timeout=30)
+
+
+def nonempty_initializer_refusal(image, temp, env):
+    name = f"beweft-ops-{RUN_ID}-init-nonempty"
+    directory = temp / "initializer-nonempty"
+    project("setup", directory, name, str(free_port()))
+    project("image", directory, image)
+    values = settings(directory)
+    volume = name + "_media"
+    docker("volume", "create", "--label", "com.docker.compose.project=" + name,
+           "--label", "com.docker.compose.volume=media", "--label", "org.beweft.installation=" + values["BEWEFT_INSTALLATION_ID"], volume)
+    try:
+        volume_fixture(image, volume, "--entrypoint", "sh", image, "-c", "printf fixture-content > /media/keep")
+        code = '''import runpy,sys
+m=runpy.run_path(sys.argv[1]); i=m["Installation"](sys.argv[2])
+with i.locked():
+    m["initialize_media"](i, "type=volume,src="+sys.argv[3]+",dst=/media,volume-nocopy", i.values["BEWEFT_IMAGE"])
+'''
+        result = run(["python3", "-c", code, ROOT / "scripts/self_host.py", directory, volume], success=False, env=env, timeout=60)
+        records = restore_helper_records(env, name)
+        assert len(records) == 1 and records[0]["name"] in result.stderr
+        check_restore_helper(records[0], directory, removed=True)
+        assert media_volume_status(directory, image) == ["0:0", "keep"]
+        contents = volume_fixture(image, volume, "--entrypoint", "cat", image, "/media/keep").stdout
+        assert contents == "fixture-content"
+    finally:
+        remove_fixture_helpers(directory, env, name)
+        docker("volume", "rm", volume)
+        no_resources(name)
+        project("release", directory, timeout=30)
+
+
+def helper_ownership_refusal(image):
+    name = f"beweft-ops-{RUN_ID}-foreign-helper"
+    docker("create", "--name", name, "--label", "org.beweft.installation=other",
+           "--label", "org.beweft.operation=restore-media-initialize", "--label", "org.beweft.operation-id=" + name,
+           "--network", "none", "--entrypoint", "sh", image, "-c", "exit 0")
+    try:
+        code = '''import runpy,sys
+m=runpy.run_path(sys.argv[1]); name=sys.argv[2]
+m["remove_named_helper"](name, {"org.beweft.installation":"expected", "org.beweft.operation":"restore-media-initialize", "org.beweft.operation-id":name})
+'''
+        result = run(["python3", "-c", code, ROOT / "scripts/self_host.py", name], success=False, timeout=45)
+        assert "unexpected ownership" in result.stderr
+        docker("container", "inspect", name)  # A foreign or malformed helper is not adopted or removed.
+    finally:
+        docker("rm", "-fv", name)
+
+
+def restore_empty_media(source, backup, image, temp, env, brand):
+    name = f"beweft-ops-{RUN_ID}-restore-empty"
+    directory = temp / "restore-empty"
+    port = free_port()
+    project("setup", directory, name, str(port))
+    project("image", directory, image)
+    set_values(directory, {"BEWEFT_ENCRYPTION_KEY": settings(source)["BEWEFT_ENCRYPTION_KEY"]})
+    try:
+        project("restore", directory, backup, env=env, timeout=480)
+        assert settings(directory)["BEWEFT_WORKER_ACTIVE"] == "false"
+        records = restore_helper_records(env, name)
+        assert len(records) == 2
+        for record in records:
+            check_restore_helper(record, directory, removed=True)
+        assert media_volume_status(directory, image) == ["10001:10001"]
+        client = Client(port)
+        client.login()
+        assert client.call("/media?brand_id=" + brand["id"]) == []
+        boundary = "beweft-empty-restore"
+        body = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="pixel.png"\r\nContent-Type: image/png\r\n\r\n'.encode() + PNG + f"\r\n--{boundary}--\r\n".encode())
+        media = client.call("/media?brand_id=" + brand["id"], raw=body, content_type="multipart/form-data; boundary=" + boundary)
+        assert client.media(media["url"]) == PNG
+    finally:
+        remove_fixture_helpers(directory, env, name)
         project("compose", directory, "down", "--volumes", "--remove-orphans", timeout=120)
         no_resources(name)
         project("release", directory, timeout=30)
@@ -1020,9 +1295,19 @@ def main(temp):
     project("backup", source, source_backup, env=dict(instrumented, **{key: value for key, value in hostile.items()
                                                    if key.startswith(("COMPOSE_", "BEWEFT_"))}), timeout=480)
     helper_offset = assert_helpers_removed(helper_log, helper_offset, postgres_image)
+    check_backup_media_helpers(instrumented, source)
     assert (source_backup / "postgres-image-id").read_text().strip() == postgres_image
     assert image_for(source) == original_image
     verify_content(Client(ports[0]), brand, post, publication, media)
+    initializer_interruption(source, source_backup, IMAGE, temp, instrumented, "delay-start", signal.SIGINT)
+    initializer_interruption(source, source_backup, IMAGE, temp, instrumented, "delay-start", signal.SIGTERM)
+    initializer_interruption(source, source_backup, IMAGE, temp, instrumented, "delay-create", signal.SIGTERM)
+    initializer_interruption(source, source_backup, IMAGE, temp, instrumented, "delay-create-overdue", signal.SIGTERM)
+    initializer_failure(source, source_backup, IMAGE, temp, instrumented, "start-fail")
+    initializer_failure(source, source_backup, IMAGE, temp, instrumented, "remove-fail")
+    nonempty_initializer_refusal(IMAGE, temp, instrumented)
+    helper_ownership_refusal(IMAGE)
+    restore_empty_media(source, temp / "live-session-backup", IMAGE, temp, instrumented, brand)
     restore_interruption(source, source_backup, IMAGE, temp, instrumented)
     restore_interruption(source, source_backup, IMAGE, temp, instrumented, signal.SIGINT)
     restore_interruption(source, source_backup, IMAGE, temp, instrumented, signal.SIGTERM)
@@ -1094,7 +1379,12 @@ def main(temp):
     finally:
         docker("volume", "rm", volume)
     print("Rehearsal: restoring to empty project", flush=True)
-    project("restore", restored, source_backup, env=hostile, timeout=480)
+    wrapped = dict(instrumented, **{key: value for key, value in hostile.items() if key.startswith(("COMPOSE_", "BEWEFT_"))})
+    project("restore", restored, source_backup, env=wrapped, timeout=480)
+    records = restore_helper_records(instrumented, PROJECTS[1])
+    assert len(records) == 2
+    for record in records:
+        check_restore_helper(record, restored, removed=True)
     assert settings(restored)["BEWEFT_WORKER_ACTIVE"] == "false"
     project("compose", restored, "up", "-d", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never")
     running = project("compose", restored, "ps", "--status", "running", "--services").stdout.splitlines()
