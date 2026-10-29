@@ -406,7 +406,9 @@ test("partial and mismatched request receipts keep the original intent locked", 
     await page
       .getByRole("button", { name: "Check scheduling outcome" })
       .click();
-    await expect(page.getByText(/server record does not match/)).toBeVisible();
+    await expect(
+      page.getByRole("status").getByText(/server record does not match/),
+    ).toBeVisible();
     await expect(
       page.getByRole("button", { name: "Retry original schedule" }),
     ).toHaveCount(0);
@@ -1168,5 +1170,56 @@ test("a generic 401 retains the unresolved intent through reauthentication", asy
       ).id,
     ).toBe(saved.id);
     expect(f.patches()).toBe(1);
+  });
+});
+
+test("a rejected receipt cannot erase publications already observed in a successful response", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    let sent: any;
+    let original: any[] = [];
+    await page.route(
+      /\/api\/v1\/posts\/[^/]+\/schedule\?view=summary$/,
+      async (route) => {
+        sent = route.request().postDataJSON();
+        const response = await route.fetch();
+        expect(response.ok(), await response.text()).toBe(true);
+        original = (await response.json()).data;
+        await route.fulfill({ response });
+      },
+    );
+    await page.route("**/api/v1/schedule-requests/*", (route) => {
+      const record = {
+        ...receipt(f, sent, []),
+        outcome: "rejected",
+        error: { code: "schedule_request_retired", message: "Stopped" },
+      };
+      return route.fulfill({ json: { data: record } });
+    });
+    await startSchedule(page);
+    await expect(
+      page.getByRole("status").getByText(/server record does not match/),
+    ).toBeVisible();
+    const stored = await page.evaluate(() => {
+      const entry = Object.entries(localStorage).find(([key]) =>
+        key.startsWith("beweft.pending-schedule:"),
+      );
+      return entry ? JSON.parse(entry[1]) : null;
+    });
+    expect(stored.observed_publication_ids).toEqual(
+      original.map((row) => row.id),
+    );
+    expect(stored.rejection_code).toBe("schedule_request_conflict");
+    await page.reload();
+    await page.getByRole("button", { name: "Review pending schedule" }).click();
+    await expect(
+      page.getByRole("status").getByText(/server record does not match/),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Stop original schedule" }),
+    ).toHaveCount(0);
+    expect((await summaries(context, f.brand.id)).map((row) => row.id)).toEqual(
+      original.map((row) => row.id),
+    );
   });
 });
