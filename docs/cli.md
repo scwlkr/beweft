@@ -102,9 +102,11 @@ by this MCP root. Both use the API's upload limit and brand scope. Uploads have
 a 16-minute client deadline to allow the API's 15-minute receive window and
 response; other HTTP requests retain a two-minute deadline.
 
-CLI JSON input and an MCP frame may each be up to 2 MiB, including their
-respective wrapper. API JSON mutation bodies remain subject to the server's
-1 MiB request limit; the extra envelope space does not raise that limit.
+CLI JSON input and an MCP frame may each be up to 8 MiB on the wire, including
+their respective wrapper. This accommodates compact escaped JSON, including
+Unicode escapes, around a valid API payload. API JSON mutation bodies remain
+subject to the server's 1 MiB request limit after the CLI serializes them; the
+wire allowance does not raise that limit.
 
 ## Isolated integration check
 

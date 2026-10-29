@@ -6,7 +6,7 @@ use std::{
     io::{BufRead, Read, Write},
     time::{Duration, Instant},
 };
-const MAX_MESSAGE: u64 = 2 * 1024 * 1024;
+const MAX_MESSAGE: u64 = crate::MAX_WIRE_INPUT;
 fn error(id: Value, code: i32, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
 }
@@ -40,7 +40,7 @@ pub async fn serve(api: Api) -> Result<()> {
             writeln!(
                 output,
                 "{}",
-                error(Value::Null, -32600, "Message exceeds 2 MiB")
+                error(Value::Null, -32600, "Message exceeds 8 MiB")
             )?;
             output.flush()?;
             break;

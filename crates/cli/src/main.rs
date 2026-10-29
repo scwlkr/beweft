@@ -5,23 +5,23 @@ mod upload;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::io::Read;
-const MAX_JSON_INPUT: u64 = 2 * 1024 * 1024;
+const MAX_WIRE_INPUT: u64 = 8 * 1024 * 1024;
 
 fn read_json(path: &str) -> Result<Value> {
     let mut bytes = Vec::new();
     if path == "-" {
         std::io::stdin()
-            .take(MAX_JSON_INPUT + 1)
+            .take(MAX_WIRE_INPUT + 1)
             .read_to_end(&mut bytes)?;
     } else {
         std::fs::File::open(path)
             .context("Cannot open JSON file")?
-            .take(MAX_JSON_INPUT + 1)
+            .take(MAX_WIRE_INPUT + 1)
             .read_to_end(&mut bytes)?;
     }
     ensure!(
-        bytes.len() as u64 <= MAX_JSON_INPUT,
-        "JSON input exceeds 2 MiB"
+        bytes.len() as u64 <= MAX_WIRE_INPUT,
+        "JSON input exceeds 8 MiB"
     );
     serde_json::from_slice(&bytes).context("Invalid JSON input")
 }

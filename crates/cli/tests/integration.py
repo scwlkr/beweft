@@ -431,13 +431,50 @@ def request_bounds_test(env, call, brand, initial_channel):
         assert len(json.dumps(frame).encode()) > 1024 * 1024
         assert cli(env, "draft-create", "--json", "-", body=args)["data"]["status"] == "draft"
         assert mcp.call("draft_create", args)["data"]["status"] == "draft"
+
+        # Python's default JSON encoder escapes non-BMP characters as UTF-16
+        # surrogate pairs, making the wire envelope much larger than the UTF-8
+        # API body that the CLI actually sends.
+        emoji = "😀" * 22000
+        emoji_body = {"brand_id": brand, "text": "escaped emoji", "variants": [{"channel_id": channel, "text": emoji} for channel in channels[:11]]}
+        emoji_args = {"body": emoji_body}
+        api_size = len(json.dumps(emoji_body, ensure_ascii=False, separators=(",", ":")).encode())
+        wire = json.dumps(emoji_args).encode()
+        frame = {"jsonrpc": "2.0", "id": "emoji", "method": "tools/call", "params": {"name": "draft_create", "arguments": emoji_args}}
+        assert api_size < 1024 * 1024 and 2 * 1024 * 1024 < len(wire) < 8 * 1024 * 1024
+        assert len(json.dumps(frame).encode()) > 2 * 1024 * 1024
+        emoji_cli = cli(env, "draft-create", "--json", "-", body=emoji_args)["data"]
+        emoji_mcp = mcp.call("draft_create", emoji_args)["data"]
+        assert emoji_cli["variants"][0]["text"] == emoji
+        assert mcp.call("post", {"id": emoji_mcp["id"]})["data"]["variants"][-1]["text"] == emoji
+
+        # Compact JSON can encode every ASCII byte as a six-byte \u escape.
+        ascii_text = "x" * 90000
+        ascii_body = {"brand_id": brand, "text": "compact escape", "variants": [{"channel_id": channel, "text": ascii_text} for channel in channels[:11]]}
+        ascii_args = {"body": ascii_body}
+        api_size = len(json.dumps(ascii_body, separators=(",", ":")).encode())
+        escaped = json.dumps(ascii_args, separators=(",", ":")).encode().replace(b"x", b"\\u0078")
+        frame = {"jsonrpc": "2.0", "id": "ascii-escaped", "method": "tools/call", "params": {"name": "draft_create", "arguments": ascii_args}}
+        escaped_frame = json.dumps(frame, separators=(",", ":")).encode().replace(b"x", b"\\u0078")
+        assert api_size < 1024 * 1024 and 5 * 1024 * 1024 < len(escaped) < 8 * 1024 * 1024
+        assert 5 * 1024 * 1024 < len(escaped_frame) < 8 * 1024 * 1024
+        raw_cli = subprocess.run([str(BIN / "beweft"), "draft-create", "--json", "-"], env=env, input=escaped, capture_output=True, timeout=30)
+        assert raw_cli.returncode == 0 and json.loads(raw_cli.stdout)["data"]["variants"][0]["text"] == ascii_text
+        mcp.send(escaped_frame)
+        raw_mcp = mcp.receive()
+        assert raw_mcp["id"] == "ascii-escaped" and not raw_mcp["result"]["isError"]
+        ascii_id = raw_mcp["result"]["structuredContent"]["data"]["id"]
+        assert mcp.call("post", {"id": ascii_id})["data"]["variants"][-1]["text"] == ascii_text
+        too_large = {"body": {"brand_id": brand, "text": "API body cap", "variants": [{"channel_id": channel, "text": "x" * 100000} for channel in channels[:11]]}}
+        assert "HTTP 413" in cli(env, "draft-create", "--json", "-", body=too_large, success=False)
+        assert "HTTP 413" in mcp.call("draft_create", too_large, error=True)
     finally:
         mcp.close()
-    error = cli(env, "draft-create", "--json", "-", body={"body": {"text": "x" * (2 * 1024 * 1024)}}, success=False)
-    assert "JSON input exceeds 2 MiB" in error
-    oversized = subprocess.run([str(BIN / "beweft"), "mcp"], env=env, input=b" " * (2 * 1024 * 1024 + 1) + b"\n", capture_output=True, timeout=30)
+    error = cli(env, "draft-create", "--json", "-", body={"body": {"text": "x" * (8 * 1024 * 1024)}}, success=False)
+    assert "JSON input exceeds 8 MiB" in error
+    oversized = subprocess.run([str(BIN / "beweft"), "mcp"], env=env, input=b" " * (8 * 1024 * 1024 + 1) + b"\n", capture_output=True, timeout=30)
     response = json.loads(oversized.stdout)
-    assert oversized.returncode == 0 and response["error"]["code"] == -32600 and "2 MiB" in response["error"]["message"]
+    assert oversized.returncode == 0 and response["error"]["code"] == -32600 and "8 MiB" in response["error"]["message"]
 
 
 def run(temporary):
@@ -607,7 +644,7 @@ def run(temporary):
         race_test(env, upload_root, temp / "race-secret", brand["id"])
         pagination_test(env, dict(env, BEWEFT_TOKEN=unrestricted), call, brand["id"], other["id"], channel["id"])
         request_bounds_test(env, call, brand["id"], channel["id"])
-        print("PASS: isolated API CLI/MCP, scoped access, lost-response recovery, 170 large-draft pagination, 50-channel compact scheduling, near-1-MiB payload envelopes, oversized input rejection, upload confinement, token files, redirects, protocol errors and rate limit")
+        print("PASS: isolated API CLI/MCP, scoped access, lost-response recovery, 170 large-draft pagination, 50-channel compact scheduling, escaped emoji and ASCII wire envelopes, oversized input rejection, upload confinement, token files, redirects, protocol errors and rate limit")
     finally:
         stop(server)
 
