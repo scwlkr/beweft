@@ -473,6 +473,6 @@ pub async fn provider_status(
         None
     };
     Ok(data(
-        json!({"session_expired":expired,"reset_allowed":provider == "youtube" && expired && attested && current == "failed","reason":if expired && provider == "bluesky" {Some("The Bluesky processing window ended. Reconcile the saved video job before continuing.")} else if expired && provider == "youtube" {Some("Inspect YouTube Studio, record not-published reconciliation, then reset this expired upload before retrying.")}else{None},"x_upload":x_upload,"meta_delivery":meta_delivery,"linkedin_delivery":linkedin_delivery}),
+        json!({"session_expired":expired,"reset_allowed":provider == "youtube" && expired && attested && current == "failed","reason":if expired && provider == "bluesky" {Some("The Bluesky processing window ended. Reconcile the saved video job before continuing.")} else if expired && provider == "youtube" {Some("Inspect YouTube Studio, record not-published reconciliation, then reset this expired upload before retrying.")}else{None},"x_upload":x_upload,"meta_delivery":meta_delivery,"linkedin_delivery":linkedin_delivery,"google_delivery":Value::Null}),
     ))
 }

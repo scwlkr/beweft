@@ -417,6 +417,25 @@ pub struct ProviderStatus {
     pub meta_delivery: Option<MetaDeliveryStatus>,
     #[schema(required = true)]
     pub linkedin_delivery: Option<MetaDeliveryStatus>,
+    #[schema(required = true)]
+    pub google_delivery: Option<GoogleDeliveryStatus>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct GoogleDeliveryStatus {
+    pub phase: GoogleDeliveryPhase,
+    pub attempt_id: Uuid,
+    pub checkpoint_id: Uuid,
+    #[schema(required = true)]
+    pub post_name: Option<String>,
+    pub retry_allowed: bool,
+    pub reason: String,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GoogleDeliveryPhase {
+    CreateStarted,
+    Processing,
+    Rejected,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct MetaDeliveryStatus {
