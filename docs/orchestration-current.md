@@ -37,10 +37,10 @@ dev database/media remain preserved separately.
 
 | Milestone | State |
 | --- | --- |
-| Meta formats #24 / correction #28 | Original format review passed. A subsequent accepted-Reel processing defect is being corrected and independently reviewed in cumulative #28: accepted remote work must remain sending/uncertain, never become an ordinary cancelable queued item. The cumulative merge includes #24 and #27 so the unsafe intermediate state does not land. |
-| Content/owner UI #25 | The queued replacement correction uses a narrow audit-linked read endpoint to recover exact successor identity. Final recovery wording and fresh review are active. Templates, queued edits/priority, brand archive/restore, owner sessions/password, Meta and LinkedIn recovery are included. |
+| Meta formats #24 / correction #28 | Merged at `6ae032d` after fresh review of frozen `394ea493`. Accepted Facebook Reel processing remains sending/uncertain and cannot become an ordinary cancelable queued item. The cumulative merge also landed #24 and #27. |
+| Content/owner UI #25 | Merged at `acf0892` after fresh review of frozen `800f225`. Audit-linked replacement recovery, templates, queued edits/priority, brand archive/restore, owner sessions/password, Meta and LinkedIn recovery are included. Seventeen focused browser scenarios and real API workflows passed. |
 | Bluesky video #26 | Merged at `1320d7e` after fresh review of explicit quota-rejection retry. Job/blob checkpoints, stable record identity, PDS compatibility guard and bounded notification reads are included. Replies remain unfinished and disabled. |
-| LinkedIn media #27 | Frozen `899c370`, practical independent review passed. Member image/video stages and exact-ID owner recovery will land through cumulative #28. Organization opt-in/discovery remains unfinished. |
+| LinkedIn media #27 | Member image/video stages and exact-ID owner recovery passed practical independent review at `899c370` and landed through cumulative #28. Organization opt-in/discovery remains unfinished. |
 
 Each consequential revision still receives a brand-new read-only reviewer.
 All implementation/review agents use `gpt-6.1-terra` at `max`, with at most three
@@ -77,8 +77,8 @@ posts, Buffer changes or unrelated services are authorized.
 
 ## Remaining full scope and cleanup
 
-Finish the active reviewed milestones and publish the latest qualified local
-image. Additional local implementation still includes X threads, standard
+The reviewed source milestones through #28 have landed; the combined local
+image is being packaged and qualified. Additional local implementation still includes X threads, standard
 Facebook Page video, Instagram Stories eligibility, Threads/Bluesky replies,
 LinkedIn organization opt-in, expanded Pinterest formats/reads, Google Business
 Profile direct support and safe Google grant-family handling. Bluesky entryway
