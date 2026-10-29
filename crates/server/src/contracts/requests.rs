@@ -374,6 +374,9 @@ pub struct ReconcileRequest {
     /// Complete ordered X post IDs for owner-attested thread completion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_ids: Option<Vec<String>>,
+    /// Explicitly attest that the remote X thread root operation definitively ended without creating a post.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_root_definitively_ended: Option<bool>,
 }
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]

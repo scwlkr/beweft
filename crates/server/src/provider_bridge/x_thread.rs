@@ -47,12 +47,21 @@ pub(crate) fn x_thread_pre_public(cp: &Value) -> bool {
         && cp.get("next_index").is_none()
 }
 
+/// Unlike a display fallback for older checkpoints, root recovery needs
+/// positive evidence of the exact started segment and its empty prefix.
+pub(crate) fn x_thread_current_root_started(cp: &Value) -> bool {
+    cp["stage"] == "x_thread_post_started"
+        && cp.get("confirmed_ids").and_then(Value::as_array).is_some_and(Vec::is_empty)
+        && cp.get("next_index").and_then(Value::as_u64) == Some(0)
+}
+
 /// A thread with no confirmed root can be reset only after the owner has
 /// attested that this exact remote root operation definitively ended without
 /// creating a post. This is an owner observation, not provider proof.
 pub(crate) fn x_thread_root_ended_attested(payload: &Value, cp: &Value) -> Result<bool> {
     let status = x_thread_status(payload, cp)?;
-    Ok(status["phase"] == "request_started"
+    Ok(x_thread_current_root_started(cp)
+        && status["phase"] == "request_started"
         && status["next_index"] == 0
         && status["confirmed_ids"]
             .as_array()
@@ -60,7 +69,8 @@ pub(crate) fn x_thread_root_ended_attested(payload: &Value, cp: &Value) -> Resul
         && cp["not_published_attestation"]["attempt_id"] == status["attempt_id"]
         && cp["not_published_attestation"]["checkpoint_id"] == status["checkpoint_id"]
         && cp["thread_root_ended_attestation"]["attempt_id"] == status["attempt_id"]
-        && cp["thread_root_ended_attestation"]["checkpoint_id"] == status["checkpoint_id"])
+        && cp["thread_root_ended_attestation"]["checkpoint_id"] == status["checkpoint_id"]
+        && cp["thread_root_ended_attestation"]["thread_root_definitively_ended"] == true)
 }
 
 pub(crate) async fn x_thread_reset_covers_attempts(
@@ -133,7 +143,7 @@ pub(crate) fn x_thread_status(payload: &Value, cp: &Value) -> Result<Value> {
         ));
     }
     Ok(
-        json!({"phase":phase,"confirmed_ids":ids,"next_index":index,"total":texts.len(),"remaining_texts":texts[index..],"attempt_id":attempt,"checkpoint_id":checkpoint}),
+        json!({"phase":phase,"confirmed_ids":ids,"next_index":index,"total":texts.len(),"remaining_texts":texts[index..],"attempt_id":attempt,"checkpoint_id":checkpoint,"root_request_started":x_thread_current_root_started(cp)}),
     )
 }
 

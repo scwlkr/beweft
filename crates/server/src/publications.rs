@@ -182,6 +182,11 @@ async fn change(
             "Thread IDs are only valid for X thread completion",
         ));
     }
+    if body.get("thread_root_definitively_ended").is_some()
+        && (!x_thread || action != "reconcile" || body["resolution"] != "not_published")
+    {
+        return Err(ApiError::bad("The root-ended attestation is only valid for an X thread not-published resolution"));
+    }
     let mut x_checkpoint = if provider == "x"
         && (["retry", "reconcile"].contains(&action)
             || (x_thread && ["cancel", "reschedule"].contains(&action)))
@@ -235,9 +240,14 @@ async fn change(
             body["external_url"] = json!(url);
         } else {
             let status = crate::provider_bridge::x_thread_status(&payload, cp)?;
-            if !crate::provider_bridge::x_thread_pre_public(cp) {
+            if crate::provider_bridge::x_thread_pre_public(cp) {
+                if body.get("thread_root_definitively_ended").is_some() {
+                    return Err(ApiError::bad("A root-ended attestation is only valid for a started X thread root"));
+                }
+            } else {
                 auth.owner_session()?;
-                if status["phase"] != "request_started"
+                if !crate::provider_bridge::x_thread_current_root_started(cp)
+                    || status["phase"] != "request_started"
                     || status["next_index"] != 0
                     || status["confirmed_ids"]
                         .as_array()
@@ -246,12 +256,13 @@ async fn change(
                     || body["observed_checkpoint_id"] != status["checkpoint_id"]
                     || body["sender_stopped"] != true
                     || body["provider_inspected"] != true
+                    || body["thread_root_definitively_ended"] != true
                 {
                     return Err(ApiError::conflict(
                         "Only an unconfirmed root can be recorded not published after the owner confirms the remote operation definitively ended, using the current IDs.",
                     ));
                 }
-                cp["thread_root_ended_attestation"] = json!({"attempt_id":status["attempt_id"],"checkpoint_id":status["checkpoint_id"]});
+                cp["thread_root_ended_attestation"] = json!({"attempt_id":status["attempt_id"],"checkpoint_id":status["checkpoint_id"],"thread_root_definitively_ended":true});
             }
         }
     }

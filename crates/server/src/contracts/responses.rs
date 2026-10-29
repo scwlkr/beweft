@@ -456,6 +456,8 @@ pub struct XThreadStatus {
     pub remaining_texts: Vec<String>,
     pub attempt_id: Uuid,
     pub checkpoint_id: Uuid,
+    /// True only for an explicit current root-write checkpoint with zero confirmed IDs.
+    pub root_request_started: bool,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
