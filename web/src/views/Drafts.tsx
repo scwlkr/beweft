@@ -16,6 +16,7 @@ export function Drafts({
   onEdit,
   onDuplicate,
   onCompose,
+  protectedPostId,
 }: {
   posts: Post[];
   action: Action;
@@ -23,6 +24,7 @@ export function Drafts({
   onEdit: (p: Post) => void;
   onDuplicate: (p: Post) => void;
   onCompose: () => void;
+  protectedPostId?: string;
 }) {
   const drafts = posts.filter((p) => p.status === "draft");
   const [confirm, setConfirm] = useState<Post | null>(null);
@@ -68,6 +70,7 @@ export function Drafts({
                 variant="ghost"
                 size="icon"
                 aria-label={`Delete ${p.title || "draft"}`}
+                disabled={p.id === protectedPostId}
                 onClick={() => setConfirm(p)}
               >
                 <Trash2 size={17} />

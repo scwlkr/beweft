@@ -7,6 +7,7 @@ import { ErrorNotice, Field } from "./components/shared";
 import { Button } from "./components/ui/button";
 import { Dialog } from "./components/ui/dialog";
 import { ProviderOptions } from "./ProviderOptions";
+import type { usePendingSchedule } from "./usePendingSchedule";
 export function Composer({
   brand,
   channels,
@@ -15,6 +16,7 @@ export function Composer({
   initialDate,
   onClose,
   onSaved,
+  pendingSchedule,
 }: {
   brand: Brand;
   channels: Channel[];
@@ -23,6 +25,7 @@ export function Composer({
   initialDate?: string;
   onClose: () => void;
   onSaved: () => Promise<void>;
+  pendingSchedule: ReturnType<typeof usePendingSchedule>;
 }) {
   const {
     post,
@@ -47,6 +50,11 @@ export function Composer({
     setDate,
     busy,
     error,
+    intent,
+    recovery,
+    recoveryMessage,
+    recover,
+    release,
     active,
     currentText,
     previewChannel,
@@ -62,6 +70,7 @@ export function Composer({
     initialDate,
     onSaved,
     onClose,
+    pendingSchedule,
   });
   return (
     <Dialog
@@ -76,7 +85,12 @@ export function Composer({
       <div className="composer-grid">
         <fieldset
           className="composer-editor"
-          disabled={busy}
+          disabled={
+            busy ||
+            !pendingSchedule.ready ||
+            !!intent ||
+            recovery === "complete"
+          }
           aria-label="Post editor"
           aria-busy={busy}
         >
@@ -313,7 +327,6 @@ export function Composer({
               </p>
             )}
           </div>
-          {error && <ErrorNotice message={error} />}
         </fieldset>
         <PostPreview
           brand={brand}
@@ -322,20 +335,66 @@ export function Composer({
           media={selectedMedia}
         />
       </div>
+      {pendingSchedule.error && (
+        <ErrorNotice
+          message={`Schedule recovery is unavailable: ${pendingSchedule.error}`}
+        />
+      )}
+      {(intent || recovery === "complete") && (
+        <div className="notice" role="status">
+          <div>
+            <strong>
+              {recovery === "complete"
+                ? "Schedule confirmed"
+                : "Original schedule needs review"}
+            </strong>
+            <p>
+              {recoveryMessage ||
+                "The outcome is not yet confirmed. This saved revision and its channel choices are locked until you check or retry the original schedule."}
+            </p>
+          </div>
+        </div>
+      )}
+      {error && <ErrorNotice message={error} />}
       <footer className="dialog-footer">
         <Button variant="ghost" onClick={onClose} disabled={busy}>
-          Cancel
+          {intent || recovery === "complete" ? "Close" : "Cancel"}
         </Button>
-        <Button onClick={submit} disabled={busy}>
-          {mode === "draft" ? <Save size={17} /> : <Send size={17} />}{" "}
-          {busy
-            ? "Saving…"
-            : mode === "draft"
-              ? "Save draft"
-              : mode === "queue"
-                ? "Add to queue"
-                : "Schedule post"}
-        </Button>
+        {intent ? (
+          <>
+            <Button
+              variant="secondary"
+              onClick={() => void recover(false)}
+              disabled={busy}
+            >
+              Check scheduling outcome
+            </Button>
+            {recovery === "release" ? (
+              <Button onClick={() => void release()} disabled={busy}>
+                Release and refresh
+              </Button>
+            ) : (
+              recovery !== "partial" && (
+                <Button onClick={() => void recover(true)} disabled={busy}>
+                  Retry original schedule
+                </Button>
+              )
+            )}
+          </>
+        ) : (
+          recovery !== "complete" && (
+            <Button onClick={submit} disabled={busy || !pendingSchedule.ready}>
+              {mode === "draft" ? <Save size={17} /> : <Send size={17} />}{" "}
+              {busy
+                ? "Saving…"
+                : mode === "draft"
+                  ? "Save draft"
+                  : mode === "queue"
+                    ? "Add to queue"
+                    : "Schedule post"}
+            </Button>
+          )
+        )}
       </footer>
     </Dialog>
   );

@@ -6,16 +6,19 @@ import {
   scheduleEvent,
   type ScheduleIntent,
 } from "./scheduleIntent";
-export function usePendingSchedule(brandId: string) {
+export function usePendingSchedule(brandId: string, enabled: boolean) {
   const [key, setKey] = useState("");
   const [intent, setIntent] = useState<ScheduleIntent | null>(null);
   const [error, setError] = useState("");
+  const [loadedBrand, setLoadedBrand] = useState("");
   useEffect(() => {
     let active = true;
     let storageKey = "";
     setKey("");
     setIntent(null);
     setError("");
+    setLoadedBrand("");
+    if (!enabled || !brandId) return;
     const read = () => {
       if (!active || !storageKey) return;
       try {
@@ -24,6 +27,7 @@ export function usePendingSchedule(brandId: string) {
           throw new Error("Pending schedule belongs to another brand.");
         setIntent(pending);
         setKey(storageKey);
+        setLoadedBrand(brandId);
         setError("");
       } catch (failure) {
         setKey("");
@@ -45,6 +49,12 @@ export function usePendingSchedule(brandId: string) {
       window.removeEventListener("storage", read);
       window.removeEventListener(scheduleEvent, read);
     };
-  }, [brandId]);
-  return { key, intent, error, ready: !!key };
+  }, [brandId, enabled]);
+  const current = enabled && loadedBrand === brandId;
+  return {
+    key: current ? key : "",
+    intent: current ? intent : null,
+    error: current || !key ? error : "",
+    ready: current && !!key,
+  };
 }

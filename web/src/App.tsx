@@ -18,6 +18,7 @@ import { Button } from "./components/ui/button";
 import { Composer } from "./Composer";
 import { titles, zone } from "./navigation";
 import { useWorkspace } from "./useWorkspace";
+import { usePendingSchedule } from "./usePendingSchedule";
 import { Calendar } from "./views/Calendar";
 import { ConnectionFlow } from "./views/ConnectionFlow";
 import { Connections } from "./views/Connections";
@@ -65,6 +66,7 @@ export default function App() {
     go,
     chooseBrand,
   } = workspace;
+  const pendingSchedule = usePendingSchedule(brandId, ready === true);
   if (ready === null) return <Busy />;
   if (!ready)
     return (
@@ -152,6 +154,20 @@ export default function App() {
               )}
             </header>
             {error && <ErrorNotice message={error} />}
+            {pendingSchedule.intent && (
+              <div className="notice" role="status">
+                <span>
+                  A schedule needs review before another post can be saved for
+                  this brand.
+                </span>
+                <Button
+                  variant="secondary"
+                  onClick={() => setComposer(pendingSchedule.intent!.post)}
+                >
+                  Review pending schedule
+                </Button>
+              </div>
+            )}
             <div className="content-body" key={brandId}>
               {loading && !brand ? (
                 <Busy />
@@ -230,6 +246,7 @@ export default function App() {
                       )}
                       action={action}
                       pending={pending}
+                      protectedPostId={pendingSchedule.intent?.post.id}
                       onEdit={setComposer}
                       onDuplicate={(post) =>
                         setComposer({
@@ -351,6 +368,7 @@ export default function App() {
             initialDate={composer?.composeDate}
             onClose={() => setComposer(undefined)}
             onSaved={load}
+            pendingSchedule={pendingSchedule}
           />
         )}
       </div>
