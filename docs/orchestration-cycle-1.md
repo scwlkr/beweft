@@ -1,5 +1,10 @@
 # Orchestrator pilot: cycle 1
 
+Historical record: the outcome below describes the bounded pilot. During the
+full build on 2026-10-29, PR #11 resolved the brand-list and browser-session
+follow-ups and passed a fresh independent review. PR #9 then merged into the
+integration branch at `5a42e6e`. See `orchestration-current.md` for current work.
+
 The owner requested one bounded trial of the proposed workflow, with attention
 to context use and improvements. This is not a resumption of every product lane.
 
