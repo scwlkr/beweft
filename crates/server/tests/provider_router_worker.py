@@ -794,7 +794,7 @@ def run():
             Fixture.linkedin_poll_count = 0
             request(f"/media/{asset['id']}", {"alt_text":"Blue fixture", "metadata_version":1}, "PATCH")
             image_post = schedule(brand, linkedin["id"], "LinkedIn image", [asset["id"]])
-            request(f"/media/{asset['id']}", {"alt_text":"Changed later", "metadata_version":2}, "PATCH")
+            asset = request(f"/media/{asset['id']}", {"alt_text":"Changed later", "metadata_version":2}, "PATCH")
             wait_for(lambda: state_is(image_post["id"], "published"), "LinkedIn image", seconds=40)
             assert Fixture.linkedin_posts[-1]["content"]["media"]["altText"] == "Blue fixture"
             Fixture.linkedin_poll_count = 0
