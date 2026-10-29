@@ -1959,6 +1959,61 @@
         ],
         "type": "object"
       },
+      "RetireScheduleRequest": {
+        "additionalProperties": false,
+        "description": "Retire exactly one saved scheduling intent without creating publications.",
+        "properties": {
+          "brand_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "channel_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "media_versions": {
+            "additionalProperties": {
+              "format": "int64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "maxProperties": 1000,
+            "propertyNames": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "post_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "scheduled_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "post_id",
+          "brand_id",
+          "version",
+          "channel_ids"
+        ],
+        "type": "object"
+      },
       "RevocationAcknowledged": {
         "properties": {
           "revocation_acknowledged": {
@@ -2102,11 +2157,31 @@
         ],
         "type": "object"
       },
+      "ScheduleRequestOutcome": {
+        "enum": [
+          "accepted",
+          "rejected"
+        ],
+        "type": "string"
+      },
       "ScheduleRequestResult": {
         "properties": {
           "brand_id": {
             "format": "uuid",
             "type": "string"
+          },
+          "error": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ErrorDetail"
+              }
+            ]
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ScheduleRequestOutcome"
           },
           "post_id": {
             "format": "uuid",
@@ -2131,6 +2206,8 @@
           "post_id",
           "brand_id",
           "request",
+          "outcome",
+          "error",
           "publications"
         ],
         "type": "object"
@@ -10432,6 +10509,16 @@
               }
             },
             "description": "Internal failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Local media inspection unavailable or timed out"
           }
         },
         "security": [
@@ -12454,6 +12541,16 @@
               }
             },
             "description": "Internal failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Local media inspection unavailable or timed out"
           }
         },
         "security": [
@@ -13076,6 +13173,162 @@
             }
           }
         ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/ScheduleRequestResult"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Scope, brand or origin denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Record not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Version, state or slot conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeds configured limit"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Typed request validation failed"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too many authentication attempts"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal failure"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/schedule-requests/{request_id}/retire": {
+      "post": {
+        "operationId": "post__schedule-requests_request_id_retire",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must equal 1 for cookie-authenticated mutations and bootstrap/login. Bearer requests do not require it.",
+            "in": "header",
+            "name": "X-Beweft-Request",
+            "required": false,
+            "schema": {
+              "enum": [
+                "1"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetireScheduleRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {

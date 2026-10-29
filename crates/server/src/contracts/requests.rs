@@ -232,6 +232,28 @@ pub struct SchedulePostRequest {
     pub media_versions: Option<BTreeMap<Uuid, i64>>,
 }
 
+/// Retire exactly one saved scheduling intent without creating publications.
+#[derive(Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RetireScheduleRequest {
+    pub post_id: Uuid,
+    pub brand_id: Uuid,
+    pub version: i32,
+    pub channel_ids: Vec<Uuid>,
+    #[serde(
+        default,
+        deserialize_with = "schedule_timestamp",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub scheduled_at: Option<DateTime<Utc>>,
+    #[serde(
+        default,
+        deserialize_with = "schedule_media_versions",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub media_versions: Option<BTreeMap<Uuid, i64>>,
+}
+
 fn schedule_media_versions<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<BTreeMap<Uuid, i64>>, D::Error> {

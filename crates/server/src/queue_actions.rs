@@ -48,6 +48,9 @@ pub async fn replace(
         ));
     }
     let payload = crate::snapshot::from_post(&mut tx, &post, channel).await?;
+    crate::provider_bridge::ScheduleFormatValidator::default()
+        .validate(&state, &mut tx, channel, brand, &payload)
+        .await?;
     let replacement = Uuid::new_v4();
     sqlx::query("UPDATE publications SET state='canceled',last_error='Replaced with a new draft snapshot',updated_at=now() WHERE id=$1").bind(id).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO publications(id,post_id,brand_id,channel_id,post_version,scheduled_at,state,payload,scheduling_mode) VALUES($1,$2,$3,$4,$5,$6,'queued',$7,$8)").bind(replacement).bind(post_id).bind(brand).bind(channel).bind(body.post_version).bind(body.scheduled_at).bind(payload).bind(original.get::<String,_>("scheduling_mode")).execute(&mut *tx).await?;

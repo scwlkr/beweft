@@ -126,6 +126,10 @@ pub fn router(state: AppState) -> Router {
             get(schedules::get_schedule_request),
         )
         .route(
+            "/schedule-requests/{request_id}/retire",
+            post(schedules::retire_schedule_request),
+        )
+        .route(
             "/media",
             get(media::list)
                 .post(media::upload)

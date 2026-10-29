@@ -33,6 +33,7 @@ use serde_json::{Value, json};
         CreatePostRequest,
         UpdatePostRequest,
         SchedulePostRequest,
+        RetireScheduleRequest,
         CreateScheduleRequest,
         ReorderQueueRequest,
         ManualCompleteRequest,
@@ -61,6 +62,7 @@ use serde_json::{Value, json};
         Publication,
         PublicationSummary,
         ScheduleRequestIntent,
+        ScheduleRequestOutcome,
         ScheduleRequestResult,
         PublicationAttempt,
         PublicationAttemptState,
@@ -176,6 +178,10 @@ pub fn build_document() -> Value {
             ("500", "Internal failure"),
         ] {
             operation["responses"][status] = json!({"description":description,"content":{"application/json":{"schema":reference("ErrorResponse")}}});
+        }
+        if method == "post" && matches!(path, "/posts/{id}/schedule" | "/publications/{id}/replace")
+        {
+            operation["responses"]["503"] = json!({"description":"Local media inspection unavailable or timed out","content":{"application/json":{"schema":reference("ErrorResponse")}}});
         }
         let mut parameters = Vec::new();
         if path.contains("{id}") {
@@ -305,7 +311,11 @@ pub fn build_document() -> Value {
     document["paths"] = Value::Object(paths);
     // The media precondition is a UUID-keyed map of positive i64 versions,
     // capped so a recovered request remains bounded.
-    for name in ["SchedulePostRequest", "ScheduleRequestIntent"] {
+    for name in [
+        "SchedulePostRequest",
+        "RetireScheduleRequest",
+        "ScheduleRequestIntent",
+    ] {
         let versions = &mut document["components"]["schemas"][name]["properties"]["media_versions"];
         versions["maxProperties"] = json!(1000);
         versions["additionalProperties"]["minimum"] = json!(1);

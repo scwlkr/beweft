@@ -4,6 +4,17 @@ pub(super) async fn load_publication_on(
     db: &mut sqlx::PgConnection,
     value: &Value,
 ) -> Result<Publication> {
+    prepare_publication_on(state, db, value, true).await
+}
+
+/// Scheduling performs the same local checks without creating a capability or
+/// contacting a provider. The delivery path alone creates temporary URLs.
+pub(super) async fn prepare_publication_on(
+    state: &AppState,
+    db: &mut sqlx::PgConnection,
+    value: &Value,
+    delivery: bool,
+) -> Result<Publication> {
     let id = value["id"]
         .as_str()
         .ok_or_else(|| ApiError::bad("Publication identity is missing"))?;
@@ -35,7 +46,7 @@ pub(super) async fn load_publication_on(
         let metadata = tokio::fs::metadata(&path)
             .await
             .map_err(|_| ApiError::bad("Publication media file is unavailable"))?;
-        let public_url = if state.config.public_url.starts_with("https://") {
+        let public_url = if delivery && state.config.public_url.starts_with("https://") {
             let token = crypto::random_secret();
             sqlx::query("INSERT INTO provider_media_tokens(token_hash,media_id,expires_at) VALUES($1,$2,now()+interval '2 hours')").bind(crypto::digest(&token)).bind(media_id).execute(&mut *db).await?;
             Some(format!(
@@ -66,9 +77,11 @@ pub(super) async fn load_publication_on(
                 .into(),
         });
     }
-    sqlx::query("DELETE FROM provider_media_tokens WHERE expires_at<now()")
-        .execute(&mut *db)
-        .await?;
+    if delivery {
+        sqlx::query("DELETE FROM provider_media_tokens WHERE expires_at<now()")
+            .execute(&mut *db)
+            .await?;
+    }
     Ok(Publication {
         key: id.into(),
         text: payload["text"].as_str().unwrap_or("").into(),

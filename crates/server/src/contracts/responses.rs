@@ -231,11 +231,20 @@ pub struct ScheduleRequestIntent {
     pub media_versions: Option<BTreeMap<Uuid, i64>>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleRequestOutcome {
+    Accepted,
+    Rejected,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct ScheduleRequestResult {
     pub request_id: Uuid,
     pub post_id: Uuid,
     pub brand_id: Uuid,
     pub request: ScheduleRequestIntent,
+    pub outcome: ScheduleRequestOutcome,
+    #[schema(required = true)]
+    pub error: Option<ErrorDetail>,
     pub publications: Vec<PublicationSummary>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]

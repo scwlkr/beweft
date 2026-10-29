@@ -126,6 +126,13 @@ pub(crate) const OPERATIONS: &[(&str, &str, &str, &str, bool)] = &[
         "ScheduleRequestResult",
         false,
     ),
+    (
+        "post",
+        "/schedule-requests/{request_id}/retire",
+        "RetireScheduleRequest",
+        "ScheduleRequestResult",
+        false,
+    ),
     ("get", "/media", "", "Media", true),
     ("post", "/media", "multipart", "Media", false),
     ("get", "/media/limits", "", "MediaLimits", false),
