@@ -142,9 +142,9 @@ impl Adapter {
                 .request(Method::POST, "https://api.x.com/2/oauth2/revoke", None)?
                 .basic_auth(&app.client_id, Some(&app.client_secret))
                 .form(&[("token", access.as_str()), ("client_id", &app.client_id)]),
-            "youtube" => self
-                .request(Method::POST, "https://oauth2.googleapis.com/revoke", None)?
-                .form(&[("token", access.as_str())]),
+            // Google revokes a project-wide grant. A delayed request can
+            // invalidate a newer authorization; removal is owner-managed.
+            "youtube" => return Ok(false),
             "facebook" => self.request(
                 Method::DELETE,
                 "https://graph.facebook.com/v23.0/me/permissions",

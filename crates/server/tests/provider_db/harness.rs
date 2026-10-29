@@ -14,14 +14,38 @@ struct Provider {
     reply_release: Notify,
     probe_started: Notify,
     probe_release: Notify,
+    revoke_requests: AtomicUsize,
+    masto_revoke_requests: AtomicUsize,
+    sync_mode: AtomicUsize,
+    sync_requests: AtomicUsize,
+    sync_started: Notify,
+    sync_release: Notify,
+    exchange_block: AtomicUsize,
+    exchange_requests: AtomicUsize,
+    exchange_started: Notify,
+    exchange_release: Notify,
+    identity_block: AtomicUsize,
+    identity_started: Notify,
+    identity_release: Notify,
+    bluesky_session_requests: AtomicUsize,
+    bluesky_session_block: AtomicUsize,
+    bluesky_session_started: Notify,
+    bluesky_session_release: Notify,
 }
 async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
     let path = r.uri().path().to_owned();
     match path.as_str() {
-        "/2/oauth2/token" | "/token" => {
+        "/2/oauth2/token" | "/token" | "/oauth/token" | "/oauth/v2/accessToken" => {
             let body = to_bytes(r.into_body(), 10000).await.unwrap();
             let form: std::collections::HashMap<String, String> =
                 url::form_urlencoded::parse(&body).into_owned().collect();
+            if form.get("grant_type").map(String::as_str) == Some("authorization_code") {
+                s.exchange_requests.fetch_add(1, Ordering::SeqCst);
+                if s.exchange_block.load(Ordering::SeqCst) != 0 {
+                    s.exchange_started.notify_one();
+                    s.exchange_release.notified().await;
+                }
+            }
             if s.strict_refresh.load(Ordering::SeqCst)
                 && form.get("grant_type").map(String::as_str) == Some("refresh_token")
             {
@@ -80,6 +104,10 @@ async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
         "/2/users/me" => {
             Json(json!({"data":{"id":"destination","name":"Fixture"}})).into_response()
         }
+        "/v2/userinfo" => Json(json!({"sub":"shared-account","name":"Fixture"})).into_response(),
+        "/api/v1/accounts/verify_credentials" => {
+            Json(json!({"id":"masto-destination","display_name":"Fixture"})).into_response()
+        }
         "/api/v1/statuses" => {
             s.writes.fetch_add(1, Ordering::SeqCst);
             s.reply_started.notify_one();
@@ -95,7 +123,42 @@ async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
                 .insert(header::RANGE, "bytes=0-4".parse().unwrap());
             r
         }
-        "/oauth/revoke" => Json(json!({})).into_response(),
+        "/revoke"
+        | "/2/oauth2/revoke"
+        | "/v23.0/me/permissions"
+        | "/xrpc/com.atproto.server.deleteSession" => {
+            s.revoke_requests.fetch_add(1, Ordering::SeqCst);
+            StatusCode::OK.into_response()
+        }
+        "/youtube/v3/channels" => {
+            if s.identity_block.load(Ordering::SeqCst) != 0 {
+                s.identity_started.notify_one();
+                s.identity_release.notified().await;
+            }
+            Json(json!({"items":[{"id":"destination","snippet":{"title":"Fixture"}}]}))
+                .into_response()
+        }
+        "/xrpc/com.atproto.server.createSession" => {
+            s.bluesky_session_requests.fetch_add(1, Ordering::SeqCst);
+            if s.bluesky_session_block.load(Ordering::SeqCst) != 0 {
+                s.bluesky_session_started.notify_one();
+                s.bluesky_session_release.notified().await;
+            }
+            Json(json!({"did":"did:plc:fixture", "handle":"fixture.bsky.social", "accessJwt":"bluesky-access-fixture", "refreshJwt":"bluesky-refresh-fixture"})).into_response()
+        }
+        "/youtube/v3/commentThreads" => {
+            s.sync_requests.fetch_add(1, Ordering::SeqCst);
+            if s.sync_mode.load(Ordering::SeqCst) != 0 {
+                s.sync_started.notify_one();
+                s.sync_release.notified().await;
+            }
+            Json(json!({"items":[]})).into_response()
+        }
+        "/oauth/revoke" => {
+            s.revoke_requests.fetch_add(1, Ordering::SeqCst);
+            s.masto_revoke_requests.fetch_add(1, Ordering::SeqCst);
+            Json(json!({})).into_response()
+        }
         _ => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -153,9 +216,9 @@ impl Harness {
         let dir = std::env::temp_dir().join(format!("beweft-provider-db-{owner}"));
         std::fs::create_dir(&dir).unwrap();
         Self {
-            state: AppState {
-                db: pool,
-                config: Arc::new(Config {
+            state: AppState::new(
+                pool,
+                Arc::new(Config {
                     public_url: "http://localhost:3000".into(),
                     secure_cookie: false,
                     setup_secret: String::new(),
@@ -166,7 +229,7 @@ impl Harness {
                     fixture_delay_ms: 0,
                     encryption_key: Some([13; 32]),
                 }),
-            },
+            ),
             auth: Auth {
                 owner_id: owner,
                 email: "fixture".into(),

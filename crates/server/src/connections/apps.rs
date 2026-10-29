@@ -1,4 +1,76 @@
 use super::*;
+
+pub(super) const PROVIDER_BUSY_MESSAGE: &str = "A provider operation is in progress. Wait for it to finish, then retry and check the current provider status before any manual removal.";
+pub(super) const PENDING_REMOVAL_MESSAGE: &str = "Provider removal is pending. Wait for any provider operation still in progress to finish. Removing access at the provider may affect other channels and unrelated accounts. First inspect your channels, then remove the affected access in the provider's access settings (such as connected apps or app passwords). Only after removal is complete, confirm it before connecting again.";
+
+pub(super) fn provider_operation_key(provider: &str) -> String {
+    format!("provider-operation:{provider}")
+}
+
+pub(super) fn provider_busy_error() -> ApiError {
+    ApiError::conflict(PROVIDER_BUSY_MESSAGE)
+}
+
+/// Serialize grant operations and disconnect for a provider, including remote I/O.
+/// A busy gate fails promptly so other requests do not wait on the provider timeout.
+pub(super) async fn oauth_gate(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    provider: &str,
+) -> Result<Option<(i64, Option<Uuid>)>> {
+    fn gate_error(error: sqlx::Error) -> ApiError {
+        if matches!(&error, sqlx::Error::Database(db) if db.code().as_deref() == Some("55P03")) {
+            provider_busy_error()
+        } else {
+            error.into()
+        }
+    }
+    sqlx::query("SET LOCAL lock_timeout = '5s'")
+        .execute(&mut **tx)
+        .await
+        .map_err(gate_error)?;
+    // Every provider grant operation and disconnect uses this nonblocking key.
+    let admitted: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(provider_operation_key(provider))
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(gate_error)?;
+    if !admitted {
+        return Err(provider_busy_error());
+    }
+    let query = "SELECT oauth_generation,revocation_id FROM provider_oauth_fences WHERE provider=$1 FOR UPDATE NOWAIT";
+    let mut row = sqlx::query(query)
+        .bind(provider)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(gate_error)?;
+    if row.is_none() {
+        // The provider advisory lock also serializes creation of the first
+        // fence, so a concurrent app save fails promptly rather than waiting
+        // on the INSERT's unique constraint.
+        sqlx::query("INSERT INTO provider_oauth_fences(provider) VALUES($1) ON CONFLICT(provider) DO NOTHING")
+            .bind(provider).execute(&mut **tx).await.map_err(gate_error)?;
+        row = sqlx::query(query)
+            .bind(provider)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(gate_error)?;
+    }
+    Ok(row.map(|row| (row.get("oauth_generation"), row.get("revocation_id"))))
+}
+
+pub(super) fn pending_removal_error() -> ApiError {
+    ApiError::conflict(PENDING_REMOVAL_MESSAGE)
+}
+
+pub(super) fn require_open_oauth_gate(gate: Option<(i64, Option<Uuid>)>) -> Result<i64> {
+    match gate {
+        Some((generation, None)) => Ok(generation),
+        Some((_, Some(_))) => Err(pending_removal_error()),
+        None => Err(ApiError::bad("Set up this provider app first")),
+    }
+}
+
 pub async fn app_config(state: &AppState, provider: &str) -> Result<AppConfig> {
     let row = sqlx::query("SELECT id,encrypted_config FROM provider_apps WHERE provider=$1")
         .bind(provider)
@@ -17,6 +89,19 @@ pub(super) async fn app_config_tx(
         .fetch_optional(&mut **tx)
         .await?
         .ok_or_else(|| ApiError::bad("Set up this provider app first"))?;
+    decode_app(state, row)
+}
+pub(super) async fn locked_app_config_tx(
+    state: &AppState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    provider: &str,
+) -> Result<AppConfig> {
+    let row =
+        sqlx::query("SELECT id,encrypted_config FROM provider_apps WHERE provider=$1 FOR SHARE")
+            .bind(provider)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(|| ApiError::bad("Set up this provider app first"))?;
     decode_app(state, row)
 }
 fn decode_app(state: &AppState, row: sqlx::postgres::PgRow) -> Result<AppConfig> {
@@ -106,6 +191,10 @@ pub async fn save_app(
         return Err(ApiError::bad("Provider is unavailable or manual-only"));
     }
     let mut tx = state.db.begin().await?;
+    // Do not queue configuration writes behind an exchange holding the app
+    // row; the same gate rejects concurrent edits promptly and preserves the
+    // stored revocation fence even when configuration is changed.
+    oauth_gate(&mut tx, &provider).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
         .bind(format!("provider-app:{provider}"))
         .execute(&mut *tx)
@@ -142,7 +231,9 @@ pub async fn save_app(
         instance_url: instance,
     };
     if matches!(provider.as_str(), "mastodon" | "bluesky") {
-        adapter_for(&app).await?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), adapter_for(&app))
+            .await
+            .map_err(|_| ApiError::bad("Provider instance lookup timed out"))??;
     } else if app.instance_url.is_some() {
         return Err(ApiError::bad(
             "Only Mastodon and Bluesky accept an instance URL",
