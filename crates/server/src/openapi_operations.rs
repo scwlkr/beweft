@@ -180,6 +180,13 @@ pub(crate) const OPERATIONS: &[(&str, &str, &str, &str, bool)] = &[
     ),
     (
         "post",
+        "/publications/{id}/reset-x-upload",
+        "ResetXUploadRequest",
+        "ResetExpiredSessionResult",
+        false,
+    ),
+    (
+        "post",
         "/publications/{id}/cancel",
         "",
         "Publication",

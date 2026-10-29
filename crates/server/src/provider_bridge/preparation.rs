@@ -113,7 +113,7 @@ pub(super) async fn checkpoint(state: &AppState, id: Uuid) -> Result<Option<Valu
     let mut db = state.db.acquire().await?;
     checkpoint_on(state, &mut db, id).await
 }
-pub(super) async fn checkpoint_on(
+pub(crate) async fn checkpoint_on(
     state: &AppState,
     db: &mut sqlx::PgConnection,
     id: Uuid,

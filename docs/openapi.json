@@ -1497,12 +1497,23 @@
           },
           "session_expired": {
             "type": "boolean"
+          },
+          "x_upload": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/XUploadStatus"
+              }
+            ]
           }
         },
         "required": [
           "session_expired",
           "reset_allowed",
-          "reason"
+          "reason",
+          "x_upload"
         ],
         "type": "object"
       },
@@ -1694,7 +1705,8 @@
           "fixture_complete",
           "failed",
           "uncertain",
-          "reconciled"
+          "reconciled",
+          "continued"
         ],
         "type": "string"
       },
@@ -1833,8 +1845,35 @@
           "note": {
             "type": "string"
           },
+          "observed_attempt_id": {
+            "description": "Required for an X public-start checkpoint when resolving not published.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observed_checkpoint_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_inspected": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "resolution": {
             "$ref": "#/components/schemas/Resolution"
+          },
+          "sender_stopped": {
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
@@ -1933,6 +1972,38 @@
           "state",
           "session_reset",
           "next_action"
+        ],
+        "type": "object"
+      },
+      "ResetXUploadRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "confirm_restart": {
+            "type": "boolean"
+          },
+          "observed_attempt_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "observed_checkpoint_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "provider_inspected": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "sender_stopped": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "observed_attempt_id",
+          "observed_checkpoint_id",
+          "sender_stopped",
+          "confirm_restart"
         ],
         "type": "object"
       },
@@ -2750,6 +2821,43 @@
           "scheduled",
           "published",
           "attention"
+        ],
+        "type": "object"
+      },
+      "XUploadPhase": {
+        "enum": [
+          "upload",
+          "post_started"
+        ],
+        "type": "string"
+      },
+      "XUploadStatus": {
+        "properties": {
+          "attempt_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "checkpoint_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/XUploadPhase",
+            "description": "`post_started` is the public delivery boundary, including text-only posts."
+          },
+          "reason": {
+            "type": "string"
+          },
+          "reset_allowed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "phase",
+          "attempt_id",
+          "checkpoint_id",
+          "reset_allowed",
+          "reason"
         ],
         "type": "object"
       }
@@ -12763,6 +12871,160 @@
             }
           }
         ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/ResetExpiredSessionResult"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Scope, brand or origin denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Record not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Version, state or slot conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeds configured limit"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Typed request validation failed"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too many authentication attempts"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal failure"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/publications/{id}/reset-x-upload": {
+      "post": {
+        "description": "Requires an owner cookie session. API bearer tokens are rejected even with admin scope.",
+        "operationId": "post__publications_id_reset-x-upload",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must equal 1 for cookie-authenticated mutations and bootstrap/login. Bearer requests do not require it.",
+            "in": "header",
+            "name": "X-Beweft-Request",
+            "required": false,
+            "schema": {
+              "enum": [
+                "1"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetXUploadRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
