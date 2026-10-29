@@ -1,6 +1,9 @@
 # beweft project notes
 
-Status: implementation paused at the owner's request for orchestrator handoff.
+Status: one bounded orchestrator pilot is complete; the broader build remains
+at its paused handoff. Draft PR #9 preserves the pilot's brand-recovery work and
+an unresolved review finding. Nothing from that pilot was merged or deployed.
+Results and workflow improvements: [cycle 1](docs/orchestration-cycle-1.md).
 Start continuation with [ORCHESTRATOR-HANDOFF.md](ORCHESTRATOR-HANDOFF.md), which
 contains the launch prompt, five-agent ownership, PR stack and unresolved review
 findings. No previous implementation agents remain active. Research decisions are
