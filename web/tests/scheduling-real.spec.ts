@@ -151,11 +151,14 @@ async function setup(
   });
   return { brand, channel, media, post, owner, key, patches: () => patches };
 }
-function localTime(offsetMs: number) {
-  const date = new Date(Date.now() + offsetMs);
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60000)
+function localTime(offsetMs: number, now = Date.now()) {
+  const date = new Date(now + offsetMs);
+  const value = new Date(date.getTime() - date.getTimezoneOffset() * 60000)
     .toISOString()
     .slice(0, 19);
+  // Chromium normalizes a zero seconds component away before Playwright
+  // verifies a datetime-local fill.
+  return value.endsWith(":00") ? value.slice(0, 16) : value;
 }
 async function start(page: Page, date = localTime(7 * 86400_000)) {
   await page.goto("/#drafts");
@@ -1569,7 +1572,9 @@ test("a complete matching receipt safely resolves a partially observed POST", as
       originals = (await response.json()).data;
       await route.fulfill({ json: { data: [originals[0]] } });
     });
-    await start(page);
+    const minute = new Date();
+    minute.setSeconds(0, 0);
+    await start(page, localTime(7 * 86400_000, minute.getTime()));
     await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
       "incomplete",
     );
