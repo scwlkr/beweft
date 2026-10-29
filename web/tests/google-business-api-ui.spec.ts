@@ -13,6 +13,7 @@ test("Google composer and exact-ID recovery work with the real API", async () =>
   );
   if (
     process.env.BEWEFT_REQUIRE_PROVIDER_FIXTURES !== "true" ||
+    process.env.BEWEFT_PROVIDER_TEST_SANDBOX !== "1" ||
     !/^http:\/\/127\.0\.0\.1:\d+$/.test(
       process.env.BEWEFT_PROVIDER_FIXTURE_ORIGIN ?? "",
     ) ||
@@ -20,6 +21,14 @@ test("Google composer and exact-ID recovery work with the real API", async () =>
     !/^[a-f0-9]{64}$/.test(process.env.BEWEFT_ENCRYPTION_KEY ?? "")
   )
     throw new Error("Requires the guarded disposable provider harness");
+  execFileSync(
+    "python3",
+    [
+      "-c",
+      "import errno,socket,sys; s=socket.socket(); s.settimeout(1); sys.exit(0 if s.connect_ex(('192.0.2.1',9)) in (errno.EPERM,errno.EACCES) else 1)",
+    ],
+    { stdio: "ignore" },
+  );
   const db = process.env.BEWEFT_TEST_DB_NAME!;
   const sql = (query: string) =>
     execFileSync(
