@@ -1,9 +1,12 @@
 pub mod auth;
 pub mod catalog;
+pub mod contract_export;
+pub mod contracts;
 pub mod crypto;
 pub mod error;
 pub mod health;
 pub mod media;
+pub mod media_storage;
 pub mod openapi;
 pub mod posts;
 pub mod publications;
@@ -25,6 +28,11 @@ use tower_http::{
     trace::TraceLayer,
 };
 pub fn router(state: AppState) -> Router {
+    let upload_limit = state
+        .config
+        .max_upload_bytes
+        .saturating_add(1024 * 1024)
+        .min(usize::MAX as u64) as usize;
     let api = Router::new()
         .route("/auth/status", get(auth::status))
         .route("/auth/bootstrap", post(auth::bootstrap))
@@ -51,7 +59,13 @@ pub fn router(state: AppState) -> Router {
             get(posts::get).patch(posts::update).delete(posts::delete),
         )
         .route("/posts/{id}/schedule", post(schedules::schedule_post))
-        .route("/media", get(media::list).post(media::upload))
+        .route(
+            "/media",
+            get(media::list)
+                .post(media::upload)
+                .layer(DefaultBodyLimit::max(upload_limit)),
+        )
+        .route("/media/limits", get(media::limits))
         .route("/media/{id}", delete(media::delete))
         .route("/media/{id}/file", get(media::file))
         .route("/schedules", get(schedules::list).post(schedules::create))
@@ -86,8 +100,10 @@ pub fn router(state: AppState) -> Router {
             ServeDir::new(&web_dir)
                 .not_found_service(ServeFile::new(format!("{web_dir}/index.html"))),
         )
-        .layer(DefaultBodyLimit::max(26 * 1024 * 1024))
-        .layer(TraceLayer::new_for_http())
+        .layer(DefaultBodyLimit::max(1024 * 1024))
+        .layer(TraceLayer::new_for_http().make_span_with(|request: &Request| {
+            tracing::info_span!("http_request", method=%request.method(), path=%request.uri().path())
+        }))
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
 }

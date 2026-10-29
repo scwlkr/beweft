@@ -57,10 +57,10 @@ fn cookie_token(headers: &HeaderMap) -> Option<&str> {
         .find_map(|p| p.trim().strip_prefix("beweft_session="))
 }
 pub fn check_origin(headers: &HeaderMap, state: &AppState, require_header: bool) -> Result<()> {
-    if let Some(origin) = headers.get(header::ORIGIN) {
-        if origin.to_str().ok() != Some(state.config.public_url.as_str()) {
-            return Err(ApiError::forbidden());
-        }
+    if let Some(origin) = headers.get(header::ORIGIN)
+        && origin.to_str().ok() != Some(state.config.public_url.as_str())
+    {
+        return Err(ApiError::forbidden());
     }
     if require_header
         && headers
@@ -151,8 +151,9 @@ async fn session_response(state: &AppState, id: Uuid, email: String) -> Result<R
 pub async fn bootstrap(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    Json(input): Json<crate::contracts::BootstrapRequest>,
 ) -> Result<Response> {
+    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     check_origin(&headers, &state, true)?;
     limit(&state, "bootstrap".into(), 15).await?;
     if state.config.setup_secret.len() < 16 {
@@ -204,8 +205,9 @@ pub async fn bootstrap(
 pub async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    Json(input): Json<crate::contracts::LoginRequest>,
 ) -> Result<Response> {
+    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     check_origin(&headers, &state, true)?;
     let email = required(&body, "email")?.to_lowercase();
     let password = required(&body, "password")?;

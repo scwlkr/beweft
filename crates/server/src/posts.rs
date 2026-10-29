@@ -109,8 +109,9 @@ async fn check_media(db: &PgPool, brand: Uuid, ids: &[Uuid]) -> Result<()> {
 pub async fn create(
     State(state): State<AppState>,
     auth: Auth,
-    Json(body): Json<Value>,
+    Json(input): Json<crate::contracts::CreatePostRequest>,
 ) -> Result<Json<Value>> {
+    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     auth.scope("drafts:write")?;
     let brand = uuid(&body, "brand_id")?;
     auth.brand(brand)?;
@@ -134,8 +135,9 @@ pub async fn update(
     State(state): State<AppState>,
     auth: Auth,
     Path(id): Path<Uuid>,
-    Json(body): Json<Value>,
+    Json(input): Json<crate::contracts::UpdatePostRequest>,
 ) -> Result<Json<Value>> {
+    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     auth.scope("drafts:write")?;
     let existing = get_post(&state.db, id).await?;
     let brand = uuid(&existing, "brand_id")?;
@@ -187,10 +189,10 @@ pub async fn delete(
 }
 
 fn validate_options(body: &Value) -> Result<()> {
-    if let Some(options) = body.get("options") {
-        if !options.is_object() || options.to_string().len() > 32768 {
-            return Err(ApiError::bad("options must be a JSON object within 32 KiB"));
-        }
+    if let Some(options) = body.get("options")
+        && (!options.is_object() || options.to_string().len() > 32768)
+    {
+        return Err(ApiError::bad("options must be a JSON object within 32 KiB"));
     }
     Ok(())
 }

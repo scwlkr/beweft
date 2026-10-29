@@ -22,8 +22,9 @@ pub async fn brands(State(state): State<AppState>, auth: Auth) -> Result<Json<Va
 pub async fn create_brand(
     State(state): State<AppState>,
     auth: Auth,
-    Json(body): Json<Value>,
+    Json(input): Json<crate::contracts::CreateBrandRequest>,
 ) -> Result<Json<Value>> {
+    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     auth.scope("admin")?;
     if !auth.brand_ids.is_empty() {
         return Err(ApiError::forbidden());
@@ -89,8 +90,9 @@ pub async fn channels(
 pub async fn create_channel(
     State(state): State<AppState>,
     auth: Auth,
-    Json(body): Json<Value>,
+    Json(input): Json<crate::contracts::CreateChannelRequest>,
 ) -> Result<Json<Value>> {
+    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     auth.scope("admin")?;
     let brand = uuid(&body, "brand_id")?;
     auth.brand(brand)?;
@@ -118,8 +120,9 @@ pub async fn update_channel(
     State(state): State<AppState>,
     auth: Auth,
     Path(id): Path<Uuid>,
-    Json(body): Json<Value>,
+    Json(input): Json<crate::contracts::UpdateChannelRequest>,
 ) -> Result<Json<Value>> {
+    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     auth.scope("admin")?;
     auth.brand(channel_brand(&state, id).await?)?;
     let name = body.get("name").and_then(Value::as_str);
@@ -130,7 +133,10 @@ pub async fn update_channel(
     if let Some(t) = timezone {
         validate_timezone(t)?;
     }
-    let row:Value=sqlx::query_scalar("UPDATE channels SET name=COALESCE($2,name),paused=COALESCE($3,paused),timezone=COALESCE($4,timezone) WHERE id=$1 RETURNING to_jsonb(channels.*)-'encrypted_credentials'").bind(id).bind(name).bind(body.get("paused").and_then(Value::as_bool)).bind(timezone).fetch_one(&state.db).await?;
+    let mut tx = state.db.begin().await?;
+    crate::schedules::lock_channel(&mut tx, id).await?;
+    let row:Value=sqlx::query_scalar("UPDATE channels SET name=COALESCE($2,name),paused=COALESCE($3,paused),timezone=COALESCE($4,timezone) WHERE id=$1 RETURNING to_jsonb(channels.*)-'encrypted_credentials'").bind(id).bind(name).bind(body.get("paused").and_then(Value::as_bool)).bind(timezone).fetch_one(&mut *tx).await?;
+    tx.commit().await?;
     Ok(data(row))
 }
 pub fn validate_timezone(t: &str) -> Result<chrono_tz::Tz> {
@@ -159,8 +165,9 @@ pub async fn ideas(
 pub async fn create_idea(
     State(state): State<AppState>,
     auth: Auth,
-    Json(body): Json<Value>,
+    Json(input): Json<crate::contracts::CreateIdeaRequest>,
 ) -> Result<Json<Value>> {
+    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     auth.scope("drafts:write")?;
     let brand = uuid(&body, "brand_id")?;
     auth.brand(brand)?;
@@ -171,8 +178,9 @@ pub async fn update_idea(
     State(state): State<AppState>,
     auth: Auth,
     Path(id): Path<Uuid>,
-    Json(body): Json<Value>,
+    Json(input): Json<crate::contracts::UpdateIdeaRequest>,
 ) -> Result<Json<Value>> {
+    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     auth.scope("drafts:write")?;
     let brand: Uuid = sqlx::query_scalar("SELECT brand_id FROM ideas WHERE id=$1")
         .bind(id)

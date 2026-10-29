@@ -61,24 +61,27 @@ pub async fn manual_complete(
     State(state): State<AppState>,
     auth: Auth,
     Path(id): Path<Uuid>,
-    Json(body): Json<Value>,
+    Json(input): Json<crate::contracts::ManualCompleteRequest>,
 ) -> Result<Json<Value>> {
+    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     change(&state, &auth, id, "manual_complete", body).await
 }
 pub async fn reconcile(
     State(state): State<AppState>,
     auth: Auth,
     Path(id): Path<Uuid>,
-    Json(body): Json<Value>,
+    Json(input): Json<crate::contracts::ReconcileRequest>,
 ) -> Result<Json<Value>> {
+    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     change(&state, &auth, id, "reconcile", body).await
 }
 pub async fn reschedule(
     State(state): State<AppState>,
     auth: Auth,
     Path(id): Path<Uuid>,
-    Json(body): Json<Value>,
+    Json(input): Json<crate::contracts::RescheduleRequest>,
 ) -> Result<Json<Value>> {
+    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     change(&state, &auth, id, "reschedule", body).await
 }
 async fn change(
@@ -90,6 +93,11 @@ async fn change(
 ) -> Result<Json<Value>> {
     auth.scope("publishing:write")?;
     let mut tx = state.db.begin().await?;
+    let channel: Uuid = sqlx::query_scalar("SELECT channel_id FROM publications WHERE id=$1")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    crate::schedules::lock_channel(&mut tx, channel).await?;
     let row=sqlx::query("SELECT p.*,c.provider FROM publications p JOIN channels c ON c.id=p.channel_id WHERE p.id=$1 FOR UPDATE OF p").bind(id).fetch_one(&mut *tx).await?;
     auth.brand(row.get("brand_id"))?;
     let current: String = row.get("state");
@@ -138,7 +146,7 @@ async fn change(
             ));
         }
     }
-    sqlx::query("UPDATE publications SET state=$2,scheduled_at=$3,external_id=COALESCE($4,external_id),external_url=COALESCE($5,external_url),last_error=CASE WHEN $2 IN ('queued','published','canceled') THEN NULL ELSE last_error END,lease_until=NULL,updated_at=now() WHERE id=$1").bind(id).bind(target).bind(scheduled_at).bind(body["external_id"].as_str()).bind(external_url).execute(&mut *tx).await?;
+    sqlx::query("UPDATE publications SET state=$2,scheduled_at=$3,external_id=COALESCE($4,external_id),external_url=COALESCE($5,external_url),last_error=CASE WHEN $2 IN ('queued','published','canceled') THEN NULL ELSE last_error END,lease_until=NULL,scheduling_mode=CASE WHEN $6 THEN 'exact' ELSE scheduling_mode END,updated_at=now() WHERE id=$1").bind(id).bind(target).bind(scheduled_at).bind(body["external_id"].as_str()).bind(external_url).bind(action == "reschedule").execute(&mut *tx).await?;
     sqlx::query(
         "INSERT INTO audit_events(id,owner_id,action,subject_id,detail) VALUES($1,$2,$3,$4,$5)",
     )
@@ -158,8 +166,9 @@ async fn change(
 pub async fn reorder(
     State(state): State<AppState>,
     auth: Auth,
-    Json(body): Json<Value>,
+    Json(input): Json<crate::contracts::ReorderQueueRequest>,
 ) -> Result<Json<Value>> {
+    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     auth.scope("publishing:write")?;
     let channel = uuid(&body, "channel_id")?;
     auth.brand(crate::catalog::channel_brand(&state, channel).await?)?;
@@ -167,12 +176,12 @@ pub async fn reorder(
         .map_err(|_| ApiError::bad("publication_ids must be UUIDs"))?;
     let mut tx = state.db.begin().await?;
     crate::schedules::lock_channel(&mut tx, channel).await?;
-    let rows=sqlx::query("SELECT id,scheduled_at FROM publications WHERE channel_id=$1 AND state='queued' ORDER BY scheduled_at,id FOR UPDATE").bind(channel).fetch_all(&mut *tx).await?;
+    let rows=sqlx::query("SELECT id,scheduled_at FROM publications WHERE channel_id=$1 AND state='queued' AND scheduling_mode='queue' ORDER BY scheduled_at,id FOR UPDATE").bind(channel).fetch_all(&mut *tx).await?;
     let actual: std::collections::HashSet<Uuid> = rows.iter().map(|r| r.get("id")).collect();
     let requested: std::collections::HashSet<Uuid> = ids.iter().copied().collect();
     if actual != requested || ids.len() != requested.len() {
         return Err(ApiError::conflict(
-            "Include every queued publication exactly once; reload the queue",
+            "Include every queue-slot publication exactly once; exact-date publications cannot be reordered",
         ));
     }
     // Temporarily leave the partial unique index while holding every row lock; no observer sees this intermediate state.

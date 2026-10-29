@@ -18,8 +18,9 @@ pub async fn list(State(state): State<AppState>, auth: Auth) -> Result<Json<Valu
 pub async fn create(
     State(state): State<AppState>,
     auth: Auth,
-    Json(body): Json<Value>,
+    Json(input): Json<crate::contracts::CreateTokenRequest>,
 ) -> Result<Json<Value>> {
+    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     auth.owner_session()?;
     let name = required(&body, "name")?;
     let scopes: Vec<String> =

@@ -8,13 +8,14 @@ use axum::{
     Json,
     body::Body,
     extract::{Multipart, Path, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde_json::{Value, json};
 use sqlx::Row;
+use tokio::io::AsyncWriteExt;
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
-const MAX_SIZE: usize = 25 * 1024 * 1024;
 fn detect(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
         Some("image/jpeg")
@@ -43,11 +44,21 @@ pub async fn list(
     let rows:Vec<Value>=sqlx::query_scalar("SELECT (to_jsonb(m)-'storage_key')||jsonb_build_object('url','/api/v1/media/'||id||'/file') FROM media m WHERE ($1::uuid IS NULL OR brand_id=$1) AND (cardinality($2::uuid[])=0 OR brand_id=ANY($2)) ORDER BY created_at DESC").bind(filter.brand_id).bind(&auth.brand_ids).fetch_all(&state.db).await?;
     Ok(data(rows))
 }
+pub async fn limits(State(state): State<AppState>, _auth: Auth) -> Result<Json<Value>> {
+    let used: i64 = sqlx::query_scalar("SELECT COALESCE(sum(size),0)::bigint FROM media")
+        .fetch_one(&state.db)
+        .await?;
+    let reserved:i64=sqlx::query_scalar("SELECT COALESCE(sum(reserved_bytes),0)::bigint FROM media_upload_reservations WHERE expires_at>now()").fetch_one(&state.db).await?;
+    Ok(data(
+        json!({"max_upload_bytes":state.config.max_upload_bytes,"quota_bytes":state.config.media_quota_bytes,"used_bytes":used,"reserved_bytes":reserved,"available_bytes":state.config.media_quota_bytes.saturating_sub((used+reserved) as u64)}),
+    ))
+}
 pub async fn upload(
     State(state): State<AppState>,
     auth: Auth,
     Query(filter): Query<Filter>,
-    mut multipart: Multipart,
+    headers: HeaderMap,
+    multipart: Multipart,
 ) -> Result<Json<Value>> {
     auth.scope("drafts:write")?;
     let brand = filter
@@ -61,7 +72,27 @@ pub async fn upload(
     if !exists {
         return Err(ApiError::missing());
     }
-    while let Some(field) = multipart
+    // Reserve a declared request length (an upper bound on the file), or the entire maximum for chunked requests.
+    let reserved = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(state.config.max_upload_bytes)
+        .min(state.config.max_upload_bytes);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(900),
+        receive_upload(&state, brand, reserved, multipart),
+    )
+    .await
+    .map_err(|_| ApiError::bad("Upload timed out after 15 minutes"))?
+}
+async fn receive_upload(
+    state: &AppState,
+    brand: Uuid,
+    reserved: u64,
+    mut multipart: Multipart,
+) -> Result<Json<Value>> {
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|_| ApiError::bad("Invalid multipart upload"))?
@@ -76,30 +107,60 @@ pub async fn upload(
             .filter(|c| !c.is_control() && *c != '/' && *c != '\\')
             .take(200)
             .collect::<String>();
-        let bytes = field
-            .bytes()
-            .await
-            .map_err(|_| ApiError::bad("Upload exceeds the size limit or is incomplete"))?;
-        if bytes.is_empty() || bytes.len() > MAX_SIZE {
-            return Err(ApiError::bad("Upload must be between 1 byte and 25 MiB"));
-        }
-        let mime = detect(&bytes).ok_or_else(|| {
-            ApiError::bad("Only JPEG, PNG, GIF, WebP, MP4 and WebM are supported")
-        })?;
         let id = Uuid::new_v4();
         let key = format!("{id}.bin");
-        let path = state.config.media_dir.join(&key);
-        tokio::fs::write(&path, &bytes)
+        let mut guard = crate::media_storage::reserve(state, id, reserved).await?;
+        let temporary = state.config.media_dir.join(format!(".upload-{id}.part"));
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
             .await
             .map_err(ApiError::internal)?;
-        let result:std::result::Result<Value,sqlx::Error>=sqlx::query_scalar("INSERT INTO media(id,brand_id,name,mime,size,storage_key) VALUES($1,$2,$3,$4,$5,$6) RETURNING (to_jsonb(media.*)-'storage_key')||jsonb_build_object('url','/api/v1/media/'||id||'/file')").bind(id).bind(brand).bind(name).bind(mime).bind(bytes.len() as i64).bind(key).fetch_one(&state.db).await;
-        match result {
-            Ok(row) => return Ok(data(row)),
-            Err(e) => {
-                let _ = tokio::fs::remove_file(path).await;
-                return Err(e.into());
+        let mut size = 0u64;
+        let mut prefix = Vec::with_capacity(64);
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|_| ApiError::bad("Upload exceeds the size limit or is incomplete"))?
+        {
+            size = size.saturating_add(chunk.len() as u64);
+            if size > reserved {
+                return Err(ApiError::bad(format!(
+                    "Upload exceeds its declared length or the {}-byte limit",
+                    state.config.max_upload_bytes
+                )));
             }
+            let sample = (64 - prefix.len()).min(chunk.len());
+            prefix.extend_from_slice(&chunk[..sample]);
+            if prefix.len() == 64 && detect(&prefix).is_none() {
+                return Err(ApiError::bad(
+                    "Only JPEG, PNG, GIF, WebP, MP4 and WebM are supported",
+                ));
+            }
+            file.write_all(&chunk).await.map_err(ApiError::internal)?;
         }
+        if size == 0 {
+            return Err(ApiError::bad("Upload must not be empty"));
+        }
+        let mime = detect(&prefix).ok_or_else(|| {
+            ApiError::bad("Only JPEG, PNG, GIF, WebP, MP4 and WebM are supported")
+        })?;
+        file.sync_all().await.map_err(ApiError::internal)?;
+        drop(file);
+        let mut tx = state.db.begin().await?;
+        crate::media_storage::lock(&mut tx).await?;
+        tokio::fs::rename(&temporary, state.config.media_dir.join(&key))
+            .await
+            .map_err(ApiError::internal)?;
+        let row:Value=sqlx::query_scalar("INSERT INTO media(id,brand_id,name,mime,size,storage_key) VALUES($1,$2,$3,$4,$5,$6) RETURNING (to_jsonb(media.*)-'storage_key')||jsonb_build_object('url','/api/v1/media/'||id||'/file')").bind(id).bind(brand).bind(name).bind(mime).bind(size as i64).bind(key).fetch_one(&mut *tx).await?;
+        sqlx::query("DELETE FROM media_upload_reservations WHERE id=$1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        guard.finish();
+        return Ok(data(row));
     }
     Err(ApiError::bad("Multipart field 'file' is required"))
 }
@@ -113,7 +174,7 @@ pub async fn file(
         .fetch_one(&state.db)
         .await?;
     auth.brand(row.get("brand_id"))?;
-    let bytes = tokio::fs::read(
+    let file = tokio::fs::File::open(
         state
             .config
             .media_dir
@@ -121,8 +182,12 @@ pub async fn file(
     )
     .await
     .map_err(ApiError::internal)?;
+    let size = file.metadata().await.map_err(ApiError::internal)?.len();
     let mime: String = row.get("mime");
-    let mut response = (StatusCode::OK, Body::from(bytes)).into_response();
+    let mut response = (StatusCode::OK, Body::from_stream(ReaderStream::new(file))).into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, size.into());
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         mime.parse().map_err(ApiError::internal)?,
@@ -164,10 +229,10 @@ pub async fn delete(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    if let Err(e) = tokio::fs::remove_file(state.config.media_dir.join(key)).await {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::error!(media_id=%id,error=%e,"orphan media file requires cleanup");
-        }
+    if let Err(e) = tokio::fs::remove_file(state.config.media_dir.join(key)).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::error!(media_id=%id,error=%e,"orphan media file requires cleanup");
     }
     Ok(data(json!({"ok":true})))
 }

@@ -1,16 +1,16 @@
 # beweft API contract
 
-Base `/api/v1`. Success `{ "data": ... }`; failure `{ "error": { "code": "...", "message": "..." } }`. Lists return arrays in `data`. IDs are UUID strings; timestamps RFC3339 UTC. JSON requests set `Content-Type: application/json` and `X-Beweft-Request: 1`. Browser calls use cookie credentials. State-changing browser requests must have matching Origin when present; authenticated cookie mutations require the custom header. All endpoints except auth/status, auth/bootstrap and auth/login need authentication. API tokens use `Authorization: Bearer ...`. Read APIs accept any valid token; writes need listed scope. Tokens may restrict `brand_ids`; UI sessions have all owner access.
+Base `/api/v1`. Success `{ "data": ... }`; failure `{ "error": { "code": "...", "message": "..." } }`. Lists return arrays in `data`. IDs are UUID strings; timestamps RFC3339 UTC. JSON requests set `Content-Type: application/json` and `X-Beweft-Request: 1`. Browser calls use cookie credentials. State-changing browser requests must have matching Origin when present; authenticated cookie mutations require the custom header. All endpoints except auth/status, auth/bootstrap and auth/login need authentication. API tokens use `Authorization: Bearer ...`. Read APIs accept valid tokens except token management; writes need the listed scope. Token listing/creation/revocation and logout require an owner cookie session and reject bearer tokens, including admin tokens. Tokens may restrict `brand_ids`; UI sessions have all owner access.
 
 ## Authentication
 - GET `/auth/status` → `{initialized:boolean}`.
 - POST `/auth/bootstrap` `{setup_secret,email,password}` → `{id,email}` + session cookie. Password minimum 12 characters. Setup secret is `BEWEFT_SETUP_SECRET` on server. Only available before first owner.
 - POST `/auth/login` `{email,password}` → `{id,email}` + session cookie.
 - GET `/auth/me` → `{id,email}`.
-- POST `/auth/logout` `{}` → `{ok:true}`.
-- GET `/tokens` → token metadata array (admin scope).
+- POST `/auth/logout` `{}` → `{ok:true}`. Owner cookie session only.
+- GET `/tokens` → token metadata array. Owner cookie session only.
 - POST `/tokens` `{name,scopes:["read","drafts:write","publishing:write","admin"],brand_ids?:[]}` → `{id,token,name,scopes,brand_ids}`. Secret returned once. Owner sessions only.
-- DELETE `/tokens/:id` → `{ok:true}`.
+- DELETE `/tokens/:id` → `{ok:true}`. Owner cookie session only.
 
 ## Brands and connections
 - GET `/brands`; POST `/brands` `{name,color?:"#8b5cf6"}` → brand. Admin write.
@@ -32,7 +32,8 @@ Base `/api/v1`. Success `{ "data": ... }`; failure `{ "error": { "code": "...", 
 
 ## Media
 - GET `/media?brand_id=UUID` → media array.
-- POST `/media?brand_id=UUID` multipart field `file` → media. Maximum 25 MiB; JPEG/PNG/WebP/GIF/MP4/WebM only. Authentication plus custom header applies to multipart too.
+- GET `/media/limits` → `{max_upload_bytes,quota_bytes,used_bytes,reserved_bytes,available_bytes}`. Storage quota defaults to 10 GiB (`BEWEFT_MEDIA_QUOTA_BYTES`); active uploads reserve capacity atomically. Uploads have a 15-minute deadline.
+- POST `/media?brand_id=UUID` multipart field `file` → media. Maximum `BEWEFT_MAX_UPLOAD_BYTES` (default 256 MiB), streamed to persistent storage; JPEG/PNG/WebP/GIF/MP4/WebM only. Authentication plus custom header applies to multipart too.
 - GET `/media/:id/file` → authenticated file bytes.
 - DELETE `/media/:id` → `{ok:true}`; media referenced by draft or publication cannot be removed.
 - Media `{id,brand_id,name,mime,size,url,created_at}`; `url` is the authenticated file endpoint.
@@ -40,16 +41,16 @@ Base `/api/v1`. Success `{ "data": ... }`; failure `{ "error": { "code": "...", 
 ## Scheduling and outcomes
 - GET `/schedules?channel_id=UUID` → posting rules array.
 - POST `/schedules` `{channel_id,days:[1,2,3,4,5],time:"09:00",timezone:"America/Chicago"}` → rule. Monday=1, Sunday=7. DELETE `/schedules/:id`. Each rule `{id,channel_id,days,time,timezone,created_at}`.
-- POST `/posts/:id/schedule` `{channel_ids:[UUID],scheduled_at?:RFC3339}` → publication array. Omit scheduled_at to reserve each channel's next available posting-rule slot. Requires `publishing:write`. Exact dates must be future (up to five seconds grace); all variants snapshot atomically.
+- POST `/posts/:id/schedule` `{version:number,channel_ids:[UUID],scheduled_at?:RFC3339}` → publication array. Version must match the locked draft; a stale version returns 409 without scheduling. Omit scheduled_at to reserve each channel's next available posting-rule slot. Requires `publishing:write`. Exact dates must be future (up to five seconds grace); all variants snapshot atomically.
 - GET `/publications?brand_id=UUID&channel_id=UUID` → publication array, earliest first. Optional filters.
-- Publication `{id,post_id,brand_id,channel_id,channel_name,provider,post_version,scheduled_at,state,payload,external_id,external_url,last_error,created_at,updated_at}`. `payload` contains immutable `{text,media_ids,title,options}`. States: queued, sending, manual_required, published, failed, uncertain, canceled. Fixture success uses `fixture_complete`, never published.
+- Publication `{id,post_id,brand_id,channel_id,channel_name,provider,post_version,scheduled_at,scheduling_mode,state,payload,external_id,external_url,last_error,created_at,updated_at}`. `payload` contains immutable `{text,media_ids,title,options}`. States: queued, sending, manual_required, published, failed, uncertain, canceled. Fixture success uses `fixture_complete`, never published.
 - GET `/publications/:id/attempts` → durable attempts array with state and errors.
 - POST `/publications/:id/cancel` `{}` → publication; only queued/manual_required/failed may cancel.
 - POST `/publications/:id/manual-complete` `{external_url?:URL,note?:string}` → publication. Manual_required only; owner attestation stored, no verified provider receipt implied.
 - POST `/publications/:id/reconcile` `{resolution:"published"|"not_published",external_id?:string,external_url?:URL,note:string}` → publication. Uncertain only. Published result is owner-confirmed reconciliation; not_published becomes failed and explicitly retryable.
 - POST `/publications/:id/retry` `{}` → publication. Failed only, resets schedule to now and enqueues a new attempt. No automatic uncertain retries.
-- POST `/queue/reorder` `{channel_id,publication_ids:[UUID...]}` → publication array. Complete list of that channel's queued publications required. Preserves allocated times and changes ordering transactionally.
-- POST `/publications/:id/reschedule` `{scheduled_at:RFC3339}` → publication. Queued/manual_required only, optimistic state checks.
+- POST `/queue/reorder` `{channel_id,publication_ids:[UUID...]}` → publication array. Complete list of that channel's `state=queued, scheduling_mode=queue` publications required. Exact-date publications are excluded and keep their dates. Preserves allocated queue slots and changes ordering transactionally.
+- POST `/publications/:id/reschedule` `{scheduled_at:RFC3339}` → publication. Queued/manual_required only, optimistic state checks. Sets scheduling_mode to exact.
 - Publication and schedule mutations require `publishing:write`.
 
 ## Health and honest unsupported surfaces
@@ -77,3 +78,28 @@ These routes belong to the provider integration change; check installed routes/v
 - Channel additionally exposes `{connection_identity:string|null,connection_status:"manual"|"connected"|"reconnect_required"|"disconnected",connection_error:string|null,connected_at:timestamp|null}`. Credentials never appear in channel responses.
 
 Publishing options are immutable per-channel snapshot fields under `options`. Current adapter fields: YouTube `{privacy:"private"|"unlisted"|"public",made_for_kids:boolean,contains_synthetic_media?:boolean,category_id?:string}`; Mastodon `{visibility?:"public"|"unlisted"|"private"|"direct",content_warning?:string,sensitive?:boolean}`; Threads `{reply_control?:"everyone"|"accounts_you_follow"|"mentioned_only"}`; Pinterest `{board_id:string,link?:string}`. The adapter rejects unsupported media formats instead of silently stripping them. Provider descriptions list current format limitations.
+
+### Provider observations and recovery
+
+- POST `/channels/:id/sync` `{allow_metered?:boolean}` → `{metrics_observed,inbox_items,coverage:"partial_recent_page",errors:string[],note}`. Requires `publishing:write`; X refuses reads unless `allow_metered:true` explicitly acknowledges costs. Fetches observations for at most ten local published posts and one recent inbox page (Meta: one page for each of at most ten local posts). No automatic paid polling.
+- GET `/analytics` keeps the local `summary` and returns `availability:"unavailable"|"partial"`, `reason`, and `metrics:[{publication_id,channel_id,provider,text,external_url,observed_at,metrics:[{name,value}]}]`. Provider metrics are never synthesized from local workflow counts.
+- GET `/inbox` returns `availability:"unavailable"|"partial"`, `reason`, `items:[{id,channel_id,channel_name,provider,item:{id,parent_id,author,text,url,created_at},read_at,synced_at,can_reply}]`. Render text as text, never raw HTML; Mastodon content may contain markup.
+- POST `/inbox/:id/read` `{}` → `{ok:true}`.
+- POST `/inbox/:id/reply` `{text,request_id:UUID}` → durable reply `{id,inbox_id,owner_id,text,state,receipt,error,created_at,updated_at}`. Reuse the same request ID when checking a lost response. The server never resends that ID. `state` is sending/published/failed/uncertain. Reply writes need `publishing:write` and can have real public effects.
+- POST `/publications/:id/provider-reconcile` `{}` → updated publication if a provider receipt conclusively proves completion, otherwise `{state:"uncertain",reason}`. Current automatic probes cover YouTube resumable upload completion and Bluesky deterministic record lookup. Absence of proof never marks not-published or retries automatically.
+- GET `/provider-media/:id?token=...` is an expiring provider-fetch capability URL, issued server-side for supported media publication. It must not be logged or shared. It is not the authenticated media library URL.
+
+## Generated contracts
+
+Core JSON handlers deserialize the Rust request types in `crates/server/src/contracts/requests.rs`; OpenAPI derives their required fields, UUID/date formats, and response structures from Rust. Generate the OpenAPI artifact and frontend types from this same source:
+
+```sh
+cargo run -q -p beweft-server --bin beweft-contract > docs/openapi.json
+cargo run -q -p beweft-server --bin beweft-contract -- --typescript > web/src/lib/api-contract.generated.ts
+```
+
+`ApiOperations` maps each method/path to its typed request, response envelope, and query parameters. Binary media responses are explicitly represented as bytes/Blob. Invalid typed JSON returns 422; business validation returns 400. The HTTP integration runner checks actual response bodies against the served schemas.
+
+Queue-slot daylight-saving policy: a nonexistent local time is skipped that day; a repeated local time uses the earlier occurrence only. Existing publications created before scheduling modes were recorded are conservatively retained as exact dates. Explicit rescheduling pins a publication to an exact date.
+
+Local server binding defaults to `127.0.0.1:3000`; container deployments explicitly set `BEWEFT_BIND=0.0.0.0:3000`. HTTP request spans record method and path only, omitting OAuth query parameters. `BEWEFT_FIXTURE_DELAY_MS` is an opt-in fixture-only fault-injection delay (capped at four minutes), used to exercise real worker interruption/restart and independent heartbeat behavior.

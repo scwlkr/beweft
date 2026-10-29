@@ -1,14 +1,22 @@
 # beweft
 
-beweft is planned as an open-source, self-hosted social media manager inspired
-by Buffer. It is intended to let a single owner manage multiple brands and
-bring their own social account connections.
+beweft is an open-source, self-hosted social media manager in active development.
+It gives one owner a workspace for multiple brands and their own social
+connections, with an original unicorn identity.
 
-This repository is bootstrapped for the build. **The application has not been
-implemented**, and no social accounts, publishing workers, or servers have been
-connected for this project.
+The first application slice contains a Rust/Axum API, PostgreSQL storage, and a
+separate durable publishing worker. It supports owner authentication, scoped
+API tokens, brands, drafts, media, posting schedules, manual handoff, and
+publication recovery. The full web interface, direct provider integration and
+self-host packaging are being integrated; this is not yet a complete release.
+
+No live social account or publication has been verified. Fixture results are
+kept distinct from real provider outcomes. The [API contract](docs/api-contract.md)
+and [provider research](docs/research/provider-capabilities.md) describe current
+boundaries. Build the core with `cargo build --workspace`. Integration tests use
+an isolated database; see `crates/server/tests/integration.py` for requirements.
 
 The public-safe [build brief](HANDOFF.md) captures the intended scope. In the
 owner's local project, `.local/HANDOFF.md` holds the complete approved prompt
-for the next build chat; this private file is not required by other users.
+for the build; this private file is not required by other users.
 Project notes are in [w.md](w.md).

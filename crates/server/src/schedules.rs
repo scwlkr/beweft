@@ -27,8 +27,9 @@ pub async fn list(
 pub async fn create(
     State(state): State<AppState>,
     auth: Auth,
-    Json(body): Json<Value>,
+    Json(input): Json<crate::contracts::CreateScheduleRequest>,
 ) -> Result<Json<Value>> {
+    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     auth.scope("publishing:write")?;
     let channel = uuid(&body, "channel_id")?;
     auth.brand(channel_brand(&state, channel).await?)?;
@@ -77,6 +78,14 @@ pub async fn next_slot(tx: &mut Transaction<'_, Postgres>, channel: Uuid) -> Res
         ));
     }
     let now = Utc::now();
+    next_slot_after(tx, channel, rules, now).await
+}
+pub async fn next_slot_after(
+    tx: &mut Transaction<'_, Postgres>,
+    channel: Uuid,
+    rules: Vec<sqlx::postgres::PgRow>,
+    now: DateTime<Utc>,
+) -> Result<DateTime<Utc>> {
     let mut candidates = Vec::new();
     for rule in rules {
         let tz = validate_timezone(&rule.get::<String, _>("timezone"))?;
@@ -126,8 +135,9 @@ pub async fn schedule_post(
     State(state): State<AppState>,
     auth: Auth,
     Path(id): Path<Uuid>,
-    Json(body): Json<Value>,
+    Json(input): Json<crate::contracts::SchedulePostRequest>,
 ) -> Result<Json<Value>> {
+    let body = serde_json::to_value(input).map_err(ApiError::internal)?;
     auth.scope("publishing:write")?;
     let mut channels: Vec<Uuid> = serde_json::from_value(body["channel_ids"].clone())
         .map_err(|_| ApiError::bad("channel_ids must be UUIDs"))?;
@@ -152,6 +162,14 @@ pub async fn schedule_post(
         .await?;
     let brand: Uuid = post.get("brand_id");
     auth.brand(brand)?;
+    let expected_version = body["version"]
+        .as_i64()
+        .ok_or_else(|| ApiError::bad("version is required"))?;
+    if expected_version != i64::from(post.get::<i32, _>("version")) {
+        return Err(ApiError::conflict(
+            "Draft changed; reload before scheduling",
+        ));
+    }
     let variants: Value = post.get("variants");
     let mut ids = Vec::new();
     for channel in channels {
@@ -191,7 +209,7 @@ pub async fn schedule_post(
             .unwrap_or(post.get("options"));
         let payload = json!({"title":post.get::<String,_>("title"),"text":text,"media_ids":media,"options":options});
         let publication = Uuid::new_v4();
-        sqlx::query("INSERT INTO publications(id,post_id,brand_id,channel_id,post_version,scheduled_at,state,payload) VALUES($1,$2,$3,$4,$5,$6,'queued',$7)").bind(publication).bind(id).bind(brand).bind(channel).bind(post.get::<i32,_>("version")).bind(scheduled_at).bind(payload).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO publications(id,post_id,brand_id,channel_id,post_version,scheduled_at,state,payload,scheduling_mode) VALUES($1,$2,$3,$4,$5,$6,'queued',$7,$8)").bind(publication).bind(id).bind(brand).bind(channel).bind(post.get::<i32,_>("version")).bind(scheduled_at).bind(payload).bind(if exact.is_some() { "exact" } else { "queue" }).execute(&mut *tx).await?;
         ids.push(publication);
     }
     tx.commit().await?;

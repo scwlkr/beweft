@@ -11,6 +11,9 @@ pub struct Config {
     pub setup_secret: String,
     pub media_dir: PathBuf,
     pub fixture_enabled: bool,
+    pub max_upload_bytes: u64,
+    pub media_quota_bytes: u64,
+    pub fixture_delay_ms: u64,
     pub encryption_key: Option<[u8; 32]>,
 }
 impl AppState {
@@ -49,6 +52,9 @@ impl AppState {
                 .unwrap_or_else(|_| ".local/media".into())
                 .into(),
             fixture_enabled: std::env::var("BEWEFT_ENABLE_FIXTURES").as_deref() == Ok("true"),
+            max_upload_bytes: env_u64("BEWEFT_MAX_UPLOAD_BYTES", 256 * 1024 * 1024)?,
+            media_quota_bytes: env_u64("BEWEFT_MEDIA_QUOTA_BYTES", 10 * 1024 * 1024 * 1024)?,
+            fixture_delay_ms: env_u64("BEWEFT_FIXTURE_DELAY_MS", 0)?.min(240_000),
             encryption_key: key,
         };
         tokio::fs::create_dir_all(&config.media_dir).await?;
@@ -61,5 +67,16 @@ impl AppState {
             db,
             config: Arc::new(config),
         })
+    }
+}
+
+fn env_u64(key: &str, default: u64) -> anyhow::Result<u64> {
+    match std::env::var(key) {
+        Ok(value) => {
+            let parsed = value.parse::<u64>()?;
+            anyhow::ensure!(parsed <= i64::MAX as u64, "{key} is too large");
+            Ok(parsed)
+        }
+        Err(_) => Ok(default),
     }
 }

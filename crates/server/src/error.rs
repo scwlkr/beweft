@@ -5,6 +5,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 pub type Result<T> = std::result::Result<T, ApiError>;
+#[derive(Debug)]
 pub struct ApiError(pub StatusCode, pub &'static str, pub String);
 impl ApiError {
     pub fn bad(message: impl Into<String>) -> Self {

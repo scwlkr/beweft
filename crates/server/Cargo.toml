@@ -16,7 +16,12 @@ path = "src/main.rs"
 name = "beweft-worker"
 path = "src/worker_main.rs"
 
+[[bin]]
+name = "beweft-contract"
+path = "src/contract_main.rs"
+
 [dependencies]
+tokio-util = { version = "0.7", features = ["io"] }
 anyhow = "1"
 argon2 = "0.5"
 axum = { version = "0.8", features = ["multipart"] }

@@ -1,72 +1,277 @@
+use crate::contracts::*;
 use axum::Json;
 use serde_json::{Value, json};
 #[derive(utoipa::OpenApi)]
-#[openapi(info(
-    title = "beweft API",
-    version = "0.1.0",
-    description = "Self-hosted publishing API. State-changing cookie requests require X-Beweft-Request: 1. See docs/api-contract.md for field descriptions."
-))]
+#[openapi(
+    info(
+        title = "beweft API",
+        version = "0.1.0",
+        description = "Typed self-hosted publishing API. Cookie mutations require X-Beweft-Request: 1. API tokens require appropriate scopes and brand access."
+    ),
+    components(schemas(
+        BootstrapRequest,
+        LoginRequest,
+        TokenScope,
+        CreateTokenRequest,
+        CreateBrandRequest,
+        CreateChannelRequest,
+        UpdateChannelRequest,
+        CreateIdeaRequest,
+        UpdateIdeaRequest,
+        PostVariant,
+        CreatePostRequest,
+        UpdatePostRequest,
+        SchedulePostRequest,
+        CreateScheduleRequest,
+        ReorderQueueRequest,
+        ManualCompleteRequest,
+        Resolution,
+        ReconcileRequest,
+        RescheduleRequest,
+        AuthStatus,
+        Owner,
+        OkResponse,
+        ErrorDetail,
+        ErrorResponse,
+        TokenMetadata,
+        CreatedToken,
+        Brand,
+        Channel,
+        Idea,
+        PostStatus,
+        Post,
+        Media,
+        MediaLimits,
+        ScheduleRule,
+        PublicationState,
+        SchedulingMode,
+        PublicationPayload,
+        Publication,
+        PublicationAttempt,
+        JobHealth,
+        WorkflowSummary,
+        Analytics,
+        Inbox,
+        ProviderDescriptor
+    ))
+)]
 struct ApiDoc;
-/// Build the public operation inventory on the same shared JSON types accepted by handlers.
-pub async fn document() -> Json<Value> {
+// method, route, typed request (empty means no JSON body), typed response, list response.
+const OPERATIONS: &[(&str, &str, &str, &str, bool)] = &[
+    ("get", "/auth/status", "", "AuthStatus", false),
+    (
+        "post",
+        "/auth/bootstrap",
+        "BootstrapRequest",
+        "Owner",
+        false,
+    ),
+    ("post", "/auth/login", "LoginRequest", "Owner", false),
+    ("get", "/auth/me", "", "Owner", false),
+    ("post", "/auth/logout", "", "OkResponse", false),
+    ("get", "/tokens", "", "TokenMetadata", true),
+    (
+        "post",
+        "/tokens",
+        "CreateTokenRequest",
+        "CreatedToken",
+        false,
+    ),
+    ("delete", "/tokens/{id}", "", "OkResponse", false),
+    ("get", "/brands", "", "Brand", true),
+    ("post", "/brands", "CreateBrandRequest", "Brand", false),
+    ("get", "/providers", "", "ProviderDescriptor", true),
+    ("get", "/channels", "", "Channel", true),
+    (
+        "post",
+        "/channels",
+        "CreateChannelRequest",
+        "Channel",
+        false,
+    ),
+    (
+        "patch",
+        "/channels/{id}",
+        "UpdateChannelRequest",
+        "Channel",
+        false,
+    ),
+    ("get", "/ideas", "", "Idea", true),
+    ("post", "/ideas", "CreateIdeaRequest", "Idea", false),
+    ("patch", "/ideas/{id}", "UpdateIdeaRequest", "Idea", false),
+    ("delete", "/ideas/{id}", "", "OkResponse", false),
+    ("get", "/posts", "", "Post", true),
+    ("post", "/posts", "CreatePostRequest", "Post", false),
+    ("get", "/posts/{id}", "", "Post", false),
+    ("patch", "/posts/{id}", "UpdatePostRequest", "Post", false),
+    ("delete", "/posts/{id}", "", "OkResponse", false),
+    (
+        "post",
+        "/posts/{id}/schedule",
+        "SchedulePostRequest",
+        "Publication",
+        true,
+    ),
+    ("get", "/media", "", "Media", true),
+    ("post", "/media", "multipart", "Media", false),
+    ("get", "/media/limits", "", "MediaLimits", false),
+    ("delete", "/media/{id}", "", "OkResponse", false),
+    ("get", "/media/{id}/file", "", "binary", false),
+    ("get", "/schedules", "", "ScheduleRule", true),
+    (
+        "post",
+        "/schedules",
+        "CreateScheduleRequest",
+        "ScheduleRule",
+        false,
+    ),
+    ("delete", "/schedules/{id}", "", "OkResponse", false),
+    ("get", "/publications", "", "Publication", true),
+    (
+        "get",
+        "/publications/{id}/attempts",
+        "",
+        "PublicationAttempt",
+        true,
+    ),
+    (
+        "post",
+        "/publications/{id}/cancel",
+        "",
+        "Publication",
+        false,
+    ),
+    ("post", "/publications/{id}/retry", "", "Publication", false),
+    (
+        "post",
+        "/publications/{id}/manual-complete",
+        "ManualCompleteRequest",
+        "Publication",
+        false,
+    ),
+    (
+        "post",
+        "/publications/{id}/reconcile",
+        "ReconcileRequest",
+        "Publication",
+        false,
+    ),
+    (
+        "post",
+        "/publications/{id}/reschedule",
+        "RescheduleRequest",
+        "Publication",
+        false,
+    ),
+    (
+        "post",
+        "/queue/reorder",
+        "ReorderQueueRequest",
+        "Publication",
+        true,
+    ),
+    ("get", "/jobs/health", "", "JobHealth", false),
+    ("get", "/analytics", "", "Analytics", false),
+    ("get", "/inbox", "", "Inbox", false),
+];
+fn reference(name: &str) -> Value {
+    json!({"$ref":format!("#/components/schemas/{name}")})
+}
+pub fn build_document() -> Value {
     use utoipa::OpenApi;
     let mut document = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serialization");
     let mut paths = serde_json::Map::new();
-    for (path, methods) in [
-        ("/auth/status", "get"),
-        ("/auth/bootstrap", "post"),
-        ("/auth/login", "post"),
-        ("/auth/me", "get"),
-        ("/auth/logout", "post"),
-        ("/tokens", "get post"),
-        ("/tokens/{id}", "delete"),
-        ("/brands", "get post"),
-        ("/providers", "get"),
-        ("/channels", "get post"),
-        ("/channels/{id}", "patch"),
-        ("/ideas", "get post"),
-        ("/ideas/{id}", "patch delete"),
-        ("/posts", "get post"),
-        ("/posts/{id}", "get patch delete"),
-        ("/posts/{id}/schedule", "post"),
-        ("/media", "get post"),
-        ("/media/{id}", "delete"),
-        ("/media/{id}/file", "get"),
-        ("/schedules", "get post"),
-        ("/schedules/{id}", "delete"),
-        ("/publications", "get"),
-        ("/publications/{id}/attempts", "get"),
-        ("/publications/{id}/cancel", "post"),
-        ("/publications/{id}/retry", "post"),
-        ("/publications/{id}/manual-complete", "post"),
-        ("/publications/{id}/reconcile", "post"),
-        ("/publications/{id}/reschedule", "post"),
-        ("/queue/reorder", "post"),
-        ("/jobs/health", "get"),
-        ("/analytics", "get"),
-        ("/inbox", "get"),
-    ] {
-        let mut operations = serde_json::Map::new();
-        for method in methods.split_whitespace() {
-            let mut operation = json!({"operationId":format!("{}_{}",method,path.replace('/',"_").replace(['{','}'],"")),"responses":{"200":{"description":"Success","content":{"application/json":{"schema":{"type":"object","required":["data"],"properties":{"data":{}}}}}},"400":{"description":"Validation failure"},"401":{"description":"Authentication required"},"403":{"description":"Insufficient scope or brand access"},"409":{"description":"State or version conflict"}}});
-            if path.contains("{id}") {
-                operation["parameters"] = json!([{"name":"id","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}]);
+    for &(method, path, request, response, list) in OPERATIONS {
+        let response_schema = if list {
+            json!({"type":"array","items":reference(response)})
+        } else {
+            reference(response)
+        };
+        let content = if response == "binary" {
+            let mut media = serde_json::Map::new();
+            for mime in [
+                "image/jpeg",
+                "image/png",
+                "image/gif",
+                "image/webp",
+                "video/mp4",
+                "video/webm",
+            ] {
+                media.insert(
+                    mime.into(),
+                    json!({"schema":{"type":"string","format":"binary"}}),
+                );
             }
-            if !["/auth/status", "/auth/bootstrap", "/auth/login"].contains(&path) {
-                operation["security"] = json!([{"session":[]},{"bearer":[]}]);
-            }
-            if ["post", "patch"].contains(&method) {
-                operation["requestBody"] = if path == "/media" {
-                    json!({"required":true,"content":{"multipart/form-data":{"schema":{"type":"object","required":["file"],"properties":{"file":{"type":"string","format":"binary"}}}}}})
-                } else {
-                    json!({"content":{"application/json":{"schema":{"type":"object","additionalProperties":true}}}})
-                };
-            }
-            operations.insert(method.into(), operation);
+            Value::Object(media)
+        } else {
+            json!({"application/json":{"schema":{"type":"object","required":["data"],"properties":{"data":response_schema}}}})
+        };
+        let mut operation = json!({"operationId":format!("{}_{}",method,path.replace('/',"_").replace(['{','}'],"")),"responses":{"200":{"description":"Success","content":content}}});
+        for (status, description) in [
+            ("400", "Invalid input"),
+            ("401", "Authentication required"),
+            ("403", "Scope, brand or origin denied"),
+            ("404", "Record not found"),
+            ("409", "Version, state or slot conflict"),
+            ("413", "Request exceeds configured limit"),
+            ("422", "Typed request validation failed"),
+            ("429", "Too many authentication attempts"),
+            ("500", "Internal failure"),
+        ] {
+            operation["responses"][status] = json!({"description":description,"content":{"application/json":{"schema":reference("ErrorResponse")}}});
         }
-        paths.insert(format!("/api/v1{path}"), Value::Object(operations));
+        let mut parameters = Vec::new();
+        if path.contains("{id}") {
+            parameters.push(json!({"name":"id","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}));
+        }
+        if (method == "get"
+            && [
+                "/channels",
+                "/ideas",
+                "/posts",
+                "/media",
+                "/publications",
+                "/analytics",
+                "/inbox",
+            ]
+            .contains(&path))
+            || (method == "post" && path == "/media")
+        {
+            parameters.push(json!({"name":"brand_id","in":"query","required":method=="post","schema":{"type":"string","format":"uuid"}}));
+        }
+        if method == "get" && ["/schedules", "/publications"].contains(&path) {
+            parameters.push(json!({"name":"channel_id","in":"query","required":path=="/schedules","schema":{"type":"string","format":"uuid"}}));
+        }
+        if method != "get" {
+            parameters.push(json!({"name":"X-Beweft-Request","in":"header","required":false,"description":"Must equal 1 for cookie-authenticated mutations and bootstrap/login. Bearer requests do not require it.","schema":{"type":"string","enum":["1"]}}));
+        }
+        if !parameters.is_empty() {
+            operation["parameters"] = json!(parameters);
+        }
+        if ["/auth/logout", "/tokens", "/tokens/{id}"].contains(&path) {
+            operation["security"] = json!([{"session":[]}]);
+            operation["description"] = json!(
+                "Requires an owner cookie session. API bearer tokens are rejected even with admin scope."
+            );
+        } else if !["/auth/status", "/auth/bootstrap", "/auth/login"].contains(&path) {
+            operation["security"] = json!([{"session":[]},{"bearer":[]}]);
+        }
+        if !request.is_empty() {
+            operation["requestBody"] = if request == "multipart" {
+                json!({"required":true,"content":{"multipart/form-data":{"schema":{"type":"object","required":["file"],"properties":{"file":{"type":"string","format":"binary"}}}}}})
+            } else {
+                json!({"required":true,"content":{"application/json":{"schema":reference(request)}}})
+            };
+        }
+        let entry = paths
+            .entry(format!("/api/v1{path}"))
+            .or_insert_with(|| json!({}));
+        entry[method] = operation;
     }
     document["paths"] = Value::Object(paths);
-    document["components"] = json!({"securitySchemes":{"session":{"type":"apiKey","in":"cookie","name":"beweft_session"},"bearer":{"type":"http","scheme":"bearer"}}});
-    Json(document)
+    document["components"]["securitySchemes"] = json!({"session":{"type":"apiKey","in":"cookie","name":"beweft_session"},"bearer":{"type":"http","scheme":"bearer"}});
+    document
+}
+pub async fn document() -> Json<Value> {
+    Json(build_document())
 }
