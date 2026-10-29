@@ -21,8 +21,10 @@ import {
   type Publication,
 } from "./api";
 import { routeFromHash, type Route } from "./navigation";
+type LoadArea = "brands" | "collections" | "providers" | "health";
+
 export function useWorkspace() {
-  const [ready, setReady] = useState<boolean | null>(null);
+  const [ready, setReadyState] = useState<boolean | null>(null);
   const [route, setRoute] = useState<Route>(routeFromHash);
   const [brands, setBrands] = useState<Brand[]>([]);
   const [brandId, setBrandId] = useState(
@@ -37,6 +39,9 @@ export function useWorkspace() {
   const [health, setHealth] = useState<Health | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [loadErrors, setLoadErrors] = useState<
+    Partial<Record<LoadArea, string>>
+  >({});
   const [toast, setToast] = useState("");
   const [pending, setPending] = useState(false);
   const [sidebar, setSidebar] = useState(false);
@@ -48,10 +53,59 @@ export function useWorkspace() {
   const [theme, setTheme] = useState(
     localStorage.getItem("beweft.theme") ?? "system",
   );
-  const generation = useRef(0);
+  const readyRef = useRef<boolean | null>(null);
+  const session = useRef(0);
+  const selection = useRef(0);
+  const requests = useRef(0);
+  const applied = useRef<Record<LoadArea, number>>({
+    brands: 0,
+    collections: 0,
+    providers: 0,
+    health: 0,
+  });
+  const reported = useRef<Record<LoadArea, number>>({
+    brands: 0,
+    collections: 0,
+    providers: 0,
+    health: 0,
+  });
+  const finishedLoading = useRef(0);
+  const actionGeneration = useRef(0);
   const context = useRef(brandId);
-  context.current = brandId;
   const brand = brands.find((b) => b.id === brandId);
+  const clearBrandData = useCallback(() => {
+    setChannels([]);
+    setPosts([]);
+    setIdeas([]);
+    setMedia([]);
+    setPublications([]);
+    setComposer(undefined);
+  }, []);
+  const setReady = useCallback(
+    (value: boolean) => {
+      if (readyRef.current === value) return;
+      readyRef.current = value;
+      ++session.current;
+      if (!value) {
+        ++selection.current;
+        ++actionGeneration.current;
+        clearBrandData();
+        setBrands([]);
+        setProviders([]);
+        setHealth(null);
+        setPending(false);
+        setBrandOpen(false);
+        setSidebar(false);
+        setSearch("");
+        setToast("");
+        setError("");
+        setLoadErrors({});
+        setLoading(true);
+      }
+      setReadyState(value);
+    },
+    [clearBrandData],
+  );
   useEffect(() => {
     api("/auth/me", z.object({ id: z.string(), email: z.string() }))
       .then(() => setReady(true))
@@ -62,7 +116,7 @@ export function useWorkspace() {
           setError(e.message);
         }
       });
-  }, []);
+  }, [setReady]);
   useEffect(() => {
     const listener = () => setRoute(routeFromHash());
     window.addEventListener("hashchange", listener);
@@ -83,41 +137,76 @@ export function useWorkspace() {
     const t = setTimeout(() => setToast(""), 5000);
     return () => clearTimeout(t);
   }, [toast]);
-  const chooseBrand = useCallback((id: string) => {
-    ++generation.current;
-    context.current = id;
-    setError("");
-    setToast("");
-    setChannels([]);
-    setPosts([]);
-    setIdeas([]);
-    setMedia([]);
-    setPublications([]);
-    setComposer(undefined);
-    setBrandId(id);
-    localStorage.setItem("beweft.brand", id);
-    setSidebar(false);
-    setSearch("");
-    setLoading(true);
-  }, []);
+  const chooseBrand = useCallback(
+    (id: string) => {
+      ++selection.current;
+      context.current = id;
+      setError("");
+      setLoadErrors({});
+      setToast("");
+      clearBrandData();
+      setBrandId(id);
+      localStorage.setItem("beweft.brand", id);
+      setSidebar(false);
+      setSearch("");
+      setLoading(true);
+    },
+    [clearBrandData],
+  );
   const load = useCallback(async () => {
     if (!ready || context.current !== brandId) return;
-    const current = ++generation.current;
-    setLoading(true);
-    try {
-      const brandRequest = api("/brands", z.array(BrandSchema));
-      // Handle metadata rejection immediately, even if the brand list is slow
-      // or triggers a transition before the metadata has settled.
-      const metadataRequest = Promise.all([
-        api("/providers", z.array(ProviderSchema)),
-        api("/jobs/health", HealthSchema),
-      ]).then(
-        (value) => ({ ok: true as const, value }),
-        (error: unknown) => ({ ok: false as const, error }),
+    const requestId = ++requests.current;
+    const sessionId = session.current;
+    const selectionId = selection.current;
+    const currentSession = () =>
+      readyRef.current === true && session.current === sessionId;
+    const currentSelection = () =>
+      currentSession() &&
+      selection.current === selectionId &&
+      context.current === brandId;
+    const watchAuth = <T>(promise: Promise<T>) =>
+      promise.catch((e: unknown) => {
+        if (e instanceof ApiError && e.status === 401 && currentSession())
+          setReady(false);
+        throw e;
+      });
+    const report = (area: LoadArea, message: string) => {
+      if (!currentSelection() || requestId < reported.current[area]) return;
+      reported.current[area] = requestId;
+      setLoadErrors((previous) => ({ ...previous, [area]: message }));
+    };
+    const apply = (area: LoadArea, update: () => void) => {
+      if (!currentSelection() || requestId < applied.current[area])
+        return false;
+      applied.current[area] = requestId;
+      update();
+      return true;
+    };
+    const metadata = <T>(
+      area: "providers" | "health",
+      promise: Promise<T>,
+      update: (value: T) => void,
+    ) => {
+      void watchAuth(promise).then(
+        (value) => {
+          apply(area, () => update(value));
+          report(area, "");
+        },
+        (e: unknown) => report(area, (e as Error).message),
       );
-      const bs = await brandRequest;
-      if (current !== generation.current) return;
-      setBrands(bs);
+    };
+    setLoading(true);
+    metadata(
+      "providers",
+      api("/providers", z.array(ProviderSchema)),
+      setProviders,
+    );
+    metadata("health", api("/jobs/health", HealthSchema), setHealth);
+    let area: LoadArea = "brands";
+    try {
+      const bs = await watchAuth(api("/brands", z.array(BrandSchema)));
+      if (!apply("brands", () => setBrands(bs))) return;
+      report("brands", "");
       const next = bs.some((b) => b.id === brandId)
         ? brandId
         : (bs[0]?.id ?? "");
@@ -125,44 +214,36 @@ export function useWorkspace() {
         chooseBrand(next);
         return;
       }
-      const metadata = await metadataRequest;
-      if (current !== generation.current) return;
-      if (!metadata.ok) throw metadata.error;
-      const [ps, h] = metadata.value;
-      setProviders(ps);
-      setHealth(h);
+      area = "collections";
       if (next) {
         const q = `?brand_id=${encodeURIComponent(next)}`;
         const [cs, posts, ins, ms, pubs] = await Promise.all([
-          api(`/channels${q}`, z.array(ChannelSchema)),
-          api(`/posts${q}`, z.array(PostSchema)),
-          api(`/ideas${q}`, z.array(IdeaSchema)),
-          api(`/media${q}`, z.array(MediaSchema)),
-          api(`/publications${q}`, z.array(PublicationSchema)),
+          watchAuth(api(`/channels${q}`, z.array(ChannelSchema))),
+          watchAuth(api(`/posts${q}`, z.array(PostSchema))),
+          watchAuth(api(`/ideas${q}`, z.array(IdeaSchema))),
+          watchAuth(api(`/media${q}`, z.array(MediaSchema))),
+          watchAuth(api(`/publications${q}`, z.array(PublicationSchema))),
         ]);
-        if (current !== generation.current) return;
-        setChannels(cs);
-        setPosts(posts);
-        setIdeas(ins);
-        setMedia(ms);
-        setPublications(pubs);
+        apply("collections", () => {
+          setChannels(cs);
+          setPosts(posts);
+          setIdeas(ins);
+          setMedia(ms);
+          setPublications(pubs);
+        });
       } else {
-        setChannels([]);
-        setPosts([]);
-        setIdeas([]);
-        setMedia([]);
-        setPublications([]);
+        apply("collections", clearBrandData);
       }
-      setError("");
-    } catch (e) {
-      if (current === generation.current) {
-        if (e instanceof ApiError && e.status === 401) setReady(false);
-        else setError((e as Error).message);
-      }
+      report("collections", "");
+    } catch (e: unknown) {
+      report(area, (e as Error).message);
     } finally {
-      if (current === generation.current) setLoading(false);
+      if (currentSelection() && requestId >= finishedLoading.current) {
+        finishedLoading.current = requestId;
+        setLoading(false);
+      }
     }
-  }, [ready, brandId, chooseBrand]);
+  }, [ready, brandId, chooseBrand, clearBrandData, setReady]);
   useEffect(() => {
     void load();
   }, [load]);
@@ -173,20 +254,34 @@ export function useWorkspace() {
   }, [ready, load]);
   const action = async (fn: () => Promise<unknown>, message = "Saved") => {
     if (pending) return false;
+    const actionId = ++actionGeneration.current;
+    const sessionId = session.current;
+    const selectionId = selection.current;
+    const currentAction = () =>
+      readyRef.current === true &&
+      session.current === sessionId &&
+      selection.current === selectionId;
     setPending(true);
     setError("");
     try {
       await fn();
-      if (context.current !== brandId) return false;
+      if (!currentAction()) return false;
       await load();
-      if (context.current !== brandId) return false;
+      if (!currentAction()) return false;
       setToast(message);
       return true;
-    } catch (e) {
-      if (context.current === brandId) setError((e as Error).message);
+    } catch (e: unknown) {
+      if (
+        e instanceof ApiError &&
+        e.status === 401 &&
+        readyRef.current &&
+        session.current === sessionId
+      )
+        setReady(false);
+      else if (currentAction()) setError((e as Error).message);
       return false;
     } finally {
-      setPending(false);
+      if (actionGeneration.current === actionId) setPending(false);
     }
   };
   const go = (r: Route) => {
@@ -209,7 +304,13 @@ export function useWorkspace() {
     providers,
     health,
     loading,
-    error,
+    error:
+      error ||
+      loadErrors.brands ||
+      loadErrors.collections ||
+      loadErrors.providers ||
+      loadErrors.health ||
+      "",
     toast,
     pending,
     sidebar,
