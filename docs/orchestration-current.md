@@ -6,7 +6,7 @@ qualification or completed release is claimed.
 
 ## Integration
 
-Integration branch: `codex/orchestrator-handoff`, provider-wiring merge `f2ad5a5`.
+Integration branch: `codex/orchestrator-handoff`, scheduling-recovery merge `d0681e4`.
 Main remains at durable-core PR #3. Open PRs #4–#8 preserve the original stack.
 Reviewed additions land through merge commits; the completed stack will land
 without squashing an ancestor beneath open descendants.
@@ -50,8 +50,8 @@ three active children plus the orchestrator. Each milestone freezes its SHA.
 | Lane | Checkpoint | Next acceptance boundary |
 | --- | --- | --- |
 | Core/providers A+B | PR #20 merged `f2ad5a5`; X video milestone started | Current v2 streaming upload, durable stages and uncertainty handling; thread media needs an explicit snapshot contract afterward. |
-| Web C | PR #14 at `a22550d`, fresh review in progress; #15 and #16 merged | Previous review found discarded partial IDs and preference recovery/fencing issues. The correction candidate also replaces a timing-sensitive aggregate owner-test assertion with per-request checks. Preserved manual guidance awaits integration. |
-| CLI/operations D+E | PR #18 correction after `f65402d` | Recovery, controlled state and subprocess supervision passed targeted review. The remaining initializer helper needs a durable operation identity and exact cleanup across interruption. |
+| Web C | PR #14 merged `d0681e4`; fresh connection/recovery UI milestone | Common scheduling recovery and correction choices passed practical review. One uncommon contradictory-response P2 is recorded in delivery.md. Current provider disconnect/reply and manual handoff controls are next. |
+| CLI/operations D+E | PR #18 frozen `fdc937f`, fresh practical review | Final-source installation/restore/rollback rehearsal passed; review is verifying affected helper cleanup and normal restore behavior. Real schema-changing upgrade remains pending. |
 
 PR #20 now wires the production provider routes and worker, durable terminal
 schedule rejection/retirement receipts, and reply revision/active-executor fences.
@@ -155,3 +155,9 @@ application upgrade and matching backup restore/rollback rehearsal. Preserve the
 old dev data. Merge the original PR stack with its ancestry intact, keep capability
 and operator docs current, then retire owned disposable resources. No physical
 host reboot, live account qualification or public provider publication is claimed.
+
+The owner set a practical local release target of 16:30 America/Chicago today.
+Keep the full intended scope; prioritize usable workflows and serious practical
+defects, and record unlikely recoverable hardening follow-ups. New milestones
+rotate to fresh implementer contexts. The original primary scope is not marked
+complete merely because a useful release checkpoint is delivered.

@@ -72,3 +72,20 @@ network without a supported public API require explicit manual preparation.
 
 The final delivery must name unsupported actions precisely. A missing adapter
 implementation is local unfinished work, not a provider-access blocker.
+
+## Practical release checkpoint
+
+The local release target is 2026-10-29 at 16:30 America/Chicago. Full product
+scope remains open: prioritize working owner workflows, common failures, safe
+uncertain outcomes and a useful installation. Fresh review still blocks serious
+practical defects; uncommon recoverable cases are recorded rather than used to
+repeat broad hardening loops. A release checkpoint does not qualify untested
+provider formats or complete unfinished functionality.
+
+PR #14 merged at `d0681e4`, reviewed at `a22550d`. Its nonblocking P2 follow-up:
+when one field makes a publication row malformed, contradictory valid fields
+can be ignored. Reproductions required subsequent inconsistent/fabricated API
+lookup and receipt responses; no duplicate public post was demonstrated. Common
+lost-response recovery passed. Retain partial identity observations field by
+field in a later narrow correction; do not claim every contradictory-response
+combination is covered.
