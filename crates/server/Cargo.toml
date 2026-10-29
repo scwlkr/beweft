@@ -21,6 +21,7 @@ name = "beweft-contract"
 path = "src/contract_main.rs"
 
 [dependencies]
+beweft-providers = { path = "../providers" }
 tokio-util = { version = "0.7", features = ["io"] }
 anyhow = "1"
 argon2 = "0.5"
@@ -42,3 +43,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[features]
+provider-fixtures = []
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

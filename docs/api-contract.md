@@ -1,5 +1,7 @@
 # beweft API contract
 
+Additional implemented content and account workflows are specified in [workflows-api.md](workflows-api.md).
+
 Base `/api/v1`. Success `{ "data": ... }`; failure `{ "error": { "code": "...", "message": "..." } }`. Lists return arrays in `data`. IDs are UUID strings; timestamps RFC3339 UTC. JSON requests set `Content-Type: application/json` and `X-Beweft-Request: 1`. Browser calls use cookie credentials. State-changing browser requests must have matching Origin when present; authenticated cookie mutations require the custom header. All endpoints except auth/status, auth/bootstrap and auth/login need authentication. API tokens use `Authorization: Bearer ...`. Read APIs accept valid tokens except token management; writes need the listed scope. Token listing/creation/revocation and logout require an owner cookie session and reject bearer tokens, including admin tokens. Tokens may restrict `brand_ids`; UI sessions have all owner access.
 
 ## Authentication
@@ -14,7 +16,7 @@ Base `/api/v1`. Success `{ "data": ... }`; failure `{ "error": { "code": "...", 
 
 ## Brands and connections
 - GET `/brands`; POST `/brands` `{name,color?:"#8b5cf6"}` → brand. Admin write.
-- Brand `{id,name,color,created_at}`.
+- Brand `{id,name,color,archived_at,created_at}`. Archived brands are hidden unless include_archived=true.
 - GET `/providers` → capability descriptors. Provider status truthfully distinguishes implementation, configuration, execution, and verification; unavailable adapters cannot be connected.
 - GET `/channels?brand_id=UUID`; POST `/channels` `{brand_id,name,provider:"manual",timezone?:"America/Chicago"}` → channel. Admin write. `fixture` is accepted only with explicit server opt-in and remains labeled fixture.
 - PATCH `/channels/:id` `{name?,paused?,timezone?}` → channel. Admin write.
@@ -36,7 +38,7 @@ Base `/api/v1`. Success `{ "data": ... }`; failure `{ "error": { "code": "...", 
 - POST `/media?brand_id=UUID` multipart field `file` → media. Maximum `BEWEFT_MAX_UPLOAD_BYTES` (default 256 MiB), streamed to persistent storage; JPEG/PNG/WebP/GIF/MP4/WebM only. Authentication plus custom header applies to multipart too.
 - GET `/media/:id/file` → authenticated file bytes.
 - DELETE `/media/:id` → `{ok:true}`; media referenced by draft or publication cannot be removed.
-- Media `{id,brand_id,name,mime,size,url,created_at}`; `url` is the authenticated file endpoint.
+- Media `{id,brand_id,name,mime,size,url,alt_text,created_at}`; `url` is the authenticated file endpoint.
 
 ## Scheduling and outcomes
 - GET `/schedules?channel_id=UUID` → posting rules array.
@@ -103,3 +105,23 @@ cargo run -q -p beweft-server --bin beweft-contract -- --typescript > web/src/li
 Queue-slot daylight-saving policy: a nonexistent local time is skipped that day; a repeated local time uses the earlier occurrence only. Existing publications created before scheduling modes were recorded are conservatively retained as exact dates. Explicit rescheduling pins a publication to an exact date.
 
 Local server binding defaults to `127.0.0.1:3000`; container deployments explicitly set `BEWEFT_BIND=0.0.0.0:3000`. HTTP request spans record method and path only, omitting OAuth query parameters. `BEWEFT_FIXTURE_DELAY_MS` is an opt-in fixture-only fault-injection delay (capped at four minutes), used to exercise real worker interruption/restart and independent heartbeat behavior.
+
+Provider safety additions:
+
+- Channel `capabilities.permissions` is `{source,reported_scopes,actions,note}`. Each action (`publish`, `media`, `metrics`, `inbox`, `reply`) is `{status:"granted"|"missing"|"unknown",required_scopes:string[],missing_scopes:string[]|null}`. Capability implementation and observed scope grants are distinct. Unknown is not verified permission. Missing required scope blocks the corresponding operation.
+- Inbox `item.reply_context` is nullable `{visibility:string,recipients:{id:string,acct:string}[]}`. For Mastodon, private/direct sources produce direct replies only to these participants. Public/unlisted retain their visibility. The reply request body remains `{text,request_id}`; added `@` mentions are rejected.
+- `GET /publications/{id}/provider-status` returns `{session_expired:boolean,reset_allowed:boolean,reason:string|null}` without exposing resumable URLs or credentials.
+- `POST /publications/{id}/provider-reconcile` additionally returns `{state:"uncertain",session_expired:true,reason}` for an expired YouTube session. This is not proof of nonpublication.
+- `POST /publications/{id}/reset-expired-session` requires an owner browser session, failed publication, expired-session receipt and a later owner `not_published` reconciliation. Returns `{state:"failed",session_reset:true,next_action:string}`; use the existing explicit retry action afterward. Otherwise 409. Reset never schedules a replacement automatically.
+
+Worker integration: `provider_bridge::publish` requires the immutable publication JSON plus `attempt_id` containing the UUID already persisted by its current worker claim. All worker completion data, including provider IDs/URLs, must be committed through the same attempt-fenced completion transaction. Checkpoints are written only while that attempt remains sending with an unexpired lease.
+
+Durable reply recovery:
+
+- `GET /inbox/{id}/replies` is read-only and returns an owner-scoped array of durable reply attempts `{id,inbox_id,text,state,receipt,error,created_at,updated_at}`, newest first (up to 100). Sending attempts past their stored delivery deadline are projected as `uncertain`; reading never sends or mutates a reply. Load this before enabling a new reply, including after reopening a conversation or switching browsers.
+- `POST /inbox/{id}/reply` reuses the supplied UUID for recovery. A fresh UUID receives 409 while **any** sending/uncertain attempt exists for that inbox item. The guard and claim are atomic under the channel lock, so concurrent tabs cannot bypass it.
+- `POST /inbox/{id}/replies/{request_id}/resolve` requires an owner browser session and `{resolution:"published"|"not_published",note:string,external_url?:string}`. It accepts uncertain or expired sending attempts, records an owner attestation in the receipt and audit log, and returns the durable reply row. Published becomes `published`; not-published becomes `failed`. Resolution never sends a request to the network. A new reply after not-published requires another explicit user action.
+
+Reply-history watermark: a new `POST /inbox/{id}/reply` includes `expected_last_request_id: UUID|null`, taken from the first row of the latest acknowledged `GET /inbox/{id}/replies`, or null for empty history. Omitted means null and therefore requires empty history. Under the same claim lock, the server compares this watermark with the latest durable attempt before claiming a fresh UUID. A mismatch returns HTTP 409 with `error.code="reply_history_changed"`; refresh history and require explicit confirmation, never automatically retry with another UUID. Reusing an already stored request UUID returns its original result before the watermark check. History uses a durable insertion sequence, so lock waits and clock changes cannot make a newer claim appear older. The unresolved-attempt guard still applies independently.
+
+Reply claim timing: new attempts store `created_at=clock_timestamp()` and an internal `delivery_deadline` 90 seconds after the actual claim. HTTP delivery uses that same absolute deadline. Lock waits and credential refresh do not count as time in flight; GET recovery, disconnect, new-reply guards and owner resolution all use the stored deadline, not the display timestamp. The public reply-row shape is unchanged.
