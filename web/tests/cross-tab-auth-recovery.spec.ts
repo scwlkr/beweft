@@ -378,7 +378,8 @@ test("direct owner lookup in an old editor waits for the credential transition",
       await signIn(other);
       await loginStarted.promise;
       await old.getByRole("button", { name: "Reply", exact: true }).click();
-      await expect(old.getByLabel("Your reply")).toBeDisabled();
+      await expect(old.getByRole("dialog")).toHaveCount(0);
+      await expect(old.getByLabel("Email address")).toBeVisible();
       expect(ownerChecks).toBe(0);
       releaseLogin.resolve();
       await expect(other.getByLabel("Current brand")).toHaveValue(brand.id);
@@ -706,5 +707,411 @@ test("losing site storage clears an open editor and reports how to recover", asy
     await expect(
       page.getByText("Private content", { exact: true }),
     ).toHaveCount(0);
+  });
+});
+
+async function replySessionFixture(
+  old: Page,
+  context: BrowserContext,
+  write: (path: string, body: unknown) => Promise<any>,
+) {
+  await holdIdentityEvents(old);
+  const { brand, other } = await fixture(old, context, write);
+  const itemId = crypto.randomUUID(),
+    channelId = crypto.randomUUID();
+  const owner = await (await context.request.get("/api/v1/auth/me")).json();
+  const key = `beweft.pending-reply:${owner.data.id}:${brand.id}:${channelId}:${itemId}`;
+  await context.route("**/api/v1/inbox?*", (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          availability: "partial",
+          items: [
+            {
+              id: itemId,
+              channel_id: channelId,
+              channel_name: "Fixture",
+              provider: "mastodon",
+              item: {
+                id: "remote",
+                author: "Fixture author",
+                text: "Fixture conversation",
+              },
+              read_at: null,
+              synced_at: new Date().toISOString(),
+              can_reply: true,
+            },
+          ],
+        },
+      },
+    }),
+  );
+  return { brand, other, itemId, key };
+}
+
+async function holdReplyLock(page: Page, key: string) {
+  await page.evaluate((lockKey) => {
+    const state = window as typeof window & {
+      releaseReplyLock: () => void;
+      replyLockHeld: Promise<void>;
+    };
+    let release!: () => void, held!: () => void;
+    const wait = new Promise<void>((resolve) => (release = resolve));
+    state.replyLockHeld = new Promise<void>((resolve) => (held = resolve));
+    state.releaseReplyLock = release;
+    void navigator.locks.request(lockKey, async () => {
+      held();
+      await wait;
+    });
+  }, key);
+  await page.evaluate(
+    () =>
+      (window as typeof window & { replyLockHeld: Promise<void> })
+        .replyLockHeld,
+  );
+}
+
+async function releaseReplyLock(page: Page) {
+  await page.evaluate(() =>
+    (
+      window as typeof window & { releaseReplyLock?: () => void }
+    ).releaseReplyLock?.(),
+  );
+}
+
+async function waitForReplyLock(page: Page, key: string) {
+  await expect
+    .poll(() =>
+      page.evaluate(
+        async (lockKey) =>
+          (await navigator.locks.query()).pending.some(
+            (lock) => lock.name === lockKey,
+          ),
+        key,
+      ),
+    )
+    .toBe(true);
+}
+
+test("a reply claim queued before sign-out cannot create a stale intent", async () => {
+  await withWorkspace(async (old, context, write) => {
+    const { brand, other, itemId, key } = await replySessionFixture(
+      old,
+      context,
+      write,
+    );
+    let sends = 0;
+    await context.route(`**/api/v1/inbox/${itemId}/replies`, (route) =>
+      route.fulfill({ json: { data: [] } }),
+    );
+    await context.route(`**/api/v1/inbox/${itemId}/reply`, (route) => {
+      sends++;
+      const body = route.request().postDataJSON();
+      return route.fulfill({
+        json: {
+          data: {
+            id: body.request_id,
+            inbox_id: itemId,
+            text: body.text,
+            state: "published",
+            error: null,
+            receipt: { fixture: true },
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+        },
+      });
+    });
+    try {
+      await old.getByRole("button", { name: "Inbox", exact: true }).click();
+      await old.getByRole("button", { name: "Reply", exact: true }).click();
+      await expect(old.getByLabel("Your reply")).toBeEnabled();
+      await old.getByLabel("Your reply").fill("Stale unsent text");
+      await holdReplyLock(other, key);
+      await old
+        .getByRole("button", { name: "Send reply", exact: true })
+        .click();
+      await waitForReplyLock(old, key);
+      const logout = other.waitForResponse((response) =>
+        response.url().endsWith("/api/v1/auth/logout"),
+      );
+      await other.getByRole("button", { name: "Sign out" }).click();
+      expect((await logout).status()).toBe(200);
+      expect((await context.request.get("/api/v1/auth/me")).status()).toBe(401);
+      await releaseReplyLock(other);
+      await expect(old.getByLabel("Email address")).toBeVisible();
+      expect(
+        await other.evaluate((lockKey) => localStorage.getItem(lockKey), key),
+      ).toBeNull();
+      expect(sends).toBe(0);
+
+      await signIn(other);
+      await expect(other.getByLabel("Current brand")).toHaveValue(brand.id);
+      await releaseIdentityEvents(old);
+      await expect(
+        old.getByRole("button", { name: "Reply", exact: true }),
+      ).toBeVisible();
+      await old.getByRole("button", { name: "Reply", exact: true }).click();
+      await expect(old.getByLabel("Your reply")).toBeEnabled();
+      await expect(old.getByLabel("Your reply")).toHaveValue("");
+      expect(sends).toBe(0);
+      await old.getByLabel("Your reply").fill("After reauthentication");
+      await old
+        .getByRole("button", { name: "Send reply", exact: true })
+        .click();
+      await expect(
+        old.getByText("Server reply outcome: published", { exact: true }),
+      ).toBeVisible();
+      expect(sends).toBe(1);
+    } finally {
+      await releaseReplyLock(other).catch(() => {});
+      await other.close();
+    }
+  });
+});
+
+test("an in-flight reply keeps its unknown intent across sign-out", async () => {
+  await withWorkspace(async (old, context, write) => {
+    const { brand, other, itemId, key } = await replySessionFixture(
+      old,
+      context,
+      write,
+    );
+    const posted = deferred(),
+      release = deferred();
+    let sends = 0;
+    await context.route(`**/api/v1/inbox/${itemId}/replies`, (route) =>
+      route.fulfill({ json: { data: [] } }),
+    );
+    await context.route(`**/api/v1/inbox/${itemId}/reply`, async (route) => {
+      sends++;
+      posted.resolve();
+      await release.promise;
+      await route.abort("failed").catch(() => {});
+    });
+    try {
+      await old.getByRole("button", { name: "Inbox", exact: true }).click();
+      await old.getByRole("button", { name: "Reply", exact: true }).click();
+      await expect(old.getByLabel("Your reply")).toBeEnabled();
+      await old.getByLabel("Your reply").fill("Keep the unknown original");
+      await old
+        .getByRole("button", { name: "Send reply", exact: true })
+        .click();
+      await posted.promise;
+      const stored = await old.evaluate(
+        (lockKey) => localStorage.getItem(lockKey),
+        key,
+      );
+      expect(JSON.parse(stored!).text).toBe("Keep the unknown original");
+      const logout = other.waitForResponse((response) =>
+        response.url().endsWith("/api/v1/auth/logout"),
+      );
+      await other.getByRole("button", { name: "Sign out" }).click();
+      expect((await logout).status()).toBe(200);
+      expect((await context.request.get("/api/v1/auth/me")).status()).toBe(401);
+      release.resolve();
+      await expect(old.getByLabel("Email address")).toBeVisible();
+      expect(
+        await other.evaluate((lockKey) => localStorage.getItem(lockKey), key),
+      ).toBe(stored);
+      expect(sends).toBe(1);
+
+      await signIn(other);
+      await expect(other.getByLabel("Current brand")).toHaveValue(brand.id);
+      await releaseIdentityEvents(old);
+      await expect(
+        old.getByRole("button", { name: "Reply", exact: true }),
+      ).toBeVisible();
+      await old.getByRole("button", { name: "Reply", exact: true }).click();
+      await expect(
+        old.getByRole("button", { name: "Retry original reply" }),
+      ).toBeEnabled();
+      await expect(old.getByLabel("Your reply")).toHaveValue(
+        "Keep the unknown original",
+      );
+      expect(
+        await old.evaluate((lockKey) => localStorage.getItem(lockKey), key),
+      ).toBe(stored);
+      expect(sends).toBe(1);
+    } finally {
+      release.resolve();
+      await other.close();
+    }
+  });
+});
+
+test("a queued terminal reply cleanup waits for a current session", async () => {
+  await withWorkspace(async (old, context, write) => {
+    const { brand, other, itemId, key } = await replySessionFixture(
+      old,
+      context,
+      write,
+    );
+    const posted = deferred(),
+      releaseResponse = deferred();
+    const rows: any[] = [];
+    let sends = 0;
+    await context.route(`**/api/v1/inbox/${itemId}/replies`, (route) =>
+      route.fulfill({ json: { data: rows } }),
+    );
+    await context.route(`**/api/v1/inbox/${itemId}/reply`, async (route) => {
+      sends++;
+      const body = route.request().postDataJSON();
+      posted.resolve();
+      await releaseResponse.promise;
+      const row = {
+        id: body.request_id,
+        inbox_id: itemId,
+        text: body.text,
+        state: "published",
+        error: null,
+        receipt: { fixture: true },
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      rows.push(row);
+      await route.fulfill({ json: { data: row } });
+    });
+    try {
+      await old.getByRole("button", { name: "Inbox", exact: true }).click();
+      await old.getByRole("button", { name: "Reply", exact: true }).click();
+      await expect(old.getByLabel("Your reply")).toBeEnabled();
+      await old.getByLabel("Your reply").fill("Confirmed by fixture");
+      await old
+        .getByRole("button", { name: "Send reply", exact: true })
+        .click();
+      await posted.promise;
+      const stored = await old.evaluate(
+        (lockKey) => localStorage.getItem(lockKey),
+        key,
+      );
+      expect(stored).not.toBeNull();
+      await holdReplyLock(other, key);
+      releaseResponse.resolve();
+      await waitForReplyLock(old, key);
+      const logout = other.waitForResponse((response) =>
+        response.url().endsWith("/api/v1/auth/logout"),
+      );
+      await other.getByRole("button", { name: "Sign out" }).click();
+      expect((await logout).status()).toBe(200);
+      await releaseReplyLock(other);
+      await expect(old.getByLabel("Email address")).toBeVisible();
+      expect(
+        await other.evaluate((lockKey) => localStorage.getItem(lockKey), key),
+      ).toBe(stored);
+      expect(sends).toBe(1);
+      await signIn(other);
+      await expect(other.getByLabel("Current brand")).toHaveValue(brand.id);
+      await releaseIdentityEvents(old);
+      await old.getByRole("button", { name: "Reply", exact: true }).click();
+      await expect(
+        old.getByText("Server reply outcome: published", { exact: true }),
+      ).toBeVisible();
+      await expect
+        .poll(() =>
+          old.evaluate((lockKey) => localStorage.getItem(lockKey), key),
+        )
+        .toBeNull();
+      expect(sends).toBe(1);
+    } finally {
+      releaseResponse.resolve();
+      await releaseReplyLock(other).catch(() => {});
+      await other.close();
+    }
+  });
+});
+
+test("a queued reply history acknowledgment cannot update an old session", async () => {
+  await withWorkspace(async (old, context, write) => {
+    const { brand, other, itemId, key } = await replySessionFixture(
+      old,
+      context,
+      write,
+    );
+    const newest = crypto.randomUUID();
+    const remembered = {
+      request_id: crypto.randomUUID(),
+      text: "Original pending reply",
+      expected_last_request_id: null,
+    };
+    await context.route(`**/api/v1/inbox/${itemId}/replies`, (route) =>
+      route.fulfill({
+        json: {
+          data: [
+            {
+              id: newest,
+              inbox_id: itemId,
+              text: "Newer server reply",
+              state: "published",
+              error: null,
+              receipt: { fixture: true },
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            },
+          ],
+        },
+      }),
+    );
+    let sends = 0;
+    await context.route(`**/api/v1/inbox/${itemId}/reply`, (route) => {
+      sends++;
+      return route.abort("failed");
+    });
+    try {
+      await old.evaluate(
+        ({ storageKey, value }) =>
+          localStorage.setItem(storageKey, JSON.stringify(value)),
+        { storageKey: key, value: remembered },
+      );
+      await old.getByRole("button", { name: "Inbox", exact: true }).click();
+      await old.getByRole("button", { name: "Reply", exact: true }).click();
+      const acknowledge = old.getByRole("button", {
+        name: "I reviewed the newer outcome; keep my original intent",
+      });
+      await expect(acknowledge).toBeEnabled();
+      await holdReplyLock(other, key);
+      await acknowledge.click();
+      await waitForReplyLock(old, key);
+      const logout = other.waitForResponse((response) =>
+        response.url().endsWith("/api/v1/auth/logout"),
+      );
+      await other.getByRole("button", { name: "Sign out" }).click();
+      expect((await logout).status()).toBe(200);
+      await releaseReplyLock(other);
+      await expect(old.getByLabel("Email address")).toBeVisible();
+      expect(
+        JSON.parse(
+          (await other.evaluate(
+            (storageKey) => localStorage.getItem(storageKey),
+            key,
+          ))!,
+        ),
+      ).toEqual(remembered);
+      expect(sends).toBe(0);
+      await signIn(other);
+      await expect(other.getByLabel("Current brand")).toHaveValue(brand.id);
+      await releaseIdentityEvents(old);
+      await old.getByRole("button", { name: "Reply", exact: true }).click();
+      const review = old.getByRole("button", {
+        name: "I reviewed the newer outcome; keep my original intent",
+      });
+      await expect(review).toBeEnabled();
+      await review.click();
+      await expect
+        .poll(
+          async () =>
+            JSON.parse(
+              (await old.evaluate(
+                (storageKey) => localStorage.getItem(storageKey),
+                key,
+              ))!,
+            ).expected_last_request_id,
+        )
+        .toBe(newest);
+      expect(sends).toBe(0);
+    } finally {
+      await releaseReplyLock(other).catch(() => {});
+      await other.close();
+    }
   });
 });

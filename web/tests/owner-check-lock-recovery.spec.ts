@@ -141,6 +141,30 @@ async function pendingAuthLocks(page: Page) {
   );
 }
 
+async function pendingFixtureScript() {
+  const built = await build({
+    configFile: false,
+    logLevel: "silent",
+    define: { "process.env.NODE_ENV": '"production"' },
+    build: {
+      write: false,
+      minify: false,
+      lib: {
+        entry: fileURLToPath(
+          new URL("./fixtures/pending-schedule-owner.tsx", import.meta.url),
+        ),
+        name: "PendingScheduleFixture",
+        formats: ["iife"],
+      },
+    },
+  });
+  const bundle = Array.isArray(built) ? built[0] : built;
+  const script = bundle.output.find((item) => item.type === "chunk");
+  if (!script || script.type !== "chunk")
+    throw new Error("Fixture bundle missing");
+  return script.code;
+}
+
 test("two stalled reply owner checks cannot starve a third tab's sign-out", async () => {
   await withWorkspace(async (page, context, write) => {
     await withStalledOwner(page, context, write, async (fixture) => {
@@ -190,26 +214,7 @@ test("two stalled reply owner checks cannot starve a third tab's sign-out", asyn
 });
 
 test("pending-schedule owner checks cancel on unmount and brand change", async () => {
-  const built = await build({
-    configFile: false,
-    logLevel: "silent",
-    define: { "process.env.NODE_ENV": '"production"' },
-    build: {
-      write: false,
-      minify: false,
-      lib: {
-        entry: fileURLToPath(
-          new URL("./fixtures/pending-schedule-owner.tsx", import.meta.url),
-        ),
-        name: "PendingScheduleFixture",
-        formats: ["iife"],
-      },
-    },
-  });
-  const bundle = Array.isArray(built) ? built[0] : built;
-  const script = bundle.output.find((item) => item.type === "chunk");
-  if (!script || script.type !== "chunk")
-    throw new Error("Fixture bundle missing");
+  const script = await pendingFixtureScript();
   await withWorkspace(async (page, context, write) => {
     await withStalledOwner(page, context, write, async (fixture) => {
       const [first, pending] = fixture.pages;
@@ -217,7 +222,7 @@ test("pending-schedule owner checks cancel on unmount and brand change", async (
       await first.getByRole("button", { name: "Reply", exact: true }).click();
       await expect.poll(fixture.starts).toBe(1);
       await pending.goto(new URL("/pending-fixture", pending.url()).href);
-      await pending.addScriptTag({ content: script.code });
+      await pending.addScriptTag({ content: script });
       await expect(pending.getByText("Checking: first")).toBeVisible();
       await expect.poll(() => pendingAuthLocks(first)).toBe(1);
       await pending.getByRole("button", { name: "Unmount" }).click();
@@ -318,6 +323,211 @@ test("abandoned reply and workspace owner checks leave the lock queue promptly",
       await first.getByRole("button", { name: "Reply", exact: true }).click();
       await expect(first.getByLabel("Your reply")).toBeEnabled();
       expect(fixture.sends()).toBe(0);
+    });
+  });
+});
+
+test("a queued schedule claim rejects a superseded session before writing", async () => {
+  const script = await pendingFixtureScript();
+  await withWorkspace(async (page, context, write) => {
+    await withStalledOwner(page, context, write, async (fixture) => {
+      const [signingOut, pending, lockHolder] = fixture.pages;
+      const key = "beweft.pending-schedule:fixture:brand";
+      await pending.goto(new URL("/pending-fixture", pending.url()).href);
+      await pending.addScriptTag({ content: script });
+      await expect(pending.getByText("Ready: first")).toBeVisible();
+      await lockHolder.evaluate((lockKey) => {
+        const state = window as any;
+        let release!: () => void, held!: () => void;
+        const wait = new Promise<void>((resolve) => (release = resolve));
+        state.scheduleHeld = new Promise<void>((resolve) => (held = resolve));
+        state.releaseSchedule = release;
+        void navigator.locks.request(lockKey, async () => {
+          held();
+          await wait;
+        });
+      }, key);
+      try {
+        await lockHolder.evaluate(() => (window as any).scheduleHeld);
+        await pending.evaluate((lockKey) => {
+          const state = window as any,
+            api = state.scheduleFixture;
+          const now = new Date().toISOString();
+          const post = {
+            id: crypto.randomUUID(),
+            brand_id: "brand",
+            title: "Fixture",
+            text: "Original",
+            media_ids: [],
+            variants: [],
+            version: 1,
+            status: "draft",
+            created_at: now,
+            updated_at: now,
+          };
+          const intent = api.makeScheduleIntent(
+            post,
+            [crypto.randomUUID()],
+            "queue",
+            "",
+          );
+          state.scheduleOutcome = api
+            .scheduleLock(lockKey, (session: unknown) =>
+              api.writeScheduleIntent(lockKey, intent, session),
+            )
+            .then(
+              () => "saved",
+              (error: { code?: string }) => error.code ?? "failed",
+            );
+        }, key);
+        await expect
+          .poll(() =>
+            pending.evaluate(
+              async (lockKey) =>
+                (await navigator.locks.query()).pending.some(
+                  (lock) => lock.name === lockKey,
+                ),
+              key,
+            ),
+          )
+          .toBe(true);
+        const logout = signingOut.waitForResponse((response) =>
+          response.url().endsWith("/api/v1/auth/logout"),
+        );
+        await signingOut.getByRole("button", { name: "Sign out" }).click();
+        expect((await logout).status()).toBe(200);
+        expect((await context.request.get("/api/v1/auth/me")).status()).toBe(
+          401,
+        );
+        await lockHolder.evaluate(() => (window as any).releaseSchedule());
+        expect(
+          await pending.evaluate(() => (window as any).scheduleOutcome),
+        ).toBe("session_changed");
+        expect(
+          await pending.evaluate(
+            (lockKey) => localStorage.getItem(lockKey),
+            key,
+          ),
+        ).toBeNull();
+        await expect(
+          pending.getByText(/browser session changed/i),
+        ).toBeVisible();
+        await signingOut
+          .getByLabel("Email")
+          .fill(process.env.BEWEFT_TEST_EMAIL!);
+        await signingOut
+          .getByLabel("Password")
+          .fill(process.env.BEWEFT_TEST_PASSWORD!);
+        await signingOut
+          .getByRole("button", { name: "Sign in", exact: true })
+          .click();
+        await expect(signingOut.getByLabel("Current brand")).toBeVisible();
+        await pending.reload();
+        await pending.addScriptTag({ content: script });
+        await expect(pending.getByText("Ready: first")).toBeVisible();
+      } finally {
+        await lockHolder
+          .evaluate(() => (window as any).releaseSchedule?.())
+          .catch(() => {});
+      }
+    });
+  });
+});
+
+test("a schedule with an unknown response keeps its intent across sign-out", async () => {
+  const script = await pendingFixtureScript();
+  await withWorkspace(async (page, context, write) => {
+    await withStalledOwner(page, context, write, async (fixture) => {
+      const [signingOut, pending] = fixture.pages;
+      const key = "beweft.pending-schedule:fixture:unknown";
+      let started!: () => void,
+        release!: () => void,
+        sends = 0;
+      const posted = new Promise<void>((resolve) => (started = resolve));
+      const held = new Promise<void>((resolve) => (release = resolve));
+      await context.route("**/api/v1/posts/*/schedule", async (route) => {
+        sends++;
+        started();
+        await held;
+        await route.abort("failed").catch(() => {});
+      });
+      try {
+        await pending.goto(new URL("/pending-fixture", pending.url()).href);
+        await pending.addScriptTag({ content: script });
+        await expect(pending.getByText("Ready: first")).toBeVisible();
+        await pending.evaluate((lockKey) => {
+          const state = window as any,
+            api = state.scheduleFixture;
+          const now = new Date().toISOString();
+          const post = {
+            id: crypto.randomUUID(),
+            brand_id: "brand",
+            title: "Fixture",
+            text: "Original",
+            media_ids: [],
+            variants: [],
+            version: 1,
+            status: "draft",
+            created_at: now,
+            updated_at: now,
+          };
+          state.intent = api.makeScheduleIntent(
+            post,
+            [crypto.randomUUID()],
+            "queue",
+            "",
+          );
+          state.session = api.captureWorkspaceSession();
+          state.scheduleOutcome = api
+            .sendScheduleIntent(lockKey, state.intent, state.session)
+            .then(
+              () => "saved",
+              (error: { code?: string }) => error.code ?? "failed",
+            );
+        }, key);
+        await posted;
+        const original = await pending.evaluate(
+          (lockKey) => localStorage.getItem(lockKey),
+          key,
+        );
+        expect(JSON.parse(original!).uncertain).toBe(true);
+        const logout = signingOut.waitForResponse((response) =>
+          response.url().endsWith("/api/v1/auth/logout"),
+        );
+        await signingOut.getByRole("button", { name: "Sign out" }).click();
+        expect((await logout).status()).toBe(200);
+        release();
+        await pending.evaluate(() => (window as any).scheduleOutcome);
+        expect(
+          await pending.evaluate(
+            (lockKey) => localStorage.getItem(lockKey),
+            key,
+          ),
+        ).toBe(original);
+        const clearOutcome = await pending.evaluate(async (lockKey) => {
+          const state = window as any;
+          try {
+            await state.scheduleFixture.clearScheduleIntent(
+              lockKey,
+              state.intent.id,
+              state.session,
+            );
+            return "cleared";
+          } catch (error) {
+            return (error as { code?: string }).code ?? "failed";
+          }
+        }, key);
+        expect(clearOutcome).toBe("session_changed");
+        expect(
+          await pending.evaluate(
+            (lockKey) => localStorage.getItem(lockKey),
+            key,
+          ),
+        ).toBe(original);
+        expect(sends).toBe(1);
+      } finally {
+        release();
+      }
     });
   });
 });

@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { z } from "zod";
-import { api } from "./api";
+import {
+  api,
+  captureWorkspaceSession,
+  requireWorkspaceSession,
+  type ApiSession,
+} from "./api";
 import {
   readScheduleIntent,
   scheduleEvent,
@@ -9,6 +14,9 @@ import {
 export function usePendingSchedule(brandId: string) {
   const [key, setKey] = useState("");
   const [verifiedBrand, setVerifiedBrand] = useState("");
+  const [verifiedSession, setVerifiedSession] = useState<ApiSession | null>(
+    null,
+  );
   const [intent, setIntent] = useState<ScheduleIntent | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -17,20 +25,36 @@ export function usePendingSchedule(brandId: string) {
     let storageKey = "";
     setKey("");
     setVerifiedBrand("");
+    setVerifiedSession(null);
     setIntent(null);
     setError("");
+    let session: ApiSession;
+    try {
+      session = captureWorkspaceSession();
+    } catch (failure) {
+      setError((failure as Error).message);
+      return () => {
+        active = false;
+        controller.abort();
+      };
+    }
     const read = () => {
       if (!active || !storageKey) return;
       try {
+        requireWorkspaceSession(session);
         const pending = readScheduleIntent(storageKey);
         if (pending && pending.post.brand_id !== brandId)
           throw new Error("Pending schedule belongs to another brand.");
         setIntent(pending);
         setKey(storageKey);
         setVerifiedBrand(brandId);
+        setVerifiedSession(session);
         setError("");
       } catch (failure) {
         setKey("");
+        setVerifiedBrand("");
+        setVerifiedSession(null);
+        setIntent(null);
         setError((failure as Error).message);
       }
     };
@@ -42,11 +66,19 @@ export function usePendingSchedule(brandId: string) {
       controller.signal,
     )
       .then((owner) => {
+        if (!active) return;
+        requireWorkspaceSession(session);
         storageKey = `beweft.pending-schedule:${owner.id}:${brandId}`;
         read();
       })
       .catch((failure) => {
-        if (active) setError(failure.message);
+        if (!active) return;
+        try {
+          requireWorkspaceSession(session);
+        } catch {
+          return;
+        }
+        setError(failure.message);
       });
     window.addEventListener("storage", read);
     window.addEventListener(scheduleEvent, read);
@@ -57,6 +89,6 @@ export function usePendingSchedule(brandId: string) {
       window.removeEventListener(scheduleEvent, read);
     };
   }, [brandId]);
-  const ready = !!key && verifiedBrand === brandId;
+  const ready = !!key && verifiedBrand === brandId && verifiedSession !== null;
   return { key: ready ? key : "", intent: ready ? intent : null, error, ready };
 }

@@ -1,6 +1,17 @@
 import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
-import { readAuthEpoch, setApiWorkspaceEpoch } from "../../src/api";
+import {
+  captureWorkspaceSession,
+  readAuthEpoch,
+  setApiWorkspaceEpoch,
+} from "../../src/api";
+import {
+  clearScheduleIntent,
+  makeScheduleIntent,
+  scheduleLock,
+  sendScheduleIntent,
+  writeScheduleIntent,
+} from "../../src/scheduleIntent";
 import { usePendingSchedule } from "../../src/usePendingSchedule";
 
 function Pending({ brandId }: { brandId: string }) {
@@ -44,4 +55,12 @@ function Fixture() {
 // The real app establishes this after its workspace check. This isolated fixture
 // renders the otherwise unwired helper to test its own lifecycle.
 setApiWorkspaceEpoch(readAuthEpoch());
+(window as typeof window & { scheduleFixture: unknown }).scheduleFixture = {
+  captureWorkspaceSession,
+  clearScheduleIntent,
+  makeScheduleIntent,
+  scheduleLock,
+  sendScheduleIntent,
+  writeScheduleIntent,
+};
 createRoot(document.getElementById("root")!).render(<Fixture />);

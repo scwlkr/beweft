@@ -216,6 +216,24 @@ export function isCurrentApiSession(session: ApiSession) {
     return false;
   }
 }
+export function isCurrentWorkspaceSession(session: ApiSession) {
+  return workspaceEpoch === session.epoch && isCurrentApiSession(session);
+}
+export function requireWorkspaceSession(session: ApiSession) {
+  if (isCurrentWorkspaceSession(session)) return;
+  if (workspaceEpoch !== null)
+    identityListeners.forEach((listener) => listener());
+  throw new ApiError(
+    "The browser session changed. Refreshing your workspace.",
+    401,
+    "session_changed",
+  );
+}
+export function captureWorkspaceSession() {
+  const session = captureApiSession();
+  requireWorkspaceSession(session);
+  return session;
+}
 function requireCurrentApiSession(session: ApiSession) {
   if (isCurrentApiSession(session)) return;
   if (workspaceEpoch !== null)
@@ -262,6 +280,20 @@ export async function withOwnerCheck<T>(
     clearTimeout(timer);
     signal?.removeEventListener("abort", cancel);
   }
+}
+// Keep local intent changes atomic with respect to app-controlled credential
+// transitions. The callback must finish synchronously; never hold this lock
+// across a network request.
+export function withWorkspaceSession<T>(
+  session: ApiSession,
+  work: () => T,
+  signal?: AbortSignal,
+) {
+  return withOwnerCheck(async (ownerSignal) => {
+    ownerSignal.throwIfAborted();
+    requireWorkspaceSession(session);
+    return work();
+  }, signal);
 }
 export async function api<T>(
   path: string,
