@@ -8,7 +8,6 @@ import {
   Search,
   X,
 } from "lucide-react";
-import { api, BrandSchema, type Brand } from "./api";
 import { Auth } from "./Auth";
 import { BrandDialog } from "./BrandDialog";
 import { Unicorn } from "./components/brand";
@@ -32,7 +31,11 @@ export default function App() {
   const workspace = useWorkspace();
   const {
     ready,
-    setReady,
+    acceptSession,
+    signingOut,
+    signOutError,
+    sessionCheckFailed,
+    retrySession,
     route,
     brands,
     brandId,
@@ -61,10 +64,19 @@ export default function App() {
     load,
     action,
     go,
-    chooseBrand,
+    createBrand,
   } = workspace;
   if (ready === null) return <Busy />;
-  if (!ready) return <Auth onReady={() => setReady(true)} />;
+  if (!ready)
+    return (
+      <Auth
+        signingOut={signingOut}
+        signOutError={signOutError}
+        sessionCheckFailed={sessionCheckFailed}
+        onRetrySession={retrySession}
+        onReady={acceptSession}
+      />
+    );
   const flowId = new URLSearchParams(location.search).get("connection_flow");
   const connectionError = new URLSearchParams(location.search).get(
     "connection_error",
@@ -320,16 +332,7 @@ export default function App() {
           <BrandDialog
             busy={pending}
             onClose={() => setBrandOpen(false)}
-            onSave={async (name) => {
-              let created: Brand | undefined;
-              const success = await action(async () => {
-                created = await api("/brands", BrandSchema, "POST", { name });
-              }, "Brand created");
-              if (success && created) {
-                chooseBrand(created.id);
-                setBrandOpen(false);
-              }
-            }}
+            onSave={createBrand}
           />
         )}{" "}
         {composer !== undefined && brand && (

@@ -12,10 +12,14 @@ export function readIntent(key: string) {
 export function forgetIntent(key: string, requestId: string) {
   if (readIntent(key)?.request_id === requestId) localStorage.removeItem(key);
 }
-export function lockIntent<T>(key: string, work: () => T): Promise<T> {
+export function lockIntent<T>(
+  key: string,
+  work: () => T | Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
   if (!navigator.locks)
     throw new Error(
       "Reply safety requires a secure browser origin (HTTPS or localhost).",
     );
-  return navigator.locks.request(key, work);
+  return navigator.locks.request(key, { signal }, work);
 }

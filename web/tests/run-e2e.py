@@ -11,6 +11,7 @@ import secrets
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
@@ -39,7 +40,7 @@ def main():
     origin = f"http://127.0.0.1:{port}"
     setup = secrets.token_urlsafe(32)
     password = secrets.token_urlsafe(32)
-    env = dict(os.environ, DATABASE_URL=f"postgres://{USER}:{PASSWORD}@localhost:{PORT}/{DB}", BEWEFT_PUBLIC_URL=origin, BEWEFT_BIND=f"127.0.0.1:{port}", BEWEFT_MEDIA_DIR=directory + "/media", BEWEFT_WEB_DIR=str(ROOT / "web/dist"), BEWEFT_SETUP_SECRET=setup, BEWEFT_ENCRYPTION_KEY=secrets.token_hex(32), BEWEFT_ENABLE_FIXTURES="true", BEWEFT_TEST_URL=origin, BEWEFT_TEST_ISOLATED="1", BEWEFT_TEST_EMAIL="browser@example.test", BEWEFT_TEST_PASSWORD=password, BEWEFT_TEST_OUTPUT=directory + "/playwright")
+    env = dict(os.environ, DATABASE_URL=f"postgres://{USER}:{PASSWORD}@localhost:{PORT}/{DB}", BEWEFT_PUBLIC_URL=origin, BEWEFT_BIND=f"127.0.0.1:{port}", BEWEFT_MEDIA_DIR=directory + "/media", BEWEFT_WEB_DIR=str(ROOT / "web/dist"), BEWEFT_SETUP_SECRET=setup, BEWEFT_ENCRYPTION_KEY=secrets.token_hex(32), BEWEFT_ENABLE_FIXTURES="true", BEWEFT_TEST_URL=origin, BEWEFT_TEST_ISOLATED="1", BEWEFT_TEST_DB_NAME=DB, BEWEFT_TEST_EMAIL="browser@example.test", BEWEFT_TEST_PASSWORD=password, BEWEFT_TEST_OUTPUT=directory + "/playwright")
     for name in ["beweft-server", "beweft-worker"]:
         processes.append(subprocess.Popen([str(ROOT / "target/debug" / name)], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
     for _ in range(150):
@@ -55,7 +56,7 @@ def main():
     request = urllib.request.Request(origin + "/api/v1/auth/bootstrap", data=json.dumps({"setup_secret":setup,"email":env["BEWEFT_TEST_EMAIL"],"password":password}).encode(), headers={"Content-Type":"application/json","X-Beweft-Request":"1","Origin":origin})
     with urllib.request.urlopen(request) as response:
         assert response.status == 200
-    subprocess.run(["pnpm", "--filter", "@beweft/web", "exec", "playwright", "test"], cwd=ROOT, env=env, check=True)
+    subprocess.run(["pnpm", "--filter", "@beweft/web", "exec", "playwright", "test", *sys.argv[1:]], cwd=ROOT, env=env, check=True)
 
 
 try:
