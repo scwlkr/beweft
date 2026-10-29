@@ -1,12 +1,26 @@
 use crate::{client::Api, tools};
-use anyhow::Result;
+use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
-use std::io::{BufRead, Read, Write};
+use std::{
+    collections::VecDeque,
+    io::{BufRead, Read, Write},
+    time::{Duration, Instant},
+};
 const MAX_MESSAGE: u64 = 1024 * 1024;
 fn error(id: Value, code: i32, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
 }
 pub async fn serve(api: Api) -> Result<()> {
+    let upload_root = crate::upload::UploadRoot::from_env()?;
+    let calls_per_minute = std::env::var("BEWEFT_MCP_CALLS_PER_MINUTE")
+        .unwrap_or_else(|_| "120".into())
+        .parse::<usize>()
+        .context("BEWEFT_MCP_CALLS_PER_MINUTE must be between 1 and 10000")?;
+    ensure!(
+        (1..=10000).contains(&calls_per_minute),
+        "BEWEFT_MCP_CALLS_PER_MINUTE must be between 1 and 10000"
+    );
+    let mut calls = VecDeque::new();
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let stdout = std::io::stdout();
@@ -88,7 +102,7 @@ pub async fn serve(api: Api) -> Result<()> {
                 "Complete initialize and notifications/initialized first",
             )),
             "tools/list" => {
-                if params.get("cursor").is_some() {
+                if !params.is_object() || params.get("cursor").is_some() {
                     Err((-32602, "This tool list has no pagination cursor"))
                 } else {
                     Ok(
@@ -97,27 +111,52 @@ pub async fn serve(api: Api) -> Result<()> {
                 }
             }
             "tools/call" => {
-                if let Some(name) = params["name"]
+                if !params.is_object()
+                    || params
+                        .get("arguments")
+                        .is_some_and(|args| !args.is_object())
+                {
+                    Err((-32602, "Invalid tool call parameters"))
+                } else if let Some(name) = params["name"]
                     .as_str()
                     .filter(|name| tools::NAMES.contains(name))
                 {
-                    match tools::invoke(
-                        &api,
-                        name,
-                        params
-                            .get("arguments")
-                            .cloned()
-                            .unwrap_or_else(|| json!({})),
-                        true,
-                    )
-                    .await
+                    let now = Instant::now();
+                    while calls
+                        .front()
+                        .is_some_and(|time| now.duration_since(*time) >= Duration::from_secs(60))
                     {
-                        Ok(value) => Ok(
-                            json!({"content":[{"type":"text","text":serde_json::to_string(&value)?}],"structuredContent":value,"isError":false}),
-                        ),
-                        Err(e) => Ok(
-                            json!({"content":[{"type":"text","text":e.to_string()}],"isError":true}),
-                        ),
+                        calls.pop_front();
+                    }
+                    if calls.len() >= calls_per_minute {
+                        Ok(
+                            json!({"content":[{"type":"text","text":"MCP tool rate limit reached; wait before trying again."}],"isError":true}),
+                        )
+                    } else {
+                        calls.push_back(now);
+                        match tools::invoke(
+                            &api,
+                            name,
+                            params
+                                .get("arguments")
+                                .cloned()
+                                .unwrap_or_else(|| json!({})),
+                            true,
+                            upload_root.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(value) => {
+                                let mut result = json!({"content":[{"type":"text","text":serde_json::to_string(&value)?}],"isError":false});
+                                if value.is_object() {
+                                    result["structuredContent"] = value;
+                                }
+                                Ok(result)
+                            }
+                            Err(e) => Ok(
+                                json!({"content":[{"type":"text","text":e.to_string()}],"isError":true}),
+                            ),
+                        }
                     }
                 } else {
                     Err((-32602, "Unknown tool name"))

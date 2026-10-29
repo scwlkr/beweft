@@ -24,8 +24,11 @@ worker health, draft create/update, explicit queue/exact scheduling and media
 upload. It uses scoped bearer HTTP requests, disallows redirects and off-origin
 escape-hatch paths, supports protected token files, bounds input/output sizes,
 and never retries a failed write. MCP includes initialize/initialized, ping,
-tools/list and tools/call; MCP uploads require a configured local upload root.
-No real-API or MCP subprocess integration test has run yet.
+tools/list and tools/call; its upload root is opened at startup and file paths
+cannot follow symlinks. `crates/cli/tests/integration.py` exercises the real
+isolated API and MCP subprocess, including scope rejection, lost write response,
+readback, upload confinement, redirect refusal and protocol errors. These
+changes still require fresh independent review and integration.
 
 The image recipe builds web/API/worker/CLI, includes ffprobe through FFmpeg, and
 runs as UID 10001. Compose defines persistent DB/media and loopback API access.
@@ -43,7 +46,6 @@ These files have not been built or rehearsed together.
   encryption key checks, upgrade command and rollback documentation.
 - Isolated Docker fresh install/restart/backup/restore/upgrade rehearsal including
   owner access, byte-identical media, drafts, durable queue and no live publishing.
-- Real API CLI/MCP regression harness, scope rejection and protocol error cases.
 - Production/TLS placeholder instructions, agent configuration and complete
   self-hosting documentation; setup currently has only concise command guidance.
 - Dependency copyright/license notices in image and FFmpeg redistribution/source

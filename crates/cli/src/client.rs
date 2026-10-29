@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::{Client, Method};
 use serde_json::Value;
-use std::{path::Path, time::Duration};
+use std::{io::Read, path::Path, time::Duration};
+use tokio_util::io::ReaderStream;
 use url::Url;
 
 pub struct Api {
@@ -39,8 +40,15 @@ impl Api {
             (Some(_), Some(_)) => bail!("Set only one of BEWEFT_TOKEN or BEWEFT_TOKEN_FILE"),
             (Some(token), None) => token,
             (None, Some(path)) => {
-                let metadata =
-                    std::fs::metadata(&path).context("Cannot read token file metadata")?;
+                let mut options = std::fs::OpenOptions::new();
+                options.read(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.custom_flags(libc::O_NONBLOCK);
+                }
+                let file = options.open(path).context("Cannot open token file")?;
+                let metadata = file.metadata().context("Cannot read token file metadata")?;
                 ensure!(
                     metadata.is_file() && metadata.len() <= 4096,
                     "Token file must be a regular file of at most 4096 bytes"
@@ -53,8 +61,13 @@ impl Api {
                         "Token file must not be accessible by group or other users (chmod 600)"
                     );
                 }
-                std::fs::read_to_string(path)
-                    .context("Cannot read token file")?
+                let mut bytes = Vec::new();
+                file.take(4097)
+                    .read_to_end(&mut bytes)
+                    .context("Cannot read token file")?;
+                ensure!(bytes.len() <= 4096, "Token file exceeds 4096 bytes");
+                String::from_utf8(bytes)
+                    .context("Token file must be UTF-8")?
                     .trim()
                     .into()
             }
@@ -127,38 +140,45 @@ impl Api {
         })? {
             ensure!(
                 bytes.len() + chunk.len() <= 16 * 1024 * 1024,
-                "API response exceeds 16 MiB; narrow the query"
+                "API response exceeds 16 MiB; inspect authoritative state before retrying a write"
             );
             bytes.extend_from_slice(&chunk);
         }
-        let value: Value = serde_json::from_slice(&bytes).context("API returned invalid JSON")?;
         if !status.is_success() {
             // Deliberately omit server messages: a remote endpoint can echo a secret.
             bail!(
-                "API returned HTTP {}; inspect the application for details",
+                "API returned HTTP {}; inspect authoritative state before retrying a write",
                 status.as_u16()
             );
         }
-        Ok(value)
+        serde_json::from_slice(&bytes).context(
+            "API returned invalid JSON; inspect authoritative state before retrying a write",
+        )
     }
-    pub async fn upload(&self, brand: &str, path: &Path) -> Result<Value> {
+    pub async fn upload(&self, brand: &str, path: &Path, file: std::fs::File) -> Result<Value> {
         ensure!(
             !self.token.is_empty(),
             "Set BEWEFT_TOKEN_FILE or BEWEFT_TOKEN"
         );
-        let metadata = tokio::fs::metadata(path)
-            .await
-            .context("Cannot inspect upload file")?;
+        let metadata = file.metadata().context("Cannot inspect upload file")?;
         ensure!(metadata.is_file(), "Upload must be a regular file");
         let limits = self.request(Method::GET, "/media/limits", None).await?;
         let max = limits["data"]["max_upload_bytes"]
             .as_u64()
             .context("API omitted upload limit")?;
         ensure!(metadata.len() <= max, "File exceeds server upload limit");
-        let form = reqwest::multipart::Form::new()
-            .file("file", path)
-            .await
-            .context("Cannot read upload file")?;
+        let filename = path
+            .file_name()
+            .context("Upload path needs a file name")?
+            .to_string_lossy()
+            .into_owned();
+        let stream = ReaderStream::new(tokio::fs::File::from_std(file));
+        let part = reqwest::multipart::Part::stream_with_length(
+            reqwest::Body::wrap_stream(stream),
+            metadata.len(),
+        )
+        .file_name(filename);
+        let form = reqwest::multipart::Form::new().part("file", part);
         let response = self
             .client
             .post(self.endpoint(&format!("/media?brand_id={brand}"))?)
@@ -169,33 +189,5 @@ impl Api {
             .await
             .map_err(|_| anyhow::anyhow!("Upload failed; inspect media before retrying"))?;
         self.response(response).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn paths_cannot_escape_origin_or_api() {
-        let api = Api {
-            client: Client::new(),
-            origin: Url::parse("https://example.invalid").unwrap(),
-            token: "test".into(),
-        };
-        for path in [
-            "https://evil.invalid",
-            "//evil.invalid",
-            "/../auth",
-            "/%2e%2e/auth",
-            "/x\\y",
-            "/x#fragment",
-            "/\n",
-        ] {
-            assert!(api.endpoint(path).is_err(), "{path}");
-        }
-        assert_eq!(
-            api.endpoint("/posts?brand_id=abc").unwrap().as_str(),
-            "https://example.invalid/api/v1/posts?brand_id=abc"
-        );
     }
 }

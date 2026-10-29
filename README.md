@@ -19,6 +19,8 @@ kept distinct from real provider outcomes. The [API contract](docs/api-contract.
 and [provider research](docs/research/provider-capabilities.md) describe current
 boundaries. Build the core with `cargo build --workspace`. Integration tests use
 an isolated database; see `crates/server/tests/integration.py` for requirements.
+The [CLI and MCP guide](docs/cli.md) covers scoped tokens, command inputs and
+the separate isolated CLI/MCP integration check.
 
 The public-safe [build brief](HANDOFF.md) captures the intended scope. In the
 owner's local project, `.local/HANDOFF.md` holds the complete approved prompt

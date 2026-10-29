@@ -130,7 +130,7 @@ pub fn description(name: &str) -> Value {
         ),
         _ => unreachable!(),
     };
-    json!({"name":name,"description":summary,"inputSchema":schema,"annotations":{"readOnlyHint":read,"destructiveHint":!read,"idempotentHint":read,"openWorldHint":false}})
+    json!({"name":name,"description":summary,"inputSchema":schema,"annotations":{"readOnlyHint":read,"destructiveHint":!read,"idempotentHint":read,"openWorldHint":true}})
 }
 fn text<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args[key]
@@ -158,7 +158,13 @@ fn validate_args(name: &str, args: &Value) -> Result<()> {
     }
     Ok(())
 }
-pub async fn invoke(api: &Api, name: &str, args: Value, mcp: bool) -> Result<Value> {
+pub async fn invoke(
+    api: &Api,
+    name: &str,
+    args: Value,
+    mcp: bool,
+    upload_root: Option<&crate::upload::UploadRoot>,
+) -> Result<Value> {
     ensure!(NAMES.contains(&name), "Unknown tool");
     validate_args(name, &args)?;
     match name {
@@ -234,21 +240,9 @@ pub async fn invoke(api: &Api, name: &str, args: Value, mcp: bool) -> Result<Val
         }
         "media_upload" => {
             let brand = uuid(&args, "brand_id")?;
-            let path = Path::new(text(&args, "path")?)
-                .canonicalize()
-                .context("Cannot resolve upload file")?;
-            if mcp {
-                let root = std::env::var("BEWEFT_UPLOAD_ROOT")
-                    .context("MCP uploads require BEWEFT_UPLOAD_ROOT")?;
-                let root = Path::new(&root)
-                    .canonicalize()
-                    .context("Cannot resolve BEWEFT_UPLOAD_ROOT")?;
-                ensure!(
-                    path.starts_with(root),
-                    "Upload path is outside BEWEFT_UPLOAD_ROOT"
-                );
-            }
-            api.upload(&brand, &path).await
+            let path = Path::new(text(&args, "path")?);
+            let file = crate::upload::open(path, mcp, upload_root)?;
+            api.upload(&brand, path, file).await
         }
         _ => unreachable!(),
     }

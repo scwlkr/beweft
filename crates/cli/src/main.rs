@@ -1,6 +1,7 @@
 mod client;
 mod mcp;
 mod tools;
+mod upload;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::io::Read;
@@ -81,6 +82,7 @@ async fn run() -> Result<()> {
                 json!({})
             },
             false,
+            None,
         )
         .await?
     };
