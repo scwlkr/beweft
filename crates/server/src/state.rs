@@ -29,6 +29,38 @@ impl AppState {
     }
 
     pub async fn from_env() -> anyhow::Result<Self> {
+        let fixture_enabled = std::env::var("BEWEFT_ENABLE_FIXTURES").as_deref() == Ok("true");
+        let fixture_required =
+            std::env::var("BEWEFT_REQUIRE_PROVIDER_FIXTURES").as_deref() == Ok("true");
+        let fixture_origin = std::env::var_os("BEWEFT_PROVIDER_FIXTURE_ORIGIN");
+        if fixture_required || fixture_origin.is_some() {
+            #[cfg(not(feature = "provider-fixtures"))]
+            {
+                anyhow::bail!(
+                    "Provider fixture origin requires a fixture-enabled build; refusing to start"
+                );
+            }
+            #[cfg(feature = "provider-fixtures")]
+            {
+                anyhow::ensure!(
+                    fixture_enabled,
+                    "Provider fixture origin requires BEWEFT_ENABLE_FIXTURES=true; refusing to start"
+                );
+                let origin = fixture_origin.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Provider fixture mode requires a loopback origin; refusing to start"
+                    )
+                })?;
+                let origin = origin.to_str().ok_or_else(|| {
+                    anyhow::anyhow!("Provider fixture origin must be valid UTF-8")
+                })?;
+                beweft_providers::Adapter::fixture(origin).map_err(|_| {
+                    anyhow::anyhow!(
+                        "Provider fixture origin must be an explicit loopback HTTP origin"
+                    )
+                })?;
+            }
+        }
         let public_url =
             std::env::var("BEWEFT_PUBLIC_URL").unwrap_or_else(|_| "http://localhost:3000".into());
         let parsed = url::Url::parse(&public_url)?;
@@ -62,7 +94,7 @@ impl AppState {
             media_dir: std::env::var("BEWEFT_MEDIA_DIR")
                 .unwrap_or_else(|_| ".local/media".into())
                 .into(),
-            fixture_enabled: std::env::var("BEWEFT_ENABLE_FIXTURES").as_deref() == Ok("true"),
+            fixture_enabled,
             max_upload_bytes: env_u64("BEWEFT_MAX_UPLOAD_BYTES", 256 * 1024 * 1024)?,
             media_quota_bytes: env_u64("BEWEFT_MEDIA_QUOTA_BYTES", 10 * 1024 * 1024 * 1024)?,
             fixture_delay_ms: env_u64("BEWEFT_FIXTURE_DELAY_MS", 0)?.min(240_000),

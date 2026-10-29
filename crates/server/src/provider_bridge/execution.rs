@@ -1,4 +1,4 @@
-use super::delivery::save_checkpoint_tx;
+use super::delivery::save_attempt_checkpoint_tx;
 use super::preparation::{checkpoint_on, load_publication_on};
 use super::*;
 
@@ -77,7 +77,7 @@ async fn fenced_step(
             }
         }
         if let Ok(Step::Checkpoint(next) | Step::Wait(next)) = &result {
-            save_checkpoint_tx(&mut tx, state, id, next).await?;
+            save_attempt_checkpoint_tx(&mut tx, state, id, attempt, next).await?;
         }
         Ok::<_, ApiError>(result)
     };

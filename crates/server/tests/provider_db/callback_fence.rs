@@ -145,12 +145,12 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
             .header(header::COOKIE, &session)
             .header("x-beweft-request", "1")
     };
-    let ack = || {
+    let ack = |revocation_id: Uuid| {
         client
             .post(format!("{base}/ack/youtube"))
             .header(header::COOKIE, &session)
             .header("x-beweft-request", "1")
-            .json(&json!({"access_removed":true}))
+            .json(&json!({"access_removed":true,"revocation_id":revocation_id}))
     };
     let complete = |flow: &str| {
         client
@@ -237,7 +237,7 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
         disconnect().send().await.unwrap().status(),
         StatusCode::CONFLICT
     );
-    assert_eq!(ack().send().await.unwrap().status(), StatusCode::CONFLICT);
+    assert_eq!(ack(h.revocation_marker("youtube").await).send().await.unwrap().status(), StatusCode::CONFLICT);
     h.provider.exchange_release.notify_one();
     tokio::time::timeout(
         Duration::from_secs(3),
@@ -249,7 +249,7 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
         disconnect().send().await.unwrap().status(),
         StatusCode::CONFLICT
     );
-    assert_eq!(ack().send().await.unwrap().status(), StatusCode::CONFLICT);
+    assert_eq!(ack(h.revocation_marker("youtube").await).send().await.unwrap().status(), StatusCode::CONFLICT);
     h.provider.identity_release.notify_one();
     assert_eq!(
         active.await.unwrap().unwrap().status(),
@@ -278,7 +278,7 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
         h.provider.exchange_requests.load(Ordering::SeqCst),
         before + 1
     );
-    assert_eq!(ack().send().await.unwrap().status(), StatusCode::OK);
+    assert_eq!(ack(h.revocation_marker("youtube").await).send().await.unwrap().status(), StatusCode::OK);
     assert_eq!(
         callback(&after_state, &after_cookie)
             .send()
@@ -764,7 +764,7 @@ async fn callback_exchange_respects_removal_boundary(h: &Harness) {
     )
     .await;
     assert_eq!(disconnect().send().await.unwrap().status(), StatusCode::OK);
-    assert_eq!(ack().send().await.unwrap().status(), StatusCode::OK);
+    assert_eq!(ack(h.revocation_marker("youtube").await).send().await.unwrap().status(), StatusCode::OK);
     assert_eq!(
         complete(&canceled).send().await.unwrap().status(),
         StatusCode::BAD_REQUEST

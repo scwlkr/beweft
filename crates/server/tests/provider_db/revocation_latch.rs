@@ -139,12 +139,12 @@ async fn provider_gate_orders_manual_removal_and_recovery(h: &Harness) {
             .header(header::COOKIE, &session)
             .header("x-beweft-request", "1")
     };
-    let ack = || {
+    let ack = |revocation_id: Uuid| {
         client
             .post(format!("{base}/ack/mastodon"))
             .header(header::COOKIE, &session)
             .header("x-beweft-request", "1")
-            .json(&json!({"access_removed":true}))
+            .json(&json!({"access_removed":true,"revocation_id":revocation_id}))
     };
 
     let (candidate, state, cookie) = start(&client, &base, &session, brand).await;
@@ -376,7 +376,7 @@ async fn provider_gate_orders_manual_removal_and_recovery(h: &Harness) {
         h.provider.exchange_requests.load(Ordering::SeqCst),
         exchanges
     );
-    assert_eq!(ack().send().await.unwrap().status(), StatusCode::OK);
+    assert_eq!(ack(h.revocation_marker("mastodon").await).send().await.unwrap().status(), StatusCode::OK);
     assert_eq!(
         complete(&candidate, json!({"destination_id":"masto-destination"}))
             .send()

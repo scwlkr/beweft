@@ -98,6 +98,8 @@ pub fn typescript(document: &Value) -> String {
                 let responses = &operation["responses"]["200"]["content"];
                 let response = if let Some(content) = responses.get("application/json") {
                     ts(&content["schema"])
+                } else if responses.is_null() {
+                    "undefined".into()
                 } else {
                     "Blob".into()
                 };

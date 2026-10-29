@@ -48,6 +48,14 @@ async fn fenced_writes_and_small_pool(h: &Harness) {
         result,
         provider_bridge::BridgeOutcome::Uncertain { .. }
     ));
+    assert!(!beweft::worker::finish_attempt(
+        &h.state, expired, attempt, "published", None,
+        json!({"late":"receipt"}), Some(("late-id", Some("https://example.invalid/late")))
+    ).await.unwrap());
+    let expired_state: (String, Option<String>, Option<Value>) = sqlx::query_as(
+        "SELECT p.state,p.external_id,a.receipt FROM publications p JOIN publication_attempts a ON a.publication_id=p.id WHERE p.id=$1 AND a.id=$2"
+    ).bind(expired).bind(attempt).fetch_one(&h.state.db).await.unwrap();
+    assert_eq!(expired_state, ("sending".into(), None, None));
     let (replaced, old) = sending(h, channel, 300).await;
     sqlx::query("UPDATE publication_attempts SET state='uncertain' WHERE id=$1")
         .bind(old)
@@ -64,11 +72,52 @@ async fn fenced_writes_and_small_pool(h: &Harness) {
         result,
         provider_bridge::BridgeOutcome::Uncertain { .. }
     ));
+    assert!(!beweft::worker::finish_attempt(
+        &h.state, replaced, old, "published", None,
+        json!({"late":"receipt"}), Some(("late-id", Some("https://example.invalid/late")))
+    ).await.unwrap());
+    let replacement_state: (String, Option<String>, Option<Value>) = sqlx::query_as(
+        "SELECT p.state,p.external_id,a.receipt FROM publications p JOIN publication_attempts a ON a.publication_id=p.id WHERE p.id=$1 AND a.id=$2"
+    ).bind(replaced).bind(old).fetch_one(&h.state.db).await.unwrap();
+    assert_eq!(replacement_state, ("sending".into(), None, None));
     assert_eq!(
         h.provider.post_writes.load(Ordering::SeqCst),
         0,
         "expired and replaced attempts must make ZERO requests even for a text-only single-step adapter"
     );
+    // A media stage held beyond its lease may have succeeded remotely. It
+    // cannot store a checkpoint or complete the expired local attempt.
+    let (expiring, expiring_attempt) = sending(h, channel, 30).await;
+    let media = Uuid::new_v4();
+    let bytes = media_fixture::fixture_bytes(false);
+    tokio::fs::write(h.state.config.media_dir.join(media.to_string()), &bytes).await.unwrap();
+    sqlx::query("INSERT INTO media(id,brand_id,name,mime,size,storage_key) VALUES($1,$2,'fixture.jpg','image/jpeg',$3,$4)")
+        .bind(media).bind(h.brand).bind(bytes.len() as i64).bind(media.to_string())
+        .execute(&h.state.db).await.unwrap();
+    sqlx::query("UPDATE publications SET payload=$2,lease_until=clock_timestamp()+interval '5 seconds' WHERE id=$1")
+        .bind(expiring).bind(json!({"text":"fixture image","title":"","media_ids":[media],"options":{}}))
+        .execute(&h.state.db).await.unwrap();
+    h.provider.media_block.store(1, Ordering::SeqCst);
+    let state = h.state.clone();
+    let delivery = tokio::spawn(async move {
+        provider_bridge::publish(&state, &json!({"id":expiring,"attempt_id":expiring_attempt,"channel_id":channel})).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(4), h.provider.media_started.notified()).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5200)).await;
+    h.provider.media_release.notify_one();
+    assert!(matches!(delivery.await.unwrap(), provider_bridge::BridgeOutcome::Uncertain { .. }));
+    h.provider.media_block.store(0, Ordering::SeqCst);
+    let checkpoints: i64 = sqlx::query_scalar("SELECT count(*) FROM provider_delivery_checkpoints WHERE publication_id=$1")
+        .bind(expiring).fetch_one(&h.state.db).await.unwrap();
+    assert_eq!(checkpoints, 0);
+    assert!(!beweft::worker::finish_attempt(
+        &h.state, expiring, expiring_attempt, "published", None,
+        json!({"late":"receipt"}), Some(("late-id", None))
+    ).await.unwrap());
+    let state: (String, Option<String>, Option<Value>) = sqlx::query_as(
+        "SELECT p.state,p.external_id,a.receipt FROM publications p JOIN publication_attempts a ON a.publication_id=p.id WHERE p.id=$1 AND a.id=$2"
+    ).bind(expiring).bind(expiring_attempt).fetch_one(&h.state.db).await.unwrap();
+    assert_eq!(state, ("sending".into(), None, None));
     let (good, attempt) = sending(h, channel, 300).await;
     let result = provider_bridge::publish(
         &h.state,

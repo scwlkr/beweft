@@ -1,13 +1,9 @@
 use crate::{
     auth::Auth,
-    catalog::Filter,
     error::{Result, data},
     state::AppState,
 };
-use axum::{
-    Json,
-    extract::{Query, State},
-};
+use axum::{Json, extract::State};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 pub async fn health(State(state): State<AppState>) -> Result<Json<Value>> {
@@ -25,25 +21,4 @@ pub async fn jobs(State(state): State<AppState>, auth: Auth) -> Result<Json<Valu
     result["worker_healthy"] =
         json!(last.is_some_and(|t| t > Utc::now() - chrono::Duration::seconds(30)));
     Ok(data(result))
-}
-pub async fn analytics(
-    State(state): State<AppState>,
-    auth: Auth,
-    Query(filter): Query<Filter>,
-) -> Result<Json<Value>> {
-    if let Some(brand) = filter.brand_id {
-        auth.brand(brand)?;
-    }
-    let summary:Value=sqlx::query_scalar("SELECT jsonb_build_object('scheduled',count(*) FILTER(WHERE state IN ('queued','sending')),'published',count(*) FILTER(WHERE state='published'),'attention',count(*) FILTER(WHERE state IN ('uncertain','failed','manual_required'))) FROM publications WHERE ($1::uuid IS NULL OR brand_id=$1) AND (cardinality($2::uuid[])=0 OR brand_id=ANY($2))").bind(filter.brand_id).bind(&auth.brand_ids).fetch_one(&state.db).await?;
-    Ok(data(
-        json!({"availability":"unavailable","reason":"No connected provider currently supplies performance metrics. These summary counts describe local workflow only.","summary":summary,"metrics":[]}),
-    ))
-}
-pub async fn inbox(auth: Auth, Query(filter): Query<Filter>) -> Result<Json<Value>> {
-    if let Some(brand) = filter.brand_id {
-        auth.brand(brand)?;
-    }
-    Ok(data(
-        json!({"availability":"unavailable","reason":"Inbox access requires a supported provider integration and granted account permissions.","items":[]}),
-    ))
 }

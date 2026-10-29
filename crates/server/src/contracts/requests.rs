@@ -4,6 +4,66 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use utoipa::ToSchema;
 use uuid::Uuid;
+
+#[derive(Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DisconnectRequest {
+    /// Confirm the selected queue cancellation and the provider-wide reconnection impact.
+    #[serde(default)]
+    #[schema(required = true)]
+    pub confirm_shared_impact: bool,
+}
+#[derive(Deserialize, Serialize, ToSchema)]
+pub struct ProviderAppRequest {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub instance_url: Option<String>,
+}
+#[derive(Deserialize, Serialize, ToSchema)]
+pub struct StartConnectionRequest {
+    pub brand_id: Uuid,
+    pub reconnect_channel_id: Option<Uuid>,
+}
+#[derive(Deserialize, Serialize, ToSchema)]
+pub struct CompleteConnectionRequest {
+    pub destination_id: String,
+    pub timezone: Option<String>,
+}
+#[derive(Deserialize, Serialize, ToSchema)]
+pub struct BlueskyConnectionRequest {
+    pub brand_id: Uuid,
+    pub identifier: String,
+    pub app_password: String,
+    pub reconnect_channel_id: Option<Uuid>,
+    pub timezone: Option<String>,
+}
+#[derive(Deserialize, Serialize, ToSchema)]
+pub struct AcknowledgeRevocationRequest {
+    pub access_removed: bool,
+    pub revocation_id: Uuid,
+}
+#[derive(Deserialize, Serialize, ToSchema)]
+pub struct ProviderSyncRequest {
+    pub allow_metered: Option<bool>,
+}
+#[derive(Deserialize, Serialize, ToSchema)]
+pub struct ProviderReplyRequest {
+    pub text: String,
+    pub request_id: Uuid,
+    pub expected_last_request_id: Option<Uuid>,
+}
+#[derive(Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderReplyResolution {
+    Published,
+    NotPublished,
+}
+#[derive(Deserialize, Serialize, ToSchema)]
+pub struct ResolveProviderReplyRequest {
+    pub resolution: ProviderReplyResolution,
+    pub note: String,
+    pub external_url: Option<String>,
+}
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BootstrapRequest {
