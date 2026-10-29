@@ -22,8 +22,9 @@ media limits, populated migrations, scheduling/replacement uncertainty, owner
 workflows, browser behavior, provider adapter/router fixtures and CLI/MCP.
 The built baseline image passed normal local UI/API/worker use. A real
 image/schema 7→14 upgrade and matching old-image/data/media/key rollback passed.
-The combined image through #28 is being packaged for the retained installation;
-its final runtime qualification will be recorded in the orchestration record.
+The combined image through #28 passed fresh independent qualification and was
+installed backup-first before the 16:30 target. Its exact image/source and runtime
+checks are recorded in the orchestration record.
 
 ## Remaining feasible product work
 
