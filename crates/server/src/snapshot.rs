@@ -82,9 +82,6 @@ pub async fn from_post(
         .and_then(|v| v["text"].as_str())
         .unwrap_or(post.get("text"));
     let ids = effective_media(post, variant)?;
-    if text.trim().is_empty() && ids.is_empty() {
-        return Err(ApiError::bad("A scheduled post needs text or media"));
-    }
     let options = variant
         .and_then(|v| v.get("options"))
         .cloned()

@@ -423,6 +423,40 @@ def run():
             rejected_schedule(unsupported, [x["id"]])
             malformed = request("/posts", {"brand_id":brand,"text":"bad image","media_ids":[corrupt["id"]]})
             rejected_schedule(malformed, [x["id"]])
+            empty = request("/posts", {"brand_id":brand,"text":""})
+            rejected_schedule(empty, [x["id"]])
+            legacy_empty = request("/posts", {"brand_id":brand,"text":""})
+            legacy_id = str(uuid.uuid4())
+            legacy_body = {"version":1,"channel_ids":[manual],"scheduled_at":when,"request_id":legacy_id}
+            assert request(f"/posts/{legacy_empty['id']}/schedule", legacy_body, expected=400)["error"]["code"] == "invalid_request"
+            request(f"/schedule-requests/{legacy_id}", expected=404)
+
+            # Local file disappearance or read failure is infrastructure,
+            # not a permanent format decision. The exact same intent can be
+            # retried after the original immutable media is available again.
+            media_key = sql(f"SELECT storage_key FROM media WHERE id='{asset['id']}'")
+            media_path = Path(temp) / media_key
+            held_path = Path(temp) / "temporarily-held-image"
+            for inaccessible in ("missing", "unreadable"):
+                transient = request("/posts", {"brand_id":brand,"text":"retry image","media_ids":[asset["id"]]})
+                transient_id = str(uuid.uuid4())
+                transient_body = {"version":1,"channel_ids":[x["id"]],"scheduled_at":when,"request_id":transient_id}
+                if inaccessible == "missing":
+                    media_path.rename(held_path)
+                else:
+                    media_path.chmod(0)
+                try:
+                    result = request(f"/posts/{transient['id']}/schedule", transient_body, expected=503)
+                    assert result["error"]["code"] == "provider_format_check_unavailable"
+                    request(f"/schedule-requests/{transient_id}", expected=404)
+                    assert sql(f"SELECT count(*) FROM publications WHERE post_id='{transient['id']}'") == "0"
+                finally:
+                    if inaccessible == "missing":
+                        held_path.rename(media_path)
+                    else:
+                        media_path.chmod(0o600)
+                accepted_transient = request(f"/posts/{transient['id']}/schedule", transient_body)[0]
+                request(f"/publications/{accepted_transient['id']}/cancel", {})
             missing_option = request("/posts", {"brand_id":brand,"title":"Video","text":"video",
                                       "media_ids":[video_asset["id"]],"options":{"privacy":"private"}})
             rejected_schedule(missing_option, [youtube["id"]])

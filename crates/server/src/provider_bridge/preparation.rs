@@ -40,12 +40,20 @@ pub(super) async fn prepare_publication_on(
                 .await?;
         let key: String = row.get("storage_key");
         if key.contains('/') || key.contains('\\') || key == "." || key == ".." {
-            return Err(ApiError::bad("Invalid media storage key"));
+            return Err(ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "provider_format_check_unavailable",
+                "Publication media storage is unavailable".into(),
+            ));
         }
         let path = state.config.media_dir.join(key);
-        let metadata = tokio::fs::metadata(&path)
-            .await
-            .map_err(|_| ApiError::bad("Publication media file is unavailable"))?;
+        let metadata = tokio::fs::metadata(&path).await.map_err(|_| {
+            ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "provider_format_check_unavailable",
+                "Publication media file is unavailable".into(),
+            )
+        })?;
         let public_url = if delivery && state.config.public_url.starts_with("https://") {
             let token = crypto::random_secret();
             sqlx::query("INSERT INTO provider_media_tokens(token_hash,media_id,expires_at) VALUES($1,$2,now()+interval '2 hours')").bind(crypto::digest(&token)).bind(media_id).execute(&mut *db).await?;

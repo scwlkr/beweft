@@ -34,18 +34,15 @@ impl ScheduleFormatValidator {
                 .await?;
         if !providers::known(&provider) {
             // Manual, fixture and legacy unknown channels keep their existing behavior.
+            if payload["text"].as_str().unwrap_or("").trim().is_empty()
+                && payload["media_ids"].as_array().is_none_or(Vec::is_empty)
+            {
+                return Err(ApiError::bad("A scheduled post needs text or media"));
+            }
             return Ok(());
         }
         let value = json!({"id":Uuid::nil(),"brand_id":brand,"payload":payload});
-        let p = preparation::prepare_publication_on(state, tx, &value, false)
-            .await
-            .map_err(|error| {
-                if error.0 == StatusCode::BAD_REQUEST {
-                    ApiError::bad_code("provider_format_invalid", error.2)
-                } else {
-                    error
-                }
-            })?;
+        let p = preparation::prepare_publication_on(state, tx, &value, false).await?;
         providers::validate(&provider, &p).map_err(format_error)?;
         if !p.media.is_empty()
             && matches!(
