@@ -1,8 +1,9 @@
 # Delivery checklist
 
-Implementation is paused for the owner's orchestrator handoff; use
-`ORCHESTRATOR-HANDOFF.md` for the precise checkpoints, outstanding findings and
-launch prompt. This is working status, not a release claim. Hosting remains local until the
+Implementation resumed on 2026-10-29; use
+`docs/orchestration-current.md` for active checkpoints and
+`ORCHESTRATOR-HANDOFF.md` for the starting stack and requirements.
+This is working status, not a release claim. Hosting remains local until the
 owner chooses a server and domain. Example production values must stay clearly
 marked placeholders. No live provider publication has been authorized for tests.
 

@@ -46,11 +46,15 @@ exit without starting a scheduler; core implements it and operations wires it.
 Focused PRs are open against the preserved stack; none of these checkpoints is
 a delivered release:
 
-- PR #10: CLI/MCP qualification and safe upload handles. Fresh review exposed
+- PR #10 is merged into the integration branch at `92761c9`. It adds CLI/MCP
+  qualification and safe upload handles. Fresh review exposed
   missing media inspection and unbounded list reads; the second checkpoint adds
   scoped media reads and bounded cursor pages. Further review found upload
   timeout and request/response envelope limits that reject valid API operations.
-  The worker is fixing these before another brand-new review.
+  Reviewed fixes now handle these bounds and complete bounded multipart bodies.
+  The final review passed the functional checks; a nonblocking restriction on
+  percent-encoded raw query values remains for the next agent-interface slice.
+  Operations is now implementing named-worker health checks in a focused PR.
 - PR #11: brand-list ordering and browser sessions, targeting PR #9's branch.
   Fresh review reproduced cross-tab stale 401s, a queued sign-out revoking a
   later login, and repeated first-brand submission. The worker is fixing those
