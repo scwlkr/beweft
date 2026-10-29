@@ -1,19 +1,25 @@
 import { ArrowUpRight, ChevronRight, Pause, Play, Plus } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { z } from "zod";
+import type { CreateChannelRequest } from "../lib/api-contract.generated";
 import {
   api,
+  captureWorkspaceSession,
   ChannelSchema,
+  isCurrentWorkspaceSession,
+  ManualGuidanceSchema,
   type Brand,
   type Channel,
   type Provider,
+  type ManualGuidance,
 } from "../api";
 import { Network, Unicorn } from "../components/brand";
-import { Field, Submit } from "../components/shared";
+import { ErrorNotice, Field, Submit } from "../components/shared";
 import { Button } from "../components/ui/button";
 import { Dialog } from "../components/ui/dialog";
 import { ConnectedChannels } from "./ConnectedChannels";
 import { ProviderSetup } from "./ProviderSetup";
+import { DisconnectDialog } from "./DisconnectDialog";
 
 type Action = (
   fn: () => Promise<unknown>,
@@ -38,16 +44,68 @@ export function Connections({
     reconnectId?: string;
   } | null>(null);
   const [disconnect, setDisconnect] = useState<Channel | null>(null);
-  const [disconnectResult, setDisconnectResult] = useState("");
   const [add, setAdd] = useState(false);
   const [name, setName] = useState("");
   const [timezone, setTimezone] = useState(zone);
   const [provider, setProvider] = useState("manual");
+  const [target, setTarget] = useState("generic");
+  const [platforms, setPlatforms] = useState<ManualGuidance[]>([]);
+  const [platformError, setPlatformError] = useState("");
+  const [platformAttempt, setPlatformAttempt] = useState(0);
+  const [platformsReady, setPlatformsReady] = useState(false);
   const [detail, setDetail] = useState<Provider | null>(null);
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    let session;
+    try {
+      session = captureWorkspaceSession();
+    } catch {
+      return () => controller.abort();
+    }
+    setPlatformsReady(false);
+    setPlatformError("");
+    void api(
+      "/manual-platforms",
+      z.array(ManualGuidanceSchema),
+      "GET",
+      undefined,
+      controller.signal,
+    )
+      .then((found) => {
+        if (
+          !active ||
+          controller.signal.aborted ||
+          !isCurrentWorkspaceSession(session)
+        )
+          return;
+        if (!found.some((platform) => platform.id === "generic"))
+          throw new Error(
+            "The server did not include the generic manual destination.",
+          );
+        setPlatforms(found);
+        setPlatformsReady(true);
+      })
+      .catch((failure) => {
+        if (
+          active &&
+          !controller.signal.aborted &&
+          isCurrentWorkspaceSession(session)
+        ) {
+          setTarget("generic");
+          setPlatformError(failure.message);
+        }
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [platformAttempt]);
   return (
     <>
       {setup && (
         <ProviderSetup
+          key={`${setup.provider.id ?? setup.provider.provider}:${setup.reconnectId ?? "new"}`}
           brand={brand}
           provider={setup.provider}
           reconnectId={setup.reconnectId}
@@ -58,41 +116,20 @@ export function Connections({
         />
       )}
       {disconnect && (
-        <Dialog
-          open
-          onOpenChange={(v) => !v && setDisconnect(null)}
-          title={`Disconnect ${disconnect.name}?`}
-          description="This pauses the channel, stops queued deliveries, and removes its stored credentials. Publishing history remains."
-        >
-          <div className="form-stack">
-            <p className="muted">
-              Some providers require revoking access in their own connected-app
-              settings.
-            </p>
-            {disconnectResult && <p role="status">{disconnectResult}</p>}
-            <Button
-              variant="destructive"
-              disabled={pending || !!disconnectResult}
-              onClick={() =>
-                void action(async () => {
-                  const result = await api(
-                    `/channels/${disconnect.id}/disconnect`,
-                    z.object({
-                      disconnected: z.boolean(),
-                      provider_revoked: z.boolean(),
-                      next_action: z.string(),
-                    }),
-                    "POST",
-                    {},
-                  );
-                  setDisconnectResult(result.next_action);
-                }, "Channel disconnected")
-              }
-            >
-              Disconnect channel
-            </Button>
-          </div>
-        </Dialog>
+        <DisconnectDialog
+          channel={disconnect}
+          pending={pending}
+          action={action}
+          onClose={() => setDisconnect(null)}
+          onReview={() => {
+            const selected = disconnect;
+            const selectedProvider = providers.find(
+              (item) => item.id === selected.provider,
+            ) ?? { id: selected.provider, name: selected.provider };
+            setDisconnect(null);
+            setSetup({ provider: selectedProvider, reconnectId: selected.id });
+          }}
+        />
       )}
       <div className="section-toolbar">
         <h2>
@@ -129,10 +166,24 @@ export function Connections({
             setSetup({ provider, reconnectId })
           }
           onDisconnect={(channel) => {
-            setDisconnectResult("");
             setDisconnect(channel);
           }}
+          platforms={platforms}
+          platformsReady={platformsReady}
         />
+      )}
+      {platformError && (
+        <div className="inline-actions">
+          <ErrorNotice
+            message={`Manual destinations are unavailable: ${platformError}`}
+          />
+          <Button
+            variant="secondary"
+            onClick={() => setPlatformAttempt((attempt) => attempt + 1)}
+          >
+            Retry destinations
+          </Button>
+        </div>
       )}
       <section className="provider-section">
         <div className="section-heading">
@@ -192,12 +243,16 @@ export function Connections({
                     name,
                     provider,
                     timezone,
-                  }),
+                    ...(provider === "manual"
+                      ? { target_platform: target }
+                      : {}),
+                  } satisfies CreateChannelRequest),
                 "Channel added",
               ).then((ok) => {
                 if (ok) {
                   setAdd(false);
                   setName("");
+                  setTarget("generic");
                 }
               });
             }}
@@ -215,6 +270,32 @@ export function Connections({
                 )}
               </select>
             </Field>
+            {provider === "manual" && (
+              <Field label="Handoff destination">
+                <select
+                  aria-label="Handoff destination"
+                  value={target}
+                  disabled={!platformsReady}
+                  onChange={(event) => setTarget(event.target.value)}
+                >
+                  {platformsReady ? (
+                    platforms.map((platform) => (
+                      <option key={platform.id} value={platform.id}>
+                        {platform.name}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="generic">Other platform</option>
+                  )}
+                </select>
+              </Field>
+            )}
+            {provider === "manual" && !platformsReady && (
+              <small className="muted">
+                Other platform remains available while the destination list is
+                unavailable.
+              </small>
+            )}
             <Field label="Channel name">
               <input
                 required
@@ -288,6 +369,13 @@ export function Connections({
             {detail.execution === "manual" && (
               <Button
                 onClick={() => {
+                  const destination = detail.id ?? detail.provider ?? "generic";
+                  setProvider("manual");
+                  setTarget(
+                    platforms.some((platform) => platform.id === destination)
+                      ? destination
+                      : "generic",
+                  );
                   setDetail(null);
                   setAdd(true);
                 }}

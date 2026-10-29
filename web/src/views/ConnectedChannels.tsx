@@ -1,5 +1,12 @@
 import { Pause, Play } from "lucide-react";
-import { api, ChannelSchema, type Channel, type Provider } from "../api";
+import {
+  api,
+  ChannelSchema,
+  type Channel,
+  type ManualGuidance,
+  type Provider,
+} from "../api";
+import type { UpdateChannelRequest } from "../lib/api-contract.generated";
 import { Network } from "../components/brand";
 import { Button } from "../components/ui/button";
 import { ChannelPermissions } from "./ChannelPermissions";
@@ -10,6 +17,8 @@ export function ConnectedChannels({
   action,
   onReconnect,
   onDisconnect,
+  platforms,
+  platformsReady,
 }: {
   channels: Channel[];
   providers: Provider[];
@@ -17,6 +26,8 @@ export function ConnectedChannels({
   action: (fn: () => Promise<unknown>, message?: string) => Promise<boolean>;
   onReconnect: (provider: Provider, id: string) => void;
   onDisconnect: (channel: Channel) => void;
+  platforms: ManualGuidance[];
+  platformsReady: boolean;
 }) {
   return (
     <div className="channel-list">
@@ -33,12 +44,61 @@ export function ConnectedChannels({
             )}
             <p>
               {c.provider === "manual"
-                ? "Manual handoff · Owner confirms publication"
+                ? `Manual handoff · ${c.manual_guidance?.name ?? "Other platform"} · Owner confirms publication`
                 : c.provider === "fixture"
                   ? "Isolated fixture · Does not publish"
                   : c.provider}{" "}
               · {c.timezone}
             </p>
+            {c.provider === "manual" && (
+              <div className="manual-destination">
+                <label htmlFor={`manual-target-${c.id}`}>
+                  Handoff destination
+                </label>
+                <select
+                  id={`manual-target-${c.id}`}
+                  aria-label={`Handoff destination for ${c.name}`}
+                  value={c.target_platform ?? "generic"}
+                  disabled={pending || !platformsReady}
+                  onChange={(event) => {
+                    const body = {
+                      target_platform: event.target.value,
+                    } satisfies UpdateChannelRequest;
+                    void action(
+                      () =>
+                        api(`/channels/${c.id}`, ChannelSchema, "PATCH", body),
+                      "Handoff destination updated",
+                    );
+                  }}
+                >
+                  {platformsReady ? (
+                    <>
+                      {!platforms.some(
+                        (platform) =>
+                          platform.id === (c.target_platform ?? "generic"),
+                      ) && (
+                        <option value={c.target_platform ?? "generic"}>
+                          Current destination unavailable
+                        </option>
+                      )}
+                      {platforms.map((platform) => (
+                        <option key={platform.id} value={platform.id}>
+                          {platform.name}
+                        </option>
+                      ))}
+                    </>
+                  ) : (
+                    <option value={c.target_platform ?? "generic"}>
+                      {c.manual_guidance?.name ?? "Other platform"}
+                    </option>
+                  )}
+                </select>
+                <small className="muted">
+                  This guidance applies to existing handoffs for this channel
+                  too.
+                </small>
+              </div>
+            )}
           </div>
           {!["manual", "fixture"].includes(c.provider) && (
             <div className="inline-actions">

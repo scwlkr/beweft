@@ -363,6 +363,7 @@ export default function App() {
         {flowId && (
           <ConnectionFlow
             flowId={flowId}
+            brandId={brandId}
             onDone={async () => {
               go("connections");
               await load();
