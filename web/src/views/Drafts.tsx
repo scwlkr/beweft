@@ -1,10 +1,11 @@
 import { Feather, Plus, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { api, ok, type Post } from "../api";
+import { api, ok, type Brand, type Channel, type Post } from "../api";
 import { Empty, Time } from "../components/shared";
 import { Button } from "../components/ui/button";
 import { Dialog } from "../components/ui/dialog";
 import { readScheduleIntent, scheduleLock } from "../scheduleIntent";
+import { Templates } from "./Templates";
 import type { usePendingSchedule } from "../usePendingSchedule";
 
 type Action = (
@@ -13,6 +14,8 @@ type Action = (
 ) => Promise<boolean>;
 export function Drafts({
   posts,
+  brand,
+  channels,
   action,
   pending,
   onEdit,
@@ -22,6 +25,8 @@ export function Drafts({
   pendingSchedule,
 }: {
   posts: Post[];
+  brand: Brand;
+  channels: Channel[];
   action: Action;
   pending: boolean;
   onEdit: (p: Post) => void;
@@ -30,6 +35,7 @@ export function Drafts({
   protectedPostId?: string;
   pendingSchedule: ReturnType<typeof usePendingSchedule>;
 }) {
+  const [view, setView] = useState<"drafts" | "templates">("drafts");
   const drafts = posts.filter((p) => p.status === "draft");
   const [confirm, setConfirm] = useState<Post | null>(null);
   const lifetime = useRef<AbortController | null>(null);
@@ -43,7 +49,30 @@ export function Drafts({
   }, []);
   return (
     <>
-      {drafts.length === 0 ? (
+      <div className="tabs">
+        <button
+          aria-pressed={view === "drafts"}
+          onClick={() => setView("drafts")}
+        >
+          Drafts
+        </button>
+        <button
+          aria-pressed={view === "templates"}
+          onClick={() => setView("templates")}
+        >
+          Templates
+        </button>
+      </div>
+      {view === "templates" ? (
+        <Templates
+          brand={brand}
+          posts={posts}
+          channels={channels}
+          action={action}
+          pending={pending}
+          onEdit={onEdit}
+        />
+      ) : drafts.length === 0 ? (
         <Empty
           title="Your next post is waiting to happen"
           action={

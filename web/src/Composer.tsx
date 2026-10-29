@@ -306,6 +306,7 @@ export function Composer({
           {active && (
             <ProviderOptions
               provider={active.provider}
+              capabilities={active.capabilities}
               value={options[active.id] ?? {}}
               onChange={(v) => setOptions({ ...options, [active.id]: v })}
             />

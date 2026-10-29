@@ -17,6 +17,9 @@ import {
   ProviderSchema,
   PublicationSchema,
   isCurrentApiSession,
+  isCurrentWorkspaceSession,
+  captureWorkspaceSession,
+  requireWorkspaceSession,
   captureApiSession,
   onAuthIdentityChange,
   onAuthStorageError,
@@ -313,6 +316,60 @@ export function useWorkspace() {
       if (superseded) void verifySession();
     }
   };
+  // Credential-changing operations share the sign-in lock and only clear the
+  // session that initiated them. A lost response is treated as unconfirmed.
+  const endSessionWith = async (
+    path: string,
+    method: "POST" | "DELETE",
+    body?: unknown,
+  ) => {
+    const observed = captureWorkspaceSession();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      await authLock(async () => {
+        requireWorkspaceSession(observed);
+        try {
+          await api(path, ok, method, body, controller.signal);
+        } catch (failure) {
+          if (
+            path === "/auth/password" &&
+            failure instanceof ApiError &&
+            failure.status === 401 &&
+            isCurrentWorkspaceSession(observed)
+          ) {
+            await api(
+              "/auth/me",
+              z.object({ id: z.string(), email: z.string() }),
+              "GET",
+              undefined,
+              controller.signal,
+              true,
+            );
+            throw new Error("The current password was not accepted.");
+          }
+          const ambiguous =
+            !(failure instanceof ApiError) ||
+            failure.status >= 500 ||
+            failure.code === "invalid_response" ||
+            failure.code === "contract_mismatch";
+          if (ambiguous && isCurrentWorkspaceSession(observed)) {
+            rotateAuthEpoch();
+            setReady(false);
+            setSignOutError(
+              "The security change could not be confirmed. Sign in again and check your sessions.",
+            );
+          }
+          throw failure;
+        }
+        if (!isCurrentWorkspaceSession(observed)) return;
+        rotateAuthEpoch();
+        setReady(false);
+      }, controller.signal);
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
   useEffect(() => {
     const listener = () => setRoute(routeFromHash());
     window.addEventListener("hashchange", listener);
@@ -599,6 +656,7 @@ export function useWorkspace() {
     sessionCheckFailed,
     retrySession: verifySession,
     signOut,
+    endSessionWith,
     route,
     brands,
     brandId,

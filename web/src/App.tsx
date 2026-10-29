@@ -19,6 +19,7 @@ import { Composer } from "./Composer";
 import { titles, zone } from "./navigation";
 import { useWorkspace } from "./useWorkspace";
 import { usePendingSchedule } from "./usePendingSchedule";
+import { usePendingReplacement } from "./usePendingReplacement";
 import { usePendingMedia } from "./usePendingMedia";
 import { Calendar } from "./views/Calendar";
 import { ConnectionFlow } from "./views/ConnectionFlow";
@@ -69,8 +70,13 @@ export default function App() {
     reconcileMedia,
     go,
     createBrand,
+    endSessionWith,
   } = workspace;
   const pendingSchedule = usePendingSchedule(brandId, ready === true);
+  const pendingReplacement = usePendingReplacement(
+    pendingSchedule.key,
+    brandId,
+  );
   const pendingMedia = usePendingMedia(ready ? brandId : "", reconcileMedia);
   const [reviewMediaId, setReviewMediaId] = useState<string | null>(null);
   useEffect(() => setReviewMediaId(null), [brandId]);
@@ -178,6 +184,44 @@ export default function App() {
                 </Button>
               </div>
             )}
+            {(pendingReplacement.intent || pendingReplacement.error) && (
+              <div className="notice" role="status">
+                <div>
+                  <p>
+                    {pendingReplacement.intent
+                      ? "A queued replacement has an unconfirmed outcome. Check it before starting another publication."
+                      : pendingReplacement.error}
+                  </p>
+                  {pendingReplacement.intent && (
+                    <p>
+                      Original:{" "}
+                      {publications.find(
+                        (p) =>
+                          p.id === pendingReplacement.intent?.publicationId,
+                      )?.payload.title || "Untitled publication"}{" "}
+                      · <code>{pendingReplacement.intent.publicationId}</code>.
+                      If it remains queued, you can cancel that original from
+                      its details, then check again. Review history before
+                      taking another action.
+                    </p>
+                  )}
+                  {pendingReplacement.intent && pendingReplacement.error && (
+                    <p>{pendingReplacement.error}</p>
+                  )}
+                </div>
+                {pendingReplacement.intent && (
+                  <Button
+                    variant="secondary"
+                    disabled={pendingReplacement.busy}
+                    onClick={() =>
+                      void pendingReplacement.check().then(() => load())
+                    }
+                  >
+                    Check replacement
+                  </Button>
+                )}
+              </div>
+            )}
             {brand &&
               pendingMedia.brand === brand.id &&
               Object.keys(pendingMedia.intents).length > 0 && (
@@ -222,7 +266,7 @@ export default function App() {
             <div className="content-body" key={brandId}>
               {loading && !brand ? (
                 <Busy />
-              ) : !brand ? (
+              ) : !brand && route !== "settings" ? (
                 <Empty
                   title="A fresh start for your ideas"
                   action={
@@ -266,6 +310,12 @@ export default function App() {
                       )}
                       channels={channels}
                       media={media}
+                      posts={posts}
+                      pendingSchedule={pendingSchedule}
+                      pendingMedia={pendingMedia}
+                      reconcileMedia={reconcileMedia}
+                      onEdit={setComposer}
+                      onRefresh={load}
                       action={action}
                       pending={pending}
                       onCompose={() => setComposer(null)}
@@ -279,7 +329,7 @@ export default function App() {
                   )}
                   {route === "ideas" && (
                     <Ideas
-                      brand={brand}
+                      brand={brand!}
                       ideas={ideas.filter((i) =>
                         matching(
                           i.title + " " + i.text + " " + i.tags.join(" "),
@@ -294,6 +344,8 @@ export default function App() {
                   )}
                   {route === "drafts" && (
                     <Drafts
+                      brand={brand!}
+                      channels={channels}
                       posts={posts.filter((p) =>
                         matching(p.title + " " + p.text),
                       )}
@@ -315,7 +367,7 @@ export default function App() {
                   )}
                   {route === "media" && (
                     <MediaLibrary
-                      brand={brand}
+                      brand={brand!}
                       media={media.filter((m) => matching(m.name))}
                       action={action}
                       pending={pending}
@@ -324,7 +376,7 @@ export default function App() {
                   )}
                   {route === "connections" && (
                     <Connections
-                      brand={brand}
+                      brand={brand!}
                       channels={channels}
                       providers={providers}
                       action={action}
@@ -339,17 +391,18 @@ export default function App() {
                       action={action}
                       pending={pending}
                       health={health}
+                      endSessionWith={endSessionWith}
                     />
                   )}
                   {route === "analytics" && (
                     <Insights
-                      brand={brand}
+                      brand={brand!}
                       channels={channels}
                       kind="analytics"
                     />
                   )}
                   {route === "inbox" && (
-                    <Insights brand={brand} channels={channels} kind="inbox" />
+                    <Insights brand={brand!} channels={channels} kind="inbox" />
                   )}
                 </>
               )}

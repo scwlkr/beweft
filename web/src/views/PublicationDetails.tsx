@@ -7,6 +7,8 @@ import {
   type Channel,
   type Publication,
   type Media,
+  type Post,
+  type ApiSession,
 } from "../api";
 import {
   ErrorNotice,
@@ -18,6 +20,10 @@ import {
   Time,
 } from "../components/shared";
 import { Button } from "../components/ui/button";
+import { QueueReplacement } from "./QueueReplacement";
+import type { PendingMedia } from "../usePendingMedia";
+import type { usePendingSchedule } from "../usePendingSchedule";
+import { MetaRecovery } from "./MetaRecovery";
 import { ProviderRecovery } from "./ProviderRecovery";
 import { XRecovery } from "./XRecovery";
 import { AttemptHistory, isOwnerAttestation } from "./AttemptHistory";
@@ -43,6 +49,12 @@ export function PublicationDetails({
   publication: p,
   channel,
   media,
+  post,
+  pendingSchedule,
+  pendingMedia,
+  reconcileMedia,
+  onEdit,
+  onRefresh,
   onClose,
   action,
   pending,
@@ -50,6 +62,12 @@ export function PublicationDetails({
   publication: Publication;
   channel?: Channel;
   media: Media[];
+  post?: Post;
+  pendingSchedule: ReturnType<typeof usePendingSchedule>;
+  pendingMedia: PendingMedia;
+  reconcileMedia: (media: Media, session: ApiSession) => void;
+  onEdit: (post: Post) => void;
+  onRefresh: () => Promise<void>;
   onClose: () => void;
   action: Action;
   pending: boolean;
@@ -63,7 +81,7 @@ export function PublicationDetails({
       : null;
   const destination = safeDestination(guidance?.compose_url);
   const [retryAllowed, setRetryAllowed] = useState(
-    !["youtube", "x"].includes(p.provider),
+    !["youtube", "x", "facebook", "instagram", "threads"].includes(p.provider),
   );
   const [copyStatus, setCopyStatus] = useState("");
   const [url, setUrl] = useState("");
@@ -134,6 +152,21 @@ export function PublicationDetails({
               </p>
             )}
         </section>
+        {p.state === "queued" && (
+          <QueueReplacement
+            publication={p}
+            post={post}
+            media={media}
+            action={action}
+            pending={pending}
+            pendingSchedule={pendingSchedule}
+            pendingMedia={pendingMedia}
+            reconcileMedia={reconcileMedia}
+            onEdit={onEdit}
+            onRefresh={onRefresh}
+            onClose={onClose}
+          />
+        )}
         {p.state === "manual_required" && (
           <form
             className="form-stack"
@@ -231,52 +264,53 @@ export function PublicationDetails({
             <Submit pending={pending}>I published this post</Submit>
           </form>
         )}
-        {p.state === "uncertain" && p.provider !== "x" && (
-          <form
-            className="form-stack"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void perform(
-                "reconcile",
-                { resolution, external_url: url || undefined, note },
-                "Outcome reconciled",
-              );
-            }}
-          >
-            <ErrorNotice message="The network may have accepted this post. Check the account before deciding its outcome; blindly retrying could create a duplicate." />
-            <Field label="What did you verify?">
-              <select
-                required
-                value={resolution}
-                onChange={(e) => setResolution(e.target.value)}
-              >
-                <option value="">Choose verified outcome</option>
-                <option value="published">
-                  The post exists on the network
-                </option>
-                <option value="not_published">
-                  I verified it was not published
-                </option>
-              </select>
-            </Field>
-            <Field label="Evidence / reconciliation note">
-              <textarea
-                required
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                rows={3}
-              />
-            </Field>
-            <Field label="Post URL (if published)">
-              <input
-                type="url"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-              />
-            </Field>
-            <Submit pending={pending}>Record verified outcome</Submit>
-          </form>
-        )}
+        {p.state === "uncertain" &&
+          !["x", "facebook", "instagram", "threads"].includes(p.provider) && (
+            <form
+              className="form-stack"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void perform(
+                  "reconcile",
+                  { resolution, external_url: url || undefined, note },
+                  "Outcome reconciled",
+                );
+              }}
+            >
+              <ErrorNotice message="The network may have accepted this post. Check the account before deciding its outcome; blindly retrying could create a duplicate." />
+              <Field label="What did you verify?">
+                <select
+                  required
+                  value={resolution}
+                  onChange={(e) => setResolution(e.target.value)}
+                >
+                  <option value="">Choose verified outcome</option>
+                  <option value="published">
+                    The post exists on the network
+                  </option>
+                  <option value="not_published">
+                    I verified it was not published
+                  </option>
+                </select>
+              </Field>
+              <Field label="Evidence / reconciliation note">
+                <textarea
+                  required
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  rows={3}
+                />
+              </Field>
+              <Field label="Post URL (if published)">
+                <input
+                  type="url"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                />
+              </Field>
+              <Submit pending={pending}>Record verified outcome</Submit>
+            </form>
+          )}
         {["queued", "manual_required"].includes(p.state) && (
           <form
             className="form-stack detail-section"
@@ -320,6 +354,15 @@ export function PublicationDetails({
             pending={pending}
           />
         )}
+        {["facebook", "instagram", "threads"].includes(p.provider) &&
+          ["uncertain", "failed"].includes(p.state) && (
+            <MetaRecovery
+              publication={p}
+              onRetryAllowed={setRetryAllowed}
+              action={action}
+              pending={pending}
+            />
+          )}
         {p.state === "failed" && (
           <Button
             disabled={pending || !retryAllowed}
