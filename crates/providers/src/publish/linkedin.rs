@@ -47,6 +47,14 @@ fn expires(value: &Value, key: &str) -> Result<i64> {
         .ok_or_else(|| uncertain("LinkedIn omitted the upload URL expiry"))
 }
 
+fn description<'a>(p: &'a Publication, media: &'a Media) -> &'a str {
+    if media.alt_text.trim().is_empty() {
+        p.options["alt_text"].as_str().unwrap_or("")
+    } else {
+        &media.alt_text
+    }
+}
+
 fn uploaded_ids(cp: &Value, p: &Publication) -> Result<Vec<Value>> {
     let ids = cp["media_ids"]
         .as_array()
@@ -352,8 +360,8 @@ impl Adapter {
                 let mut body = json!({"author":author,"commentary":p.text,"visibility":"PUBLIC","distribution":{"feedDistribution":"MAIN_FEED","targetEntities":[],"thirdPartyDistributionChannels":[]},"lifecycleState":"PUBLISHED","isReshareDisabledByAuthor":false});
                 if ids.len() == 1 {
                     let mut media = json!({"id":ids[0]});
-                    if !p.media[0].alt_text.is_empty() {
-                        media["altText"] = json!(p.media[0].alt_text);
+                    if !description(p, &p.media[0]).is_empty() {
+                        media["altText"] = json!(description(p, &p.media[0]));
                     }
                     if video(&p.media[0]) && !p.title.is_empty() {
                         media["title"] = json!(p.title);
@@ -365,8 +373,8 @@ impl Adapter {
                         .zip(&p.media)
                         .map(|(id, m)| {
                             let mut v = json!({"id":id});
-                            if !m.alt_text.is_empty() {
-                                v["altText"] = json!(m.alt_text);
+                            if !description(p, m).is_empty() {
+                                v["altText"] = json!(description(p, m));
                             }
                             v
                         })

@@ -82,6 +82,12 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     linkedin_upload_started = threading.Event()
     linkedin_upload_release = threading.Event()
     linkedin_upload_returned = threading.Event()
+    reel_mode = "success"
+    reel_started = threading.Event()
+    reel_release = threading.Event()
+    reel_returned = threading.Event()
+    meta_next = 8000
+    meta_bodies = []
 
     def log_message(self, *_):
         pass
@@ -126,6 +132,16 @@ class Fixture(http.server.BaseHTTPRequestHandler):
                 polls = len(self.x_video_poll_times)
             status = "failed" if self.x_video_status == "failed" else "in_progress" if polls == 1 else "succeeded"
             return self.respond({"data":{"id":"123456789", "processing_info":{"state":status,"check_after_secs":self.x_video_wait}}})
+        if path == "/access_token":
+            return self.respond({"access_token":"instagram-fixture", "expires_in":7200,
+                                 "scope":"instagram_business_basic instagram_business_content_publish"})
+        if path == "/v23.0/me":
+            return self.respond({"user_id":"ig-destination", "name":"Fixture Instagram", "username":"fixture"})
+        if path == "/v23.0/12345":
+            phase = "not_started" if self.reel_mode in ("uncertain", "blocked") else "complete"
+            return self.respond({"id":"12345", "status":{"video_status":"ready" if phase == "complete" else "processing", "uploading_phase":{"status":"complete"}, "processing_phase":{"status":"complete"}, "publishing_phase":{"status":phase,"publish_status":"published"}}})
+        if path.startswith("/v23.0/") and path.rsplit("/", 1)[-1].isdigit():
+            return self.respond({"status_code":"FINISHED"})
         if path == "/v23.0/oauth/access_token":
             return self.respond({"access_token":"facebook-long-fixture", "expires_in":7200,
                                  "scope":"pages_manage_posts pages_read_engagement pages_manage_engagement"})
@@ -170,6 +186,43 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             if self.linkedin_mode == "lost_post":
                 return self.respond({}, 502)
             return self.respond({}, 201, {"x-restli-id":"urn:li:share:12345"})
+        if path == "/oauth/access_token":
+            return self.respond({"access_token":"instagram-short-fixture", "expires_in":7200})
+        if path == "/v23.0/me/video_reels":
+            value = {k:v[0] for k,v in urllib.parse.parse_qs(body.decode(), keep_blank_values=True).items()}
+            if value["upload_phase"] == "start":
+                return self.respond({"video_id":"12345","upload_url":"https://rupload.facebook.com/video-upload/v23.0/12345"})
+            assert value["upload_phase"] == "finish" and value["video_state"] == "PUBLISHED" and value["video_id"] == "12345"
+            self.record("reel_finish")
+            if self.reel_mode == "uncertain":
+                return self.respond({}, 502)
+            if self.reel_mode == "blocked":
+                self.reel_started.set()
+                self.reel_release.wait(20)
+                self.respond({"success":True})
+                self.reel_returned.set()
+                return
+            return self.respond({"success":True})
+        if path == "/video-upload/v23.0/12345":
+            assert self.headers.get("Authorization") == "OAuth page-fixture"
+            assert self.headers.get("offset") == "0" and int(self.headers["file_size"]) == len(body)
+            return self.respond({"success":True})
+        if path == "/v23.0/ig-destination/media":
+            value = {k:v[0] for k,v in urllib.parse.parse_qs(body.decode(), keep_blank_values=True).items()}
+            if "is_carousel_item" in value:
+                value["is_carousel_item"] = value["is_carousel_item"] == "true"
+            if value.get("is_carousel_item"):
+                url = value.get("image_url", value.get("video_url")).replace("https://media.fixture", self.app_origin, 1)
+                with urllib.request.urlopen(url, timeout=5) as response:
+                    fetched = response.read()
+                assert fetched
+            with self.lock:
+                self.meta_bodies.append(value)
+                type(self).meta_next += 1
+                created = str(self.meta_next)
+            return self.respond({"id":created})
+        if path == "/v23.0/ig-destination/media_publish":
+            return self.respond({"id":"ig-published"})
         if path == "/v23.0/oauth/access_token":
             return self.respond({"access_token":"facebook-short-fixture", "expires_in":7200})
         if path == "/token":
@@ -453,6 +506,7 @@ def run():
             brand = request("/brands", {"name":"Router fixture"})["id"]
             other_brand = request("/brands", {"name":"Other fixture"})["id"]
             request("/provider-apps/facebook", {"client_id":"facebook-client", "client_secret":"fixture-secret"}, "PUT")
+            request("/provider-apps/instagram", {"client_id":"instagram-client", "client_secret":"fixture-secret"}, "PUT")
             request("/provider-apps/x", {"client_id":"x-client", "client_secret":"fixture-secret"}, "PUT")
             request("/provider-apps/youtube", {"client_id":"youtube-client", "client_secret":"fixture-secret"}, "PUT")
             request("/provider-apps/bluesky", {"client_id":""}, "PUT")
@@ -475,6 +529,13 @@ def run():
             assert sql("SELECT (SELECT count(*) FROM connection_flows)||':'||(SELECT count(*) FROM channels)||':'||(SELECT count(*) FROM provider_oauth_fences)") == before_rows
             assert sql(fence_snapshot) == before_fences, "invalid reconnect IDs must not advance provider fences"
             fb = connect("facebook", brand)
+            ig = connect("instagram", brand)
+            sql(f"UPDATE channels SET capabilities=capabilities #- '{{permissions,actions,reel}}' WHERE id='{fb['id']}'")
+            fb_cap = next(c for c in request(f"/channels?brand_id={brand}") if c["id"] == fb["id"])["capabilities"]
+            assert "reel" in fb_cap["formats"] and fb_cap["permissions"]["actions"]["reel"]["status"] == "granted"
+            assert "carousel" in ig["capabilities"]["formats"]
+            sql(f"UPDATE channels SET capabilities=jsonb_set(capabilities,'{{formats}}','[\"image\",\"video\"]'::jsonb) WHERE id='{ig['id']}'")
+            assert "carousel" in next(c for c in request(f"/channels?brand_id={brand}") if c["id"] == ig["id"])["capabilities"]["formats"]
             sibling = connect("facebook", other_brand)
             x = connect("x", brand)
             youtube = connect("youtube", brand)
@@ -663,7 +724,9 @@ def run():
             text_post = schedule(brand, linkedin["id"], "LinkedIn text")
             wait_for(lambda: state_is(text_post["id"], "published"), "LinkedIn text")
             Fixture.linkedin_poll_count = 0
-            image_post = schedule(brand, linkedin["id"], "LinkedIn image", [asset["id"]], options={"alt_text":"Blue fixture"})
+            request(f"/media/{asset['id']}", {"alt_text":"Blue fixture", "metadata_version":1}, "PATCH")
+            image_post = schedule(brand, linkedin["id"], "LinkedIn image", [asset["id"]])
+            request(f"/media/{asset['id']}", {"alt_text":"Changed later", "metadata_version":2}, "PATCH")
             wait_for(lambda: state_is(image_post["id"], "published"), "LinkedIn image", seconds=40)
             assert Fixture.linkedin_posts[-1]["content"]["media"]["altText"] == "Blue fixture"
             Fixture.linkedin_poll_count = 0
@@ -681,7 +744,57 @@ def run():
             assert Fixture.counts.get("POST /rest/posts", 0) == before_li_posts + 1
             time.sleep(3)
             assert Fixture.counts.get("POST /rest/posts", 0) == before_li_posts + 1
+            observed_li = request(f"/publications/{unknown_li['id']}/provider-status")["linkedin_delivery"]
+            assert observed_li["phase"] == "post_started" and not observed_li["retry_allowed"]
+            attestation = {"resolution":"not_published", "note":"Fixture inspected", "sender_stopped":True,
+                           "provider_inspected":True, "observed_attempt_id":observed_li["attempt_id"],
+                           "observed_checkpoint_id":observed_li["checkpoint_id"]}
+            request(f"/publications/{unknown_li['id']}/reconcile", {"resolution":"not_published", "note":"Fixture"}, expected=409)
+            request(f"/publications/{unknown_li['id']}/reconcile", {**attestation,"observed_checkpoint_id":str(uuid.uuid4())}, expected=409)
+            request(f"/publications/{unknown_li['id']}/reconcile", attestation, token=token, expected=403)
+            request(f"/publications/{unknown_li['id']}/reconcile", attestation)
+            assert request(f"/publications/{unknown_li['id']}/provider-status")["linkedin_delivery"]["retry_allowed"]
+            assert Fixture.counts.get("POST /rest/posts", 0) == before_li_posts + 1
             Fixture.linkedin_mode = "success"
+            request(f"/publications/{unknown_li['id']}/retry", {})
+            wait_for(lambda: state_is(unknown_li["id"], "published"), "LinkedIn explicit attested retry")
+            assert Fixture.counts.get("POST /rest/posts", 0) == before_li_posts + 2
+            assert sql(f"SELECT count(*) FROM audit_events WHERE subject_id='{unknown_li['id']}' AND action='retry_linkedin_delivery'") == "1"
+
+            # A lost private upload is quarantined and can be restarted only
+            # after a current owner observation and a separate explicit retry.
+            Fixture.linkedin_mode = "lost_upload"
+            lost_li = schedule(brand, linkedin["id"], "LinkedIn lost upload", [asset["id"]])
+            wait_for(lambda: state_is(lost_li["id"], "uncertain"), "LinkedIn lost upload", seconds=30)
+            upload_status = request(f"/publications/{lost_li['id']}/provider-status")["linkedin_delivery"]
+            assert upload_status["phase"] == "upload" and not upload_status["retry_allowed"]
+            request(f"/publications/{lost_li['id']}/reconcile", {"resolution":"not_published", "note":"Fixture inspected", "sender_stopped":True,
+                    "provider_inspected":True, "observed_attempt_id":upload_status["attempt_id"], "observed_checkpoint_id":upload_status["checkpoint_id"]})
+            Fixture.linkedin_mode = "success"
+            Fixture.linkedin_poll_count = 0
+            request(f"/publications/{lost_li['id']}/retry", {})
+            wait_for(lambda: state_is(lost_li["id"], "published"), "LinkedIn upload restart", seconds=40)
+
+            # The same attempt/lease fence prevents a stale LinkedIn upload
+            # response from advancing into a public call.
+            before_li_stale = Fixture.counts.get("POST /rest/posts", 0)
+            stale_li = schedule(brand, linkedin["id"], "Stale LinkedIn upload", [asset["id"]], delay=60)
+            sql("CREATE FUNCTION fixture_linkedin_short_lease() RETURNS trigger LANGUAGE plpgsql AS $$ "
+                f"BEGIN IF NEW.publication_id='{stale_li['id']}' THEN UPDATE publications SET lease_until=clock_timestamp()+interval '4 seconds' WHERE id=NEW.publication_id; END IF; "
+                "RETURN NEW; END $$; CREATE TRIGGER fixture_linkedin_short_lease BEFORE INSERT ON publication_attempts "
+                "FOR EACH ROW EXECUTE FUNCTION fixture_linkedin_short_lease();")
+            Fixture.linkedin_upload_started.clear(); Fixture.linkedin_upload_returned.clear(); Fixture.linkedin_upload_release.clear()
+            Fixture.linkedin_mode = "block_upload"
+            sql(f"UPDATE publications SET scheduled_at=clock_timestamp() WHERE id='{stale_li['id']}'")
+            assert Fixture.linkedin_upload_started.wait(20), "LinkedIn upload did not start"
+            worker.send_signal(signal.SIGSTOP); Fixture.linkedin_upload_release.set()
+            assert Fixture.linkedin_upload_returned.wait(5), "LinkedIn upload response did not return"
+            time.sleep(5); worker.send_signal(signal.SIGCONT)
+            wait_for(lambda: state_is(stale_li["id"], "uncertain"), "LinkedIn stale upload quarantine")
+            assert Fixture.counts.get("POST /rest/posts", 0) == before_li_stale
+            assert request(f"/publications/{stale_li['id']}/provider-status")["linkedin_delivery"]["phase"] == "upload"
+            Fixture.linkedin_mode = "success"
+            sql("DROP TRIGGER fixture_linkedin_short_lease ON publication_attempts; DROP FUNCTION fixture_linkedin_short_lease();")
 
             # Expired and sub-second leases cannot start even the refresh call.
             # The short lease is set by PostgreSQL during claim, so this test
@@ -876,6 +989,74 @@ def run():
             Fixture.x_tweet_fail = False
             request(f"/publications/{unknown_post['id']}/retry", {})
             wait_for(lambda: state_is(unknown_post["id"], "published"), "attested X retry")
+
+            # Real router scheduling inspects every flat carousel attachment;
+            # the provider receives ordered child IDs and fetches both capabilities.
+            bad_carousel = request("/posts", {"brand_id":brand,"text":"invalid second item","media_ids":[asset["id"],corrupt["id"]]})
+            rejected_schedule(bad_carousel, [ig["id"]])
+            second = upload(brand, image_bytes, "second.jpg")
+            start_children = len(Fixture.meta_bodies)
+            carousel = schedule(brand, ig["id"], "Carousel fixture", [asset["id"],second["id"]])
+            wait_for(lambda: state_is(carousel["id"], "published"), "Instagram carousel", seconds=35)
+            created = Fixture.meta_bodies[start_children:]
+            assert len(created) == 3 and all(x["is_carousel_item"] for x in created[:2])
+            assert created[2]["media_type"] == "CAROUSEL" and created[2]["children"] == "8001,8002"
+            assert request(f"/publications/{carousel['id']}/attempts")[0]["receipt"]["provider_receipt"]["id"] == "ig-published"
+
+            # Facebook's accepted finish is not a receipt until status confirms publication.
+            reel_file = Path(temp) / "reel.mp4"
+            subprocess.run(["ffmpeg","-nostdin","-v","error","-f","lavfi","-i","color=c=blue:s=540x960:r=24",
+                            "-t","4","-c:v","libx264","-preset","ultrafast","-pix_fmt","yuv420p","-movflags","+faststart",str(reel_file)], check=True)
+            reel_brand = request("/brands", {"name":"Reel recovery fixture"})["id"]
+            reel_fb = connect("facebook", reel_brand)
+            reel_asset = upload(reel_brand, reel_file.read_bytes(), "reel.mp4", "video/mp4")
+            reel_before = Fixture.counts.get("reel_finish", 0)
+            published_reel = schedule(reel_brand, reel_fb["id"], "A Reel", [reel_asset["id"]], options={"format":"reel"})
+            wait_for(lambda: state_is(published_reel["id"], "published"), "Facebook Reel receipt", seconds=35)
+            assert publication(published_reel["id"])["external_id"] == "12345"
+            assert Fixture.counts.get("reel_finish", 0) == reel_before + 1
+            assert request(f"/publications/{published_reel['id']}/attempts")[0]["receipt"]["provider_receipt"]["status"] == "publishing_complete"
+
+            Fixture.reel_mode = "uncertain"
+            uncertain_reel = schedule(reel_brand, reel_fb["id"], "Lost Reel finish", [reel_asset["id"]], options={"format":"reel"})
+            wait_for(lambda: state_is(uncertain_reel["id"], "uncertain"), "lost Facebook Reel response", seconds=35)
+            observed = request(f"/publications/{uncertain_reel['id']}/provider-status")["meta_delivery"]
+            assert observed["phase"] == "post_started" and not observed["retry_allowed"]
+            writes = Fixture.counts["reel_finish"]
+            request(f"/publications/{uncertain_reel['id']}/retry", {}, expected=409)
+            resolution = {"resolution":"not_published", "note":"Fixture inspected", "observed_attempt_id":observed["attempt_id"],
+                          "observed_checkpoint_id":observed["checkpoint_id"], "sender_stopped":True, "provider_inspected":True}
+            request(f"/publications/{uncertain_reel['id']}/reconcile", {**resolution,"sender_stopped":False}, expected=409)
+            request(f"/publications/{uncertain_reel['id']}/reconcile", {**resolution,"observed_checkpoint_id":str(uuid.uuid4())}, expected=409)
+            assert Fixture.counts["reel_finish"] == writes
+            request(f"/publications/{uncertain_reel['id']}/reconcile", resolution)
+            assert request(f"/publications/{uncertain_reel['id']}/provider-status")["meta_delivery"]["retry_allowed"]
+            Fixture.reel_mode = "success"
+            request(f"/publications/{uncertain_reel['id']}/retry", {})
+            wait_for(lambda: state_is(uncertain_reel["id"], "published"), "attested Facebook Reel retry", seconds=35)
+            assert Fixture.counts["reel_finish"] == writes + 1
+            assert sql(f"SELECT count(*) FROM audit_events WHERE action='retry_meta_delivery' AND subject_id='{uncertain_reel['id']}' AND detail->>'video_id'='12345'") == "1"
+
+            # Replace the database attempt while an accepted public request
+            # remains in flight. The next claim must not repeat that write.
+            Fixture.reel_mode = "blocked"
+            stale_reel = schedule(reel_brand, reel_fb["id"], "Stale Reel finish", [reel_asset["id"]], options={"format":"reel"})
+            assert Fixture.reel_started.wait(20), "Reel finish did not reach the fixture"
+            old_attempt = sql(f"SELECT id FROM publication_attempts WHERE publication_id='{stale_reel['id']}' AND state='sending'")
+            terminated = sql("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=current_database() "
+                             "AND state='idle in transaction' AND query LIKE '%provider_delivery_checkpoints%' AND pid<>pg_backend_pid()")
+            assert terminated == "t", terminated
+            sql(f"UPDATE publication_attempts SET state='uncertain',finished_at=now() WHERE id='{old_attempt}'; "
+                f"UPDATE publications SET state='queued',lease_until=NULL WHERE id='{stale_reel['id']}'")
+            stale_writes = Fixture.counts["reel_finish"]
+            Fixture.reel_release.set()
+            assert Fixture.reel_returned.wait(5)
+            wait_for(lambda: state_is(stale_reel["id"], "uncertain"), "stale Meta attempt quarantined", seconds=30)
+            assert Fixture.counts["reel_finish"] == stale_writes
+            assert publication(stale_reel["id"])["external_id"] is None
+            stale_status = request(f"/publications/{stale_reel['id']}/provider-status")["meta_delivery"]
+            assert stale_status["phase"] == "post_started" and stale_status["attempt_id"] == old_attempt
+            Fixture.reel_mode = "success"
 
             before_metadata = Fixture.counts.get("POST /2/media/metadata", 0)
             x_photo = schedule(brand, x["id"], "Fixture X image", [asset["id"]], options={"alt_text":"A blue fixture image"})
@@ -1147,6 +1328,7 @@ def run():
                 locker.stdin.flush()
                 locker.wait(timeout=5)
             Fixture.feed_release.set()
+            Fixture.reel_release.set()
             Fixture.x_media_release.set()
             Fixture.reply_release.set()
             for process in reversed(processes):

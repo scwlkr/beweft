@@ -362,7 +362,7 @@ pub struct ReconcileRequest {
     pub external_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_url: Option<String>,
-    /// Required for an X public-start checkpoint when resolving not published.
+    /// Required for Meta delivery checkpoints and X public-start checkpoints when resolving not published.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_attempt_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]

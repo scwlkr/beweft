@@ -45,6 +45,7 @@ mod execution;
 mod preparation;
 pub(crate) use delivery::save_checkpoint_tx as save_recovery_checkpoint_tx;
 pub use execution::publish;
+pub(crate) use preparation::checkpoint_on as checkpoint_for_recovery;
 mod validation;
 pub use validation::ScheduleFormatValidator;
 mod inbox;

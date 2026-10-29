@@ -1022,6 +1022,35 @@
         ],
         "type": "object"
       },
+      "MetaDeliveryStatus": {
+        "properties": {
+          "attempt_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "checkpoint_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/XUploadPhase"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "retry_allowed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "phase",
+          "attempt_id",
+          "checkpoint_id",
+          "retry_allowed",
+          "reason"
+        ],
+        "type": "object"
+      },
       "OkResponse": {
         "properties": {
           "ok": {
@@ -1486,6 +1515,26 @@
       },
       "ProviderStatus": {
         "properties": {
+          "linkedin_delivery": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MetaDeliveryStatus"
+              }
+            ]
+          },
+          "meta_delivery": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MetaDeliveryStatus"
+              }
+            ]
+          },
           "reason": {
             "type": [
               "string",
@@ -1513,7 +1562,9 @@
           "session_expired",
           "reset_allowed",
           "reason",
-          "x_upload"
+          "x_upload",
+          "meta_delivery",
+          "linkedin_delivery"
         ],
         "type": "object"
       },
@@ -1846,7 +1897,7 @@
             "type": "string"
           },
           "observed_attempt_id": {
-            "description": "Required for an X public-start checkpoint when resolving not published.",
+            "description": "Required for Meta delivery checkpoints and X public-start checkpoints when resolving not published.",
             "format": "uuid",
             "type": [
               "string",

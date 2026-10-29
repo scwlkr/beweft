@@ -127,14 +127,23 @@ async fn fenced_step(
                 saved["stage"] = json!("x_legacy_ambiguous");
             }
             let stage = saved["stage"].as_str().unwrap_or("");
-            if channel.app.provider == "x" && stage.starts_with("x_") {
-                let needs_expiry = matches!(
-                    stage,
-                    "x_video_append" | "x_video_finalize" | "x_video_processing" | "x_video_ready"
-                ) || (matches!(stage, "x_image_media" | "x_post_started")
-                    && saved["media_ids"]
-                        .as_array()
-                        .is_some_and(|ids| !ids.is_empty()));
+            let is_x = channel.app.provider == "x" && stage.starts_with("x_");
+            let is_meta = matches!(channel.app.provider.as_str(), "instagram" | "threads")
+                && stage.starts_with("meta_");
+            let is_reel = channel.app.provider == "facebook" && stage.starts_with("fb_reel_");
+            if is_x || is_meta || is_reel {
+                let needs_expiry = (is_meta || is_reel)
+                    || matches!(
+                        stage,
+                        "x_video_append"
+                            | "x_video_finalize"
+                            | "x_video_processing"
+                            | "x_video_ready"
+                    )
+                    || (matches!(stage, "x_image_media" | "x_post_started")
+                        && saved["media_ids"]
+                            .as_array()
+                            .is_some_and(|ids| !ids.is_empty()));
                 if needs_expiry
                     && timing
                         .as_ref()
@@ -142,27 +151,31 @@ async fn fenced_step(
                 {
                     return Ok(Err(providers::error(
                         FailureKind::Uncertain,
-                        "X media expiry is missing. Inspect the delivery and reset before retrying.",
+                        "Provider session expiry is missing. Inspect the delivery before retrying.",
                     )));
                 }
                 if timing
                     .as_ref()
                     .is_some_and(|row| row.get::<bool, _>("expired"))
                 {
-                    saved["expired"] = json!(true);
-                    let _ = save_attempt_checkpoint_tx(
-                        &mut tx,
-                        state,
-                        id,
-                        attempt,
-                        saved,
-                        stage_started,
-                        None,
-                    )
-                    .await?;
+                    // Preserve the original Meta attempt identity at a public
+                    // boundary; expiry is visible from the database timestamp.
+                    if is_x {
+                        saved["expired"] = json!(true);
+                        let _ = save_attempt_checkpoint_tx(
+                            &mut tx,
+                            state,
+                            id,
+                            attempt,
+                            saved,
+                            stage_started,
+                            None,
+                        )
+                        .await?;
+                    }
                     return Ok(Err(providers::error(
                         FailureKind::ExpiredSession,
-                        "X media expired. Inspect the delivery and use the explicit reset before retrying.",
+                        "Provider media session expired. Inspect the delivery before retrying.",
                     )));
                 }
                 if timing
@@ -175,7 +188,20 @@ async fn fenced_step(
                     .as_str()
                     .and_then(|value| value.parse::<Uuid>().ok());
                 if previous != Some(attempt) {
-                    let is_public = matches!(stage, "x_post_started" | "x_legacy_ambiguous");
+                    let is_public = matches!(
+                        stage,
+                        "x_post_started"
+                            | "x_legacy_ambiguous"
+                            | "meta_public"
+                            | "meta_legacy_ambiguous"
+                            | "fb_reel_public"
+                    );
+                    if is_public && !is_x {
+                        return Ok(Err(providers::error(
+                            FailureKind::Uncertain,
+                            "An earlier Meta publication may have started. Inspect its outcome before retrying.",
+                        )));
+                    }
                     let rebound = save_attempt_checkpoint_tx(
                         &mut tx,
                         state,
@@ -197,14 +223,14 @@ async fn fenced_step(
                 // Refresh and lock waits consume real elapsed time too. Do
                 // not begin the public call unless its bounded stage still
                 // fits inside the original job's remaining time.
-                if stage == "x_post_started"
+                if matches!(stage, "x_post_started" | "meta_public" | "fb_reel_public")
                     && overall
                         .and_then(|deadline| deadline.remaining())
                         .is_none_or(|remaining| remaining < std::time::Duration::from_secs(80))
                 {
                     return Ok(Err(providers::error(
                         FailureKind::Uncertain,
-                        "The X post boundary needs owner inspection before recovery.",
+                        "The public posting boundary needs owner inspection before recovery.",
                     )));
                 }
             }
@@ -286,14 +312,19 @@ async fn fenced_step(
                 lock_attempt(state, &mut tx, id, attempt, channel_id).await?;
             }
         }
+        let was_wait = matches!(&result, Ok(Step::Wait(_)));
         if let Ok(Step::Checkpoint(next) | Step::Wait(next)) = &mut result {
-            let wait = if next["stage"] == "x_video_processing" {
-                next["check_after_secs"].as_u64()
-            } else if matches!(
-                next["stage"].as_str(),
-                Some("linkedin_image_processing" | "linkedin_video_processing")
-            ) {
-                Some(3)
+            let wait = if was_wait {
+                if matches!(
+                    next["stage"].as_str(),
+                    Some("linkedin_image_processing" | "linkedin_video_processing")
+                ) {
+                    Some(3)
+                } else {
+                    next["check_after_secs"]
+                        .as_u64()
+                        .map(|seconds| seconds.clamp(1, 60))
+                }
             } else {
                 None
             };
@@ -332,11 +363,11 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
     };
     let overall = providers::SuspendInstant::now()
         .and_then(|start| start.deadline(std::time::Duration::from_secs(180)));
-    let mut completed_private_checkpoint = false;
+    let mut completed_managed_checkpoint = false;
     let mut post_started = false;
     for step in 0..48 {
         if overall.and_then(|deadline| deadline.remaining()).is_none() {
-            if completed_private_checkpoint && !post_started {
+            if completed_managed_checkpoint && !post_started {
                 return BridgeOutcome::Continue;
             }
             break;
@@ -344,11 +375,20 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
         match fenced_step(state, id, attempt, channel, overall).await {
             Ok(Ok(Step::Checkpoint(next))) => {
                 let stage = next["stage"].as_str().unwrap_or("");
-                if stage.starts_with("x_") || stage.starts_with("linkedin_") {
-                    completed_private_checkpoint = true;
+                if stage.starts_with("x_")
+                    || stage.starts_with("meta_")
+                    || stage.starts_with("fb_reel_")
+                    || stage.starts_with("linkedin_")
+                {
+                    completed_managed_checkpoint = true;
                     post_started = matches!(
                         stage,
-                        "x_post_started" | "x_legacy_ambiguous" | "linkedin_post_started"
+                        "x_post_started"
+                            | "x_legacy_ambiguous"
+                            | "meta_public"
+                            | "meta_legacy_ambiguous"
+                            | "fb_reel_public"
+                            | "linkedin_post_started"
                     );
                     let remaining = overall
                         .and_then(|deadline| deadline.remaining())
@@ -363,14 +403,15 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                 }
             }
             Ok(Ok(Step::Wait(next)))
-                if matches!(
-                    next["stage"].as_str(),
-                    Some(
-                        "x_video_processing"
-                            | "linkedin_image_processing"
-                            | "linkedin_video_processing"
-                    )
-                ) =>
+                if next["stage"].as_str().is_some_and(|stage| {
+                    stage == "x_video_processing"
+                        || stage.starts_with("meta_")
+                        || stage.starts_with("fb_reel_")
+                        || matches!(
+                            stage,
+                            "linkedin_image_processing" | "linkedin_video_processing"
+                        )
+                }) =>
             {
                 return BridgeOutcome::Continue;
             }
@@ -397,7 +438,7 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
             Ok(Err(e)) => return BridgeOutcome::Rejected { reason: e.message },
             Err(e)
                 if e.1 == "delivery_paused"
-                    && (step == 0 || (completed_private_checkpoint && !post_started)) =>
+                    && (step == 0 || (completed_managed_checkpoint && !post_started)) =>
             {
                 return BridgeOutcome::Continue;
             }
