@@ -33,6 +33,8 @@ export default function App() {
   const {
     ready,
     setReady,
+    signingOut,
+    signOutError,
     route,
     brands,
     brandId,
@@ -64,7 +66,14 @@ export default function App() {
     chooseBrand,
   } = workspace;
   if (ready === null) return <Busy />;
-  if (!ready) return <Auth onReady={() => setReady(true)} />;
+  if (!ready)
+    return (
+      <Auth
+        signingOut={signingOut}
+        signOutError={signOutError}
+        onReady={() => setReady(true)}
+      />
+    );
   const flowId = new URLSearchParams(location.search).get("connection_flow");
   const connectionError = new URLSearchParams(location.search).get(
     "connection_error",

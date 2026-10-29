@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import {
   api,
+  advanceApiSession,
+  authLock,
   ApiError,
   BrandSchema,
   ChannelSchema,
@@ -11,6 +13,9 @@ import {
   PostSchema,
   ProviderSchema,
   PublicationSchema,
+  isCurrentApiSession,
+  onUnauthorized,
+  ok,
   type Brand,
   type Channel,
   type Health,
@@ -44,6 +49,9 @@ export function useWorkspace() {
   >({});
   const [toast, setToast] = useState("");
   const [pending, setPending] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState("");
+  const signingOutRef = useRef(false);
   const [sidebar, setSidebar] = useState(false);
   const [composer, setComposer] = useState<
     (Partial<Post> & { composeDate?: string }) | null | undefined
@@ -56,6 +64,9 @@ export function useWorkspace() {
   const readyRef = useRef<boolean | null>(null);
   const session = useRef(0);
   const selection = useRef(0);
+  // Only an explicit choice invalidates in-flight brand-list snapshots. An
+  // automatic fallback still needs newer authoritative lists to be applied.
+  const manualSelection = useRef(0);
   const requests = useRef(0);
   const applied = useRef<Record<LoadArea, number>>({
     brands: 0,
@@ -86,6 +97,8 @@ export function useWorkspace() {
       if (readyRef.current === value) return;
       readyRef.current = value;
       ++session.current;
+      advanceApiSession();
+      if (value) setSignOutError("");
       if (!value) {
         ++selection.current;
         ++actionGeneration.current;
@@ -106,17 +119,57 @@ export function useWorkspace() {
     },
     [clearBrandData],
   );
+  useEffect(
+    () =>
+      onUnauthorized((generation) => {
+        if (readyRef.current === true && isCurrentApiSession(generation))
+          setReady(false);
+      }),
+    [setReady],
+  );
   useEffect(() => {
+    let active = true;
+    const sessionId = session.current;
     api("/auth/me", z.object({ id: z.string(), email: z.string() }))
-      .then(() => setReady(true))
+      .then(() => {
+        if (active && session.current === sessionId) setReady(true);
+      })
       .catch((e) => {
+        if (!active || session.current !== sessionId) return;
         if (e instanceof ApiError && e.status === 401) setReady(false);
         else {
           setReady(false);
           setError(e.message);
         }
       });
+    return () => {
+      active = false;
+    };
   }, [setReady]);
+  const signOut = async () => {
+    if (signingOutRef.current || readyRef.current !== true) return;
+    signingOutRef.current = true;
+    setSigningOut(true);
+    setSignOutError("");
+    setReady(false);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      await authLock(
+        () => api("/auth/logout", ok, "POST", {}, controller.signal),
+        controller.signal,
+      );
+    } catch (failure) {
+      if (!(failure instanceof ApiError && failure.status === 401))
+        setSignOutError(
+          "The server could not confirm sign-out. Sign in again and retry when it is reachable.",
+        );
+    } finally {
+      clearTimeout(timeout);
+      signingOutRef.current = false;
+      setSigningOut(false);
+    }
+  };
   useEffect(() => {
     const listener = () => setRoute(routeFromHash());
     window.addEventListener("hashchange", listener);
@@ -137,7 +190,7 @@ export function useWorkspace() {
     const t = setTimeout(() => setToast(""), 5000);
     return () => clearTimeout(t);
   }, [toast]);
-  const chooseBrand = useCallback(
+  const selectBrand = useCallback(
     (id: string) => {
       ++selection.current;
       context.current = id;
@@ -153,17 +206,27 @@ export function useWorkspace() {
     },
     [clearBrandData],
   );
+  const chooseBrand = useCallback(
+    (id: string) => {
+      ++manualSelection.current;
+      selectBrand(id);
+    },
+    [selectBrand],
+  );
   const load = useCallback(async () => {
     if (!ready || context.current !== brandId) return;
     const requestId = ++requests.current;
     const sessionId = session.current;
     const selectionId = selection.current;
+    const manualSelectionId = manualSelection.current;
     const currentSession = () =>
       readyRef.current === true && session.current === sessionId;
     const currentSelection = () =>
       currentSession() &&
       selection.current === selectionId &&
       context.current === brandId;
+    const currentBrandList = () =>
+      currentSession() && manualSelection.current === manualSelectionId;
     const watchAuth = <T>(promise: Promise<T>) =>
       promise.catch((e: unknown) => {
         if (e instanceof ApiError && e.status === 401 && currentSession())
@@ -171,12 +234,19 @@ export function useWorkspace() {
         throw e;
       });
     const report = (area: LoadArea, message: string) => {
-      if (!currentSelection() || requestId < reported.current[area]) return;
+      if (
+        !(area === "brands" ? currentBrandList() : currentSelection()) ||
+        requestId < reported.current[area]
+      )
+        return;
       reported.current[area] = requestId;
       setLoadErrors((previous) => ({ ...previous, [area]: message }));
     };
     const apply = (area: LoadArea, update: () => void) => {
-      if (!currentSelection() || requestId < applied.current[area])
+      if (
+        !(area === "brands" ? currentBrandList() : currentSelection()) ||
+        requestId < applied.current[area]
+      )
         return false;
       applied.current[area] = requestId;
       update();
@@ -207,13 +277,15 @@ export function useWorkspace() {
       const bs = await watchAuth(api("/brands", z.array(BrandSchema)));
       if (!apply("brands", () => setBrands(bs))) return;
       report("brands", "");
-      const next = bs.some((b) => b.id === brandId)
-        ? brandId
+      const selected = context.current;
+      const next = bs.some((b) => b.id === selected)
+        ? selected
         : (bs[0]?.id ?? "");
-      if (next !== brandId) {
-        chooseBrand(next);
+      if (next !== selected) {
+        selectBrand(next);
         return;
       }
+      if (!currentSelection()) return;
       area = "collections";
       if (next) {
         const q = `?brand_id=${encodeURIComponent(next)}`;
@@ -243,7 +315,7 @@ export function useWorkspace() {
         setLoading(false);
       }
     }
-  }, [ready, brandId, chooseBrand, clearBrandData, setReady]);
+  }, [ready, brandId, selectBrand, clearBrandData, setReady]);
   useEffect(() => {
     void load();
   }, [load]);
@@ -293,6 +365,9 @@ export function useWorkspace() {
   return {
     ready,
     setReady,
+    signingOut,
+    signOutError,
+    signOut,
     route,
     brands,
     brandId,

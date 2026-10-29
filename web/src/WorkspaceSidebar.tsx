@@ -1,5 +1,4 @@
 import { ArrowUpRight, LogOut, Plus } from "lucide-react";
-import { api, ok } from "./api";
 import { Unicorn } from "./components/brand";
 import { Button } from "./components/ui/button";
 import { useMobileDrawer } from "./useMobileDrawer";
@@ -21,8 +20,7 @@ export function WorkspaceSidebar({
     go,
     posts,
     health,
-    action,
-    setReady,
+    signOut,
     publications,
   } = workspace;
   const { drawer, mobile } = useMobileDrawer(sidebar, () =>
@@ -129,12 +127,7 @@ export function WorkspaceSidebar({
             variant="ghost"
             size="icon"
             aria-label="Sign out"
-            onClick={() =>
-              void action(async () => {
-                await api("/auth/logout", ok, "POST", {});
-                setReady(false);
-              }, "Signed out")
-            }
+            onClick={() => void signOut()}
           >
             <LogOut size={17} />
           </Button>

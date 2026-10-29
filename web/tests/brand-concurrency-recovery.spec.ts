@@ -134,6 +134,132 @@ for (const newer of ["hangs", "fails"]) {
   });
 }
 
+test("a newer successful list corrects an automatic fallback while its follow-up load is held", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const { alpha, beta, allowed, beforeBrandResponse } = await fixtures(
+      page,
+      context,
+      write,
+    );
+    const gamma = await write("/brands", { name: "Recovery Gamma" });
+    await write("/posts", {
+      brand_id: gamma.id,
+      title: "Gamma replacement draft",
+      text: "Gamma content",
+      media_ids: [],
+      variants: [],
+    });
+    allowed.add(gamma.id);
+    for (const endpoint of ["providers", "jobs/health"]) {
+      await page.route(`**/api/v1/${endpoint}`, (route) =>
+        route.fulfill({
+          status: 503,
+          json: {
+            error: { code: "unavailable", message: "Metadata unavailable" },
+          },
+        }),
+      );
+    }
+    const oldRequested = deferred(),
+      newRequested = deferred(),
+      followupRequested = deferred();
+    const releaseOld = deferred(),
+      releaseNew = deferred(),
+      releaseFollowup = deferred();
+    let count = 0;
+    beforeBrandResponse(async () => {
+      count++;
+      if (count === 1) {
+        oldRequested.resolve();
+        await releaseOld.promise;
+      } else if (count === 2) {
+        newRequested.resolve();
+        await releaseNew.promise;
+      } else if (count === 3) {
+        followupRequested.resolve();
+        await releaseFollowup.promise;
+      }
+    });
+    try {
+      await page.getByRole("button", { name: "Edit draft" }).click();
+      await archive(context, alpha.id);
+      await page.clock.fastForward(30_000);
+      await oldRequested.promise; // Snapshot includes Beta.
+      await archive(context, beta.id);
+      await page.clock.fastForward(30_000);
+      await newRequested.promise; // Newer snapshot excludes Beta.
+      releaseOld.resolve();
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      await expect(page.getByLabel("Current brand")).toHaveValue(beta.id);
+      await followupRequested.promise;
+      releaseNew.resolve();
+      await expect(page.getByLabel("Current brand")).toHaveValue(gamma.id);
+      await expect(
+        page.getByRole("heading", { name: "Gamma replacement draft" }),
+      ).toBeVisible();
+      await expect(
+        page.getByText("Alpha private draft", { exact: true }),
+      ).toHaveCount(0);
+      await page.getByRole("button", { name: "Edit draft" }).click();
+      await expect(page.getByLabel("Post text", { exact: true })).toHaveValue(
+        "Gamma content",
+      );
+    } finally {
+      releaseOld.resolve();
+      releaseNew.resolve();
+      releaseFollowup.resolve();
+    }
+  });
+});
+
+test("a pending brand list cannot override a later manual selection", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const { alpha, beta } = await fixtures(page, context, write);
+    const oldRequested = deferred(),
+      releaseOld = deferred();
+    const nextRequested = deferred(),
+      releaseNext = deferred();
+    let count = 0;
+    await page.route("**/api/v1/brands", async (route) => {
+      const response = await route.fetch();
+      const data = (await response.json()).data.filter(
+        (brand: { id: string }) => [alpha.id, beta.id].includes(brand.id),
+      );
+      count++;
+      if (count === 1) {
+        oldRequested.resolve();
+        await releaseOld.promise;
+        await route.fulfill({
+          response,
+          json: {
+            data: data.filter((brand: { id: string }) => brand.id !== beta.id),
+          },
+        });
+      } else {
+        nextRequested.resolve();
+        await releaseNext.promise;
+        await route.fulfill({ response, json: { data } });
+      }
+    });
+    try {
+      await page.clock.fastForward(30_000);
+      await oldRequested.promise;
+      await page.getByLabel("Current brand").selectOption(beta.id);
+      await nextRequested.promise;
+      releaseOld.resolve();
+      await afterPaint(page);
+      await expect(page.getByLabel("Current brand")).toHaveValue(beta.id);
+      releaseNext.resolve();
+      await expect(
+        page.getByRole("heading", { name: "Beta independent draft" }),
+      ).toBeVisible();
+    } finally {
+      releaseOld.resolve();
+      releaseNext.resolve();
+    }
+  });
+});
+
 test("an older brand-list success cannot replace a newer applied list", async () => {
   await withWorkspace(async (page, context, write) => {
     const { allowed, beforeBrandResponse } = await fixtures(

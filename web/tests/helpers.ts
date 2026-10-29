@@ -40,8 +40,15 @@ export async function withWorkspace(
     };
     // Reuse this isolated owner's session across regression contexts. The main
     // workspace scenario still exercises sign-in through the UI independently.
-    if (sessionCookies) await context.addCookies(sessionCookies);
-    else {
+    if (sessionCookies) {
+      await context.addCookies(sessionCookies);
+      const session = await context.request.get(`${origin}/api/v1/auth/me`);
+      if (!session.ok()) {
+        sessionCookies = null;
+        await context.clearCookies();
+      }
+    }
+    if (!sessionCookies) {
       await write("/auth/login", {
         email: process.env.BEWEFT_TEST_EMAIL,
         password: process.env.BEWEFT_TEST_PASSWORD,

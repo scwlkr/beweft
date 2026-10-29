@@ -134,16 +134,40 @@ export class ApiError extends Error {
     super(message);
   }
 }
+let sessionGeneration = 0;
+const unauthorizedListeners = new Set<(generation: number) => void>();
+export function advanceApiSession() {
+  ++sessionGeneration;
+}
+export function onUnauthorized(listener: (generation: number) => void) {
+  unauthorizedListeners.add(listener);
+  return () => {
+    unauthorizedListeners.delete(listener);
+  };
+}
+export function isCurrentApiSession(generation: number) {
+  return generation === sessionGeneration;
+}
+export async function authLock<T>(
+  work: () => Promise<T>,
+  signal?: AbortSignal,
+) {
+  if (!navigator.locks) throw new Error("Sign-in requires HTTPS or localhost.");
+  return navigator.locks.request("beweft:authentication", { signal }, work);
+}
 export async function api<T>(
   path: string,
   schema: z.ZodType<T>,
   method = "GET",
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
+  const generation = sessionGeneration;
   const multipart = body instanceof FormData;
   const response = await fetch(`/api/v1${path}`, {
     method,
     credentials: "same-origin",
+    signal,
     headers: {
       ...(method === "GET" ? {} : { "X-Beweft-Request": "1" }),
       ...(body && !multipart ? { "Content-Type": "application/json" } : {}),
@@ -151,6 +175,11 @@ export async function api<T>(
     body:
       body === undefined ? undefined : multipart ? body : JSON.stringify(body),
   });
+  if (
+    response.status === 401 &&
+    !["/auth/login", "/auth/bootstrap", "/auth/status"].includes(path)
+  )
+    unauthorizedListeners.forEach((listener) => listener(generation));
   let result: unknown;
   try {
     result = await response.json();

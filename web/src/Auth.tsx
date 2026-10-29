@@ -1,10 +1,18 @@
 import { ArrowUpRight, ShieldCheck } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
-import { api } from "./api";
+import { api, authLock } from "./api";
 import { Unicorn } from "./components/brand";
 import { Busy, ErrorNotice, Field, Submit } from "./components/shared";
-export function Auth({ onReady }: { onReady: () => void }) {
+export function Auth({
+  onReady,
+  signingOut,
+  signOutError,
+}: {
+  onReady: () => void;
+  signingOut: boolean;
+  signOutError: string;
+}) {
   const [initialized, setInitialized] = useState<boolean | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -15,15 +23,18 @@ export function Auth({ onReady }: { onReady: () => void }) {
   }, []);
   const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (signingOut) return;
     setBusy(true);
     setError("");
     const data = new FormData(e.currentTarget);
     try {
-      await api(
-        initialized ? "/auth/login" : "/auth/bootstrap",
-        z.object({ id: z.string(), email: z.string() }),
-        "POST",
-        Object.fromEntries(data),
+      await authLock(() =>
+        api(
+          initialized ? "/auth/login" : "/auth/bootstrap",
+          z.object({ id: z.string(), email: z.string() }),
+          "POST",
+          Object.fromEntries(data),
+        ),
       );
       onReady();
     } catch (e) {
@@ -115,9 +126,15 @@ export function Auth({ onReady }: { onReady: () => void }) {
                   }
                 />
               </Field>
-              {error && <ErrorNotice message={error} />}
-              <Submit pending={busy}>
-                {initialized ? "Sign in" : "Create your workspace"}
+              {(error || signOutError) && (
+                <ErrorNotice message={error || signOutError} />
+              )}
+              <Submit pending={busy || signingOut}>
+                {signingOut
+                  ? "Signing out…"
+                  : initialized
+                    ? "Sign in"
+                    : "Create your workspace"}
                 <ArrowUpRight size={17} />
               </Submit>
             </form>
