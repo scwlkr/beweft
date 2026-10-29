@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$root"
+if ! command -v rustc >/dev/null 2>&1; then
+    case "${1:-help}" in
+        help|--help|-h)
+            printf '%s\n' 'Usage: ./project <command> [args...]' 'Rust commands: tools/project-cli/main.rs. Install Rust to run them.'
+            exit 0 ;;
+    esac
+    printf '%s\n' 'rustc unavailable. Install Rust or adapt ./project to an available runner.' >&2
+    exit 127
+fi
+build=$(mktemp -d "${TMPDIR:-/tmp}/wstack-project.XXXXXX")
+trap 'rm -rf "$build"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+rustc --edition=2021 "$root/tools/project-cli/main.rs" -o "$build/project"
+"$build/project" "$@"
