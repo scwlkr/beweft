@@ -232,6 +232,16 @@ export function useComposer({
     (!pendingMedia.ready ||
       affectedMedia.length > 0 ||
       missingMedia.length > 0);
+  const hasDefiniteMediaConflict = () => {
+    try {
+      const saved = readScheduleIntent(pendingSchedule.key);
+      return (
+        saved?.rejection_code === "media_version_conflict" && !saved.uncertain
+      );
+    } catch {
+      return false;
+    }
+  };
   const recover = async (retry: boolean) => {
     if (running.current || !pendingSchedule.ready || !intent) return;
     let session: ApiSession;
@@ -351,7 +361,8 @@ export function useComposer({
           );
         } else if (
           e instanceof ApiError &&
-          e.code === "media_version_conflict"
+          e.code === "media_version_conflict" &&
+          hasDefiniteMediaConflict()
         ) {
           setRecovery("release");
           setRecoveryMessage(
@@ -671,7 +682,8 @@ export function useComposer({
           );
         } else if (
           e instanceof ApiError &&
-          e.code === "media_version_conflict"
+          e.code === "media_version_conflict" &&
+          hasDefiniteMediaConflict()
         ) {
           setRecovery("release");
           setRecoveryMessage(

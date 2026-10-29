@@ -635,7 +635,7 @@ test("real schedule maps all selected effective variants including an explicit e
   });
 });
 
-test("real queue recovery preserves an explicit null time and empty media map", async () => {
+test("real queue recovery preserves its null time after the original is rescheduled", async () => {
   await withWorkspace(async (page, context, write) => {
     const f = await setup(page, context, write);
     await write("/schedules", {
@@ -668,6 +668,18 @@ test("real queue recovery preserves an explicit null time and empty media map", 
     const receipt = await read(context, `/schedule-requests/${saved.id}`);
     expect(receipt.request.scheduled_at).toBeNull();
     expect(receipt.request.media_versions).toEqual({});
+    const later = new Date(Date.now() + 2 * 86400_000).toISOString();
+    const changed = await context.request.post(
+      `/api/v1/publications/${receipt.publications[0].id}/reschedule`,
+      {
+        data: { scheduled_at: later },
+        headers: {
+          "X-Beweft-Request": "1",
+          Origin: process.env.BEWEFT_TEST_URL!,
+        },
+      },
+    );
+    expect(changed.ok(), await changed.text()).toBe(true);
     await page.reload();
     await page.getByRole("button", { name: "Review pending schedule" }).click();
     await page.getByRole("button", { name: "Retry original schedule" }).click();
@@ -678,10 +690,99 @@ test("real queue recovery preserves an explicit null time and empty media map", 
     const rows = await read(context, `/publications?brand_id=${f.brand.id}`);
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe(receipt.publications[0].id);
-    expect(rows[0].scheduling_mode).toBe("queue");
+    expect(rows[0].scheduling_mode).toBe("exact");
+    expect(Date.parse(rows[0].scheduled_at)).toBe(Date.parse(later));
     expect((await read(context, `/posts/${f.post.id}`)).version).toBe(
       saved.post.version,
     );
+    expect(f.patches()).toBe(1);
+  });
+});
+
+test("a failed receipt read after a real successful POST keeps the outcome unresolved", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    let receiptReads = 0;
+    await page.route("**/api/v1/schedule-requests/*", (route) => {
+      receiptReads++;
+      return receiptReads === 1
+        ? route.fulfill({
+            status: 403,
+            json: {
+              error: {
+                code: "unavailable",
+                message: "Receipt temporarily unavailable",
+              },
+            },
+          })
+        : route.continue();
+    });
+    await start(page);
+    await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+      "Receipt temporarily unavailable",
+    );
+    const saved = await pending(page, f.key);
+    expect(saved.uncertain).toBe(true);
+    await expect(
+      page.getByRole("button", { name: "Release and refresh" }),
+    ).toHaveCount(0);
+    expect(
+      await read(context, `/publications?brand_id=${f.brand.id}`),
+    ).toHaveLength(1);
+    await page
+      .getByRole("button", { name: "Check scheduling outcome" })
+      .click();
+    await expect(
+      page.getByText(/The original request is confirmed/),
+    ).toBeVisible();
+    expect(await pending(page, f.key)).toBeNull();
+    expect((await read(context, `/posts/${f.post.id}`)).version).toBe(
+      saved.post.version,
+    );
+    expect(f.patches()).toBe(1);
+  });
+});
+
+test("a media-conflict error from receipt lookup cannot release a committed schedule", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    let receiptReads = 0;
+    await page.route("**/api/v1/schedule-requests/*", (route) => {
+      receiptReads++;
+      return receiptReads === 1
+        ? route.fulfill({
+            status: 409,
+            json: {
+              error: {
+                code: "media_version_conflict",
+                message: "Receipt check failed",
+              },
+            },
+          })
+        : route.continue();
+    });
+    await start(page);
+    await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+      "Receipt check failed",
+    );
+    const saved = await pending(page, f.key);
+    expect(saved.uncertain).toBe(true);
+    await expect(
+      page.getByRole("button", { name: "Refresh descriptions" }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Release and refresh" }),
+    ).toHaveCount(0);
+    expect(
+      await read(context, `/publications?brand_id=${f.brand.id}`),
+    ).toHaveLength(1);
+    await page
+      .getByRole("button", { name: "Check scheduling outcome" })
+      .click();
+    await expect(
+      page.getByText(/The original request is confirmed/),
+    ).toBeVisible();
+    expect(await pending(page, f.key)).toBeNull();
     expect(f.patches()).toBe(1);
   });
 });

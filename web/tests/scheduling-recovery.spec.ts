@@ -855,3 +855,50 @@ test("a conflicting request ID stays locked after reload without a replacement r
     expect(await summaries(context, f.brand.id)).toEqual([]);
   });
 });
+
+test("a receipt with different original IDs cannot replace already observed publications", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const f = await setup(page, context, write);
+    let sent: any;
+    let original: any[] = [];
+    await page.route(
+      /\/api\/v1\/posts\/[^/]+\/schedule\?view=summary$/,
+      async (route) => {
+        sent = route.request().postDataJSON();
+        const response = await route.fetch();
+        expect(response.ok(), await response.text()).toBe(true);
+        original = (await response.json()).data;
+        await route.fulfill({ response });
+      },
+    );
+    await page.route("**/api/v1/schedule-requests/*", (route) => {
+      const altered = [{ ...original[0], id: crypto.randomUUID() }];
+      return route.fulfill({ json: { data: receipt(f, sent, altered) } });
+    });
+    await startSchedule(page);
+    await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+      "could not be fully confirmed",
+    );
+    const stored = await page.evaluate(() => {
+      const entry = Object.entries(localStorage).find(([key]) =>
+        key.startsWith("beweft.pending-schedule:"),
+      );
+      return entry ? JSON.parse(entry[1]) : null;
+    });
+    expect(stored.uncertain).toBe(true);
+    expect(stored.observed_publication_ids).toEqual(
+      original.map((row) => row.id),
+    );
+    await page
+      .getByRole("button", { name: "Check scheduling outcome" })
+      .click();
+    await expect(page.getByText(/server record does not match/)).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Retry original schedule" }),
+    ).toHaveCount(0);
+    expect((await summaries(context, f.brand.id)).map((row) => row.id)).toEqual(
+      original.map((row) => row.id),
+    );
+    expect(f.patches()).toBe(1);
+  });
+});

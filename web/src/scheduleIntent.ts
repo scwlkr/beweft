@@ -50,12 +50,24 @@ export const ScheduleIntent = z
     uncertain: z.boolean(),
     rejection: z.string().optional(),
     rejection_code: z.string().optional(),
+    observed_publication_ids: z.array(z.string().uuid()).optional(),
   })
   .superRefine((intent, context) => {
     if (new Set(intent.channel_ids).size !== intent.channel_ids.length)
       context.addIssue({
         code: "custom",
         message: "Duplicate schedule channels",
+      });
+    if (
+      intent.observed_publication_ids &&
+      (intent.observed_publication_ids.length !== intent.channel_ids.length ||
+        new Set(intent.observed_publication_ids).size !==
+          intent.observed_publication_ids.length ||
+        intent.observed_publication_ids.some((id) => id !== id.toLowerCase()))
+    )
+      context.addIssue({
+        code: "custom",
+        message: "Invalid observed publication identities",
       });
     if (
       (intent.mode === "exact" &&
@@ -135,7 +147,9 @@ function persistScheduleIntent(key: string, intent: ScheduleIntent) {
     !sameScheduleIntent(stored, intent) ||
     stored.uncertain !== intent.uncertain ||
     stored.rejection !== intent.rejection ||
-    stored.rejection_code !== intent.rejection_code
+    stored.rejection_code !== intent.rejection_code ||
+    JSON.stringify(stored.observed_publication_ids) !==
+      JSON.stringify(intent.observed_publication_ids)
   )
     throw new Error(
       "The schedule could not be saved in browser storage. Check storage before continuing.",
@@ -285,11 +299,7 @@ function publicationCoverage(
       !channels.has(row.channel_id) ||
       row.post_id !== intent.post.id ||
       row.brand_id !== intent.post.brand_id ||
-      row.post_version !== intent.post.version ||
-      row.scheduling_mode !== intent.mode ||
-      (intent.mode === "exact" &&
-        canonicalScheduleTime(row.scheduled_at) !==
-          canonicalScheduleTime(intent.scheduled_at!))
+      row.post_version !== intent.post.version
     )
       return "mismatch" as const;
     ids.add(row.id);
@@ -337,6 +347,7 @@ export async function sendScheduleIntent(
     },
     signal,
   );
+  let requestSucceeded = false;
   try {
     signal?.throwIfAborted();
     requireWorkspaceSession(session);
@@ -352,12 +363,49 @@ export async function sendScheduleIntent(
         media_versions: intent.media_versions,
       } satisfies SchedulePostRequest & { request_id: string },
     );
+    requestSucceeded = true;
     requireWorkspaceSession(session);
     if (publicationCoverage(intent, rows) !== "complete")
       throw new Error(
         "The scheduling response was incomplete or did not match this request.",
       );
-    return rows;
+    const observed = await withWorkspaceSession(
+      session,
+      () => {
+        const saved = readScheduleIntent(key);
+        if (!saved || !sameScheduleIntent(saved, intent))
+          throw new Error(
+            "The saved schedule changed. Reopen it before continuing.",
+          );
+        const ids = rows.map((row) => row.id).sort();
+        if (
+          saved.observed_publication_ids &&
+          JSON.stringify([...saved.observed_publication_ids].sort()) !==
+            JSON.stringify(ids)
+        )
+          throw new Error(
+            "The scheduling response did not match the original publications.",
+          );
+        const updated = { ...saved, observed_publication_ids: ids };
+        persistScheduleIntent(key, updated);
+        window.dispatchEvent(new Event(scheduleEvent));
+        return updated;
+      },
+      signal,
+    );
+    // A publication may be rescheduled or canceled later, so its current
+    // summary cannot establish the original time or media versions. Verify the
+    // immutable receipt and require the same original identities before clearing.
+    const receipt = await inspectScheduleIntent(observed, session, signal);
+    if (
+      receipt.kind !== "complete" ||
+      JSON.stringify(rows.map((row) => row.id).sort()) !==
+        JSON.stringify(receipt.publications.map((row) => row.id).sort())
+    )
+      throw new Error(
+        "The scheduling outcome could not be fully confirmed. Check the original schedule again.",
+      );
+    return receipt.publications;
   } catch (failure) {
     if (isCurrentWorkspaceSession(session)) {
       try {
@@ -366,6 +414,7 @@ export async function sendScheduleIntent(
           if (saved && sameScheduleIntent(saved, intent)) {
             const confirmedRejection =
               failure instanceof ApiError &&
+              !requestSucceeded &&
               ((failure.status === 409 &&
                 failure.code === "media_version_conflict") ||
                 (!prior.uncertain &&
@@ -444,5 +493,12 @@ export async function inspectScheduleIntent(
   )
     return { kind: "mismatch" as const };
   const coverage = publicationCoverage(intent, receipt.publications);
+  if (
+    coverage === "complete" &&
+    intent.observed_publication_ids &&
+    JSON.stringify([...intent.observed_publication_ids].sort()) !==
+      JSON.stringify(receipt.publications.map((row) => row.id).sort())
+  )
+    return { kind: "mismatch" as const };
   return { kind: coverage, publications: receipt.publications };
 }
