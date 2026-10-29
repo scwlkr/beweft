@@ -11,6 +11,7 @@ async fn reply_recovery_and_unresolved_guard(h: &Harness) {
         &Channel {
             app,
             identity: Identity {
+                parent: None,
                 id: "destination".into(),
                 name: "Fixture".into(),
                 username: None,

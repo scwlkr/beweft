@@ -2,9 +2,20 @@ use super::*;
 
 pub(super) const PROVIDER_BUSY_MESSAGE: &str = "A provider operation is in progress. Wait for it to finish, then retry and check the current provider status before any manual removal.";
 pub(super) const PENDING_REMOVAL_MESSAGE: &str = "Provider removal is pending. Wait for any provider operation still in progress to finish. Removing access at the provider may affect other channels and unrelated accounts. First inspect your channels, then remove the affected access in the provider's access settings (such as connected apps or app passwords). Only after removal is complete, confirm it before connecting again.";
+pub(super) const GOOGLE_REMOVAL_MESSAGE: &str = "Provider removal is pending. Wait for any provider operation still in progress to finish. Removing access at the provider may affect other channels and unrelated accounts. First inspect your channels, then remove the affected access in the provider's access settings (such as connected apps or app passwords). Only after removal is complete, confirm it before connecting again. Google removal blocks YouTube and Google Business Profile and may affect current or older Google projects used by beweft across relevant Google accounts. Remove only intended beweft access and leave unrelated Google apps alone. App configuration changes are also blocked until confirmation.";
+
+// Keep the original YouTube key and generation: flows and pending removals
+// created by an older version must retain their meaning after this upgrade.
+pub(super) fn oauth_family(provider: &str) -> &str {
+    if provider == "google_business" {
+        "youtube"
+    } else {
+        provider
+    }
+}
 
 pub(super) fn provider_operation_key(provider: &str) -> String {
-    format!("provider-operation:{provider}")
+    format!("provider-operation:{}", oauth_family(provider))
 }
 
 pub(super) fn provider_busy_error() -> ApiError {
@@ -17,6 +28,7 @@ pub(super) async fn oauth_gate(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     provider: &str,
 ) -> Result<Option<(i64, Option<Uuid>)>> {
+    let provider = oauth_family(provider);
     fn gate_error(error: sqlx::Error) -> ApiError {
         if matches!(&error, sqlx::Error::Database(db) if db.code().as_deref() == Some("55P03")) {
             provider_busy_error()
@@ -59,14 +71,21 @@ pub(super) async fn oauth_gate(
     Ok(row.map(|row| (row.get("oauth_generation"), row.get("revocation_id"))))
 }
 
-pub(super) fn pending_removal_error() -> ApiError {
-    ApiError::conflict(PENDING_REMOVAL_MESSAGE)
+pub(super) fn pending_removal_error(provider: &str) -> ApiError {
+    ApiError::conflict(if oauth_family(provider) == "youtube" {
+        GOOGLE_REMOVAL_MESSAGE
+    } else {
+        PENDING_REMOVAL_MESSAGE
+    })
 }
 
-pub(super) fn require_open_oauth_gate(gate: Option<(i64, Option<Uuid>)>) -> Result<i64> {
+pub(super) fn require_open_oauth_gate(
+    gate: Option<(i64, Option<Uuid>)>,
+    provider: &str,
+) -> Result<i64> {
     match gate {
         Some((generation, None)) => Ok(generation),
-        Some((_, Some(_))) => Err(pending_removal_error()),
+        Some((_, Some(_))) => Err(pending_removal_error(provider)),
         None => Err(ApiError::bad("Set up this provider app first")),
     }
 }
@@ -197,7 +216,7 @@ async fn adapter_for_inner(app: &AppConfig) -> Result<Adapter> {
 }
 pub async fn list_apps(State(state): State<AppState>, auth: Auth) -> Result<Json<Value>> {
     auth.owner_session()?;
-    let mut rows:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('provider',a.provider,'client_id',a.client_id,'instance_url',a.instance_url,'configured',true,'updated_at',a.updated_at,'revocation_id',f.revocation_id) FROM provider_apps a LEFT JOIN provider_oauth_fences f ON f.provider=a.provider ORDER BY a.provider").fetch_all(&state.db).await?;
+    let mut rows:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('provider',a.provider,'client_id',a.client_id,'instance_url',a.instance_url,'configured',true,'updated_at',a.updated_at,'revocation_id',f.revocation_id) FROM provider_apps a LEFT JOIN provider_oauth_fences f ON f.provider=CASE WHEN a.provider='google_business' THEN 'youtube' ELSE a.provider END ORDER BY a.provider").fetch_all(&state.db).await?;
     for row in &mut rows {
         let provider = row["provider"].as_str().unwrap_or_default();
         row["configured"] = json!(app_config(&state, provider).await.is_ok());
@@ -228,7 +247,7 @@ pub async fn removal_status(
     let revocation_id: Option<Uuid> = sqlx::query_scalar::<_, Option<Uuid>>(
         "SELECT revocation_id FROM provider_oauth_fences WHERE provider=$1 FOR SHARE NOWAIT",
     )
-    .bind(&provider)
+    .bind(oauth_family(&provider))
     .fetch_optional(&mut *tx)
     .await
     .map_err(|error| {
@@ -259,7 +278,10 @@ pub async fn save_app(
     // Do not queue configuration writes behind an exchange holding the app
     // row; the same gate rejects concurrent edits promptly and preserves the
     // stored revocation fence even when configuration is changed.
-    oauth_gate(&mut tx, &provider).await?;
+    let gate = oauth_gate(&mut tx, &provider).await?;
+    if matches!(provider.as_str(), "youtube" | "google_business") {
+        require_open_oauth_gate(gate, &provider)?;
+    }
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
         .bind(format!("provider-app:{provider}"))
         .execute(&mut *tx)
@@ -356,11 +378,6 @@ pub async fn descriptors(State(state): State<AppState>, _auth: Auth) -> Result<J
             "substack",
             "Substack",
             "A supported public publishing API was not established. Use manual handoff.",
-        ),
-        (
-            "google_business",
-            "Google Business Profile",
-            "Direct posting is not implemented yet. Use manual handoff; provider app access is a separate prerequisite.",
         ),
     ] {
         rows.push(json!({"id":id,"name":name,"implementation":"manual_only","configuration":"unavailable","execution":"manual","verification":"owner_attestation","formats":[],"oauth":false,"analytics":false,"inbox":false,"reply":false,"reason":reason}));

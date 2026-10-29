@@ -92,7 +92,10 @@ pub async fn bluesky(
     let mut tx = state.db.begin().await?;
     // Keep the open generation and app authority locked across session creation
     // and storage, so a disconnect/configuration change cannot cross them.
-    super::apps::require_open_oauth_gate(super::apps::oauth_gate(&mut tx, "bluesky").await?)?;
+    super::apps::require_open_oauth_gate(
+        super::apps::oauth_gate(&mut tx, "bluesky").await?,
+        "bluesky",
+    )?;
     // Check before the remote write, then serialize and recheck after it.
     // An archive can therefore finish while the provider is slow; it wins
     // and prevents the new session from being stored.
@@ -261,9 +264,18 @@ pub async fn disconnect_confirmed(
 ) -> Result<Json<Value>> {
     auth.owner_session()?;
     if !body.confirm_shared_impact {
+        auth.brand(catalog::channel_brand(&state, id).await?)?;
+        let provider: String = sqlx::query_scalar("SELECT provider FROM channels WHERE id=$1")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await?;
         return Err(ApiError::bad_code(
             "disconnect_confirmation_required",
-            "Confirm that this channel's queued deliveries will be canceled and other channels for this provider, including unrelated accounts, may need reconnection after manual access removal.",
+            if super::apps::oauth_family(&provider) == "youtube" {
+                "Confirm that this channel's queued deliveries will be canceled. Removing intended beweft access may affect YouTube and Google Business Profile channels across relevant Google accounts and current or older Google projects used by beweft; connected siblings will need reconnection. Do not remove unrelated Google apps."
+            } else {
+                "Confirm that this channel's queued deliveries will be canceled and other channels for this provider, including unrelated accounts, may need reconnection after manual access removal."
+            },
         ));
     }
     disconnect(State(state), auth, Path(id)).await
@@ -285,7 +297,7 @@ pub async fn disconnect(
     let mut tx = state.db.begin().await?;
     let gate = super::apps::oauth_gate(&mut tx, &provider).await?;
     if gate.is_some_and(|(_, pending)| pending.is_some()) {
-        return Err(super::apps::pending_removal_error());
+        return Err(super::apps::pending_removal_error(&provider));
     }
     // Direct grants may be shared. An unhealthy or otherwise unknown direct
     // channel can still have provider access even without stored ciphertext.
@@ -312,9 +324,14 @@ pub async fn disconnect(
     let provider_wide = has_grant_hint
         || (providers::known(&provider)
             && target.get::<String, _>("connection_status") != "disconnected");
+    let family = if super::apps::oauth_family(&provider) == "youtube" {
+        vec!["youtube", "google_business"]
+    } else {
+        vec![provider.as_str()]
+    };
     let affected: Vec<Uuid> = if provider_wide {
-        sqlx::query_scalar("SELECT id FROM channels WHERE provider=$1 ORDER BY id")
-            .bind(&provider)
+        sqlx::query_scalar("SELECT id FROM channels WHERE provider=ANY($1) ORDER BY id")
+            .bind(&family)
             .fetch_all(&mut *tx)
             .await?
     } else {
@@ -361,14 +378,14 @@ pub async fn disconnect(
     // known or possible direct grant, regardless of provider.
     let revocation_id = grant_may_exist.then(Uuid::new_v4);
     let affected_channels = if revocation_id.is_some() {
-        sqlx::query("UPDATE channels SET connection_status='reconnect_required',connection_error='Provider access may change; reconnect this channel after removal is resolved' WHERE provider=$2 AND id<>$1 AND connection_status='connected'")
-            .bind(id).bind(&provider).execute(&mut *tx).await?.rows_affected()
+        sqlx::query("UPDATE channels SET connection_status='reconnect_required',connection_error='Provider access may change; reconnect this channel after removal is resolved' WHERE provider=ANY($2) AND id<>$1 AND connection_status='connected'")
+            .bind(id).bind(&family).execute(&mut *tx).await?.rows_affected()
     } else {
         0
     };
     if gate.is_some() {
         sqlx::query("UPDATE provider_oauth_fences SET oauth_generation=oauth_generation+1,revocation_id=$2 WHERE provider=$1")
-            .bind(&provider)
+            .bind(super::apps::oauth_family(&provider))
             .bind(revocation_id)
             .execute(&mut *tx)
             .await?;
@@ -376,15 +393,21 @@ pub async fn disconnect(
     sqlx::query("UPDATE channels SET encrypted_credentials=NULL,connection_status='disconnected',paused=true,connection_error=NULL WHERE id=$1").bind(id).execute(&mut *tx).await?;
     sqlx::query("UPDATE publications SET state='canceled',last_error='Channel disconnected by owner',updated_at=now() WHERE channel_id=$1 AND state='queued'").bind(id).execute(&mut *tx).await?;
     tx.commit().await?;
-    let next_action = match (affected_channels > 0, revocation_id.is_some()) {
-        (true, true) => {
-            "Other channels for this provider, including unrelated accounts, were conservatively marked for reconnection. Removing provider access may affect them. First inspect your channels, remove beweft access in the provider account's access settings (such as connected apps or app passwords), then confirm removal before connecting again; their saved credentials and queued work were retained."
-        }
-        (false, true) => {
-            "Provider access removal can affect other channels or accounts. First inspect connected channels, remove beweft access in the provider account's access settings (such as connected apps or app passwords), then confirm removal before connecting again."
-        }
-        (_, false) => {
-            "No remote removal was attempted. Inspect existing connected channels before removing only orphaned provider access."
+    let next_action = if revocation_id.is_some()
+        && super::apps::oauth_family(&provider) == "youtube"
+    {
+        "YouTube and Google Business Profile share a conservative removal boundary. Connected siblings were marked for reconnection; their credentials and queued work remain. Inspect channels across relevant Google accounts and current or older Google projects used by beweft, remove only the intended beweft access, leave unrelated Google apps alone, then confirm completion before reconnecting."
+    } else {
+        match (affected_channels > 0, revocation_id.is_some()) {
+            (true, true) => {
+                "Other channels for this provider, including unrelated accounts, were conservatively marked for reconnection. Removing provider access may affect them. First inspect your channels, remove beweft access in the provider account's access settings (such as connected apps or app passwords), then confirm removal before connecting again; their saved credentials and queued work were retained."
+            }
+            (false, true) => {
+                "Provider access removal can affect other channels or accounts. First inspect connected channels, remove beweft access in the provider account's access settings (such as connected apps or app passwords), then confirm removal before connecting again."
+            }
+            (_, false) => {
+                "No remote removal was attempted. Inspect existing connected channels before removing only orphaned provider access."
+            }
         }
     };
     Ok(data(
@@ -400,6 +423,9 @@ pub async fn acknowledge_revocation(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>> {
     auth.owner_session()?;
+    if !providers::known(&provider) {
+        return Err(ApiError::bad("Provider is unavailable or manual-only"));
+    }
     if body["access_removed"] != true {
         return Err(ApiError::bad(
             "Confirm that provider access was removed before connecting again",
@@ -415,7 +441,7 @@ pub async fn acknowledge_revocation(
         ));
     }
     sqlx::query("UPDATE provider_oauth_fences SET oauth_generation=oauth_generation+1,revocation_id=NULL WHERE provider=$1 AND revocation_id=$2")
-        .bind(&provider)
+        .bind(super::apps::oauth_family(&provider))
         .bind(expected)
         .execute(&mut *tx)
         .await?;
