@@ -25,11 +25,13 @@ The following are explicit unfinished workflows, not external provider blockers:
 - Ideas have title, notes, color, search, editing, and conversion to a draft. Board columns/status groups and tags are not implemented.
 - Draft duplication is implemented. Reusable custom templates and a template library are not implemented.
 - Queued publications retain immutable revisions and can be canceled, reordered in queue mode, and rescheduled. Editing their content with an atomic revision replacement is not implemented; editing a source draft does not silently rewrite queued history.
-- Manual handoff provides caption copying, per-file downloads, an optional published URL, and owner attestation. Network-specific launch links and guidance need a target-platform field on manual channels.
+- Manual handoff provides per-channel destination guidance, caption copying, per-file downloads, an optional published URL, and owner attestation. The owner publishes in the destination app and records the outcome here.
 - Supported channel variants have separate text and media, and provider options. Current Bluesky/Mastodon alt text is one description per channel variant applied to all images. Per-media descriptions need a richer schema.
 - YouTube exposes privacy, audience, synthetic-media disclosure, and category. It uses the post title as the public video title. License choice is not implemented.
 
 Direct provider setup, destination selection, reconnection/disconnection, metrics, inbox read/reply, and explicit metered-X sync controls are implemented in the web client against the provider slice contract. This is not a claim that any live provider account or publication has been verified.
+
+Manual channels choose an allowlisted destination from the server and can change it later; the current choice supplies guidance for existing handoffs as well. A destination-list outage leaves generic handoffs available and offers a retry. Handoff links must be HTTPS and open the external platform; they never publish automatically. The owner separately attests to the result.
 
 ## Reply recovery
 

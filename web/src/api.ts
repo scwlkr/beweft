@@ -6,6 +6,12 @@ export const BrandSchema = z.object({
   color: z.string(),
   created_at: z.string(),
 });
+export const ManualGuidanceSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  compose_url: z.string().nullable(),
+  guidance: z.string(),
+});
 export const ChannelSchema = z
   .object({
     id,
@@ -16,6 +22,8 @@ export const ChannelSchema = z
     paused: z.boolean(),
     capabilities: z.unknown(),
     created_at: z.string(),
+    target_platform: z.string().nullable().optional(),
+    manual_guidance: ManualGuidanceSchema.nullable().optional(),
   })
   .passthrough();
 export const IdeaSchema = z.object({
@@ -118,6 +126,7 @@ export const InboxSchema = z.object({
 });
 export type Brand = z.infer<typeof BrandSchema>;
 export type Channel = z.infer<typeof ChannelSchema>;
+export type ManualGuidance = z.infer<typeof ManualGuidanceSchema>;
 export type Idea = z.infer<typeof IdeaSchema>;
 export type Post = z.infer<typeof PostSchema>;
 export type Media = z.infer<typeof MediaSchema>;

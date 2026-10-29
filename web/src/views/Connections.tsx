@@ -1,15 +1,20 @@
 import { ArrowUpRight, ChevronRight, Pause, Play, Plus } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { z } from "zod";
+import type { CreateChannelRequest } from "../lib/api-contract.generated";
 import {
   api,
+  captureWorkspaceSession,
   ChannelSchema,
+  isCurrentWorkspaceSession,
+  ManualGuidanceSchema,
   type Brand,
   type Channel,
   type Provider,
+  type ManualGuidance,
 } from "../api";
 import { Network, Unicorn } from "../components/brand";
-import { Field, Submit } from "../components/shared";
+import { ErrorNotice, Field, Submit } from "../components/shared";
 import { Button } from "../components/ui/button";
 import { Dialog } from "../components/ui/dialog";
 import { ConnectedChannels } from "./ConnectedChannels";
@@ -43,7 +48,59 @@ export function Connections({
   const [name, setName] = useState("");
   const [timezone, setTimezone] = useState(zone);
   const [provider, setProvider] = useState("manual");
+  const [target, setTarget] = useState("generic");
+  const [platforms, setPlatforms] = useState<ManualGuidance[]>([]);
+  const [platformError, setPlatformError] = useState("");
+  const [platformAttempt, setPlatformAttempt] = useState(0);
+  const [platformsReady, setPlatformsReady] = useState(false);
   const [detail, setDetail] = useState<Provider | null>(null);
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    let session;
+    try {
+      session = captureWorkspaceSession();
+    } catch {
+      return () => controller.abort();
+    }
+    setPlatformsReady(false);
+    setPlatformError("");
+    void api(
+      "/manual-platforms",
+      z.array(ManualGuidanceSchema),
+      "GET",
+      undefined,
+      controller.signal,
+    )
+      .then((found) => {
+        if (
+          !active ||
+          controller.signal.aborted ||
+          !isCurrentWorkspaceSession(session)
+        )
+          return;
+        if (!found.some((platform) => platform.id === "generic"))
+          throw new Error(
+            "The server did not include the generic manual destination.",
+          );
+        setPlatforms(found);
+        setPlatformsReady(true);
+      })
+      .catch((failure) => {
+        if (
+          active &&
+          !controller.signal.aborted &&
+          isCurrentWorkspaceSession(session)
+        ) {
+          setTarget("generic");
+          setPlatformError(failure.message);
+        }
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [platformAttempt]);
   return (
     <>
       {setup && (
@@ -132,7 +189,22 @@ export function Connections({
             setDisconnectResult("");
             setDisconnect(channel);
           }}
+          platforms={platforms}
+          platformsReady={platformsReady}
         />
+      )}
+      {platformError && (
+        <div className="inline-actions">
+          <ErrorNotice
+            message={`Manual destinations are unavailable: ${platformError}`}
+          />
+          <Button
+            variant="secondary"
+            onClick={() => setPlatformAttempt((attempt) => attempt + 1)}
+          >
+            Retry destinations
+          </Button>
+        </div>
       )}
       <section className="provider-section">
         <div className="section-heading">
@@ -192,12 +264,16 @@ export function Connections({
                     name,
                     provider,
                     timezone,
-                  }),
+                    ...(provider === "manual"
+                      ? { target_platform: target }
+                      : {}),
+                  } satisfies CreateChannelRequest),
                 "Channel added",
               ).then((ok) => {
                 if (ok) {
                   setAdd(false);
                   setName("");
+                  setTarget("generic");
                 }
               });
             }}
@@ -215,6 +291,32 @@ export function Connections({
                 )}
               </select>
             </Field>
+            {provider === "manual" && (
+              <Field label="Handoff destination">
+                <select
+                  aria-label="Handoff destination"
+                  value={target}
+                  disabled={!platformsReady}
+                  onChange={(event) => setTarget(event.target.value)}
+                >
+                  {platformsReady ? (
+                    platforms.map((platform) => (
+                      <option key={platform.id} value={platform.id}>
+                        {platform.name}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="generic">Other platform</option>
+                  )}
+                </select>
+              </Field>
+            )}
+            {provider === "manual" && !platformsReady && (
+              <small className="muted">
+                Other platform remains available while the destination list is
+                unavailable.
+              </small>
+            )}
             <Field label="Channel name">
               <input
                 required

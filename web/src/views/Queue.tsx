@@ -218,6 +218,9 @@ export function Queue({
       {selected && (
         <PublicationDetails
           media={media}
+          channel={channels.find(
+            (channel) => channel.id === selected.channel_id,
+          )}
           publication={
             publications.find((p) => p.id === selected.id) ?? selected
           }
