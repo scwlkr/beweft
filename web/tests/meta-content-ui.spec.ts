@@ -307,3 +307,61 @@ test("a provider-confirmed Meta publication appears without an owner retry", asy
     expect(retries).toBe(0);
   });
 });
+
+test("a saved Reel stays intact when an older channel omits the Reel action", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const brand = await write("/brands", { name: "Legacy Reel fixture" });
+    const channel = await write("/channels", {
+      brand_id: brand.id,
+      provider: "manual",
+      name: "Legacy Facebook",
+      timezone: "UTC",
+    });
+    const draft = await write("/posts", {
+      brand_id: brand.id,
+      title: "Saved Reel",
+      text: "Draft only",
+      variants: [{ channel_id: channel.id, options: { format: "reel" } }],
+    });
+    await context.addInitScript(
+      (id) => localStorage.setItem("beweft.brand", id),
+      brand.id,
+    );
+    await page.route("**/channels?*", (route) =>
+      route.fulfill({
+        json: {
+          data: [
+            {
+              ...channel,
+              provider: "facebook",
+              capabilities: {
+                formats: ["text", "image", "reel"],
+                permissions: { actions: {} },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    await page.goto("/#drafts");
+    await page.getByRole("button", { name: "Edit draft" }).click();
+    await page.getByRole("tab", { name: "Legacy Facebook" }).click();
+    await expect(page.getByLabel("Facebook post format")).toHaveCount(0);
+    await expect(page.getByText(/draft is saved as a Reel/i)).toBeVisible();
+    await page.getByRole("button", { name: "Save draft" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    let saved = (
+      await (await context.request.get(`/api/v1/posts/${draft.id}`)).json()
+    ).data;
+    expect(saved.variants[0].options.format).toBe("reel");
+    await page.getByRole("button", { name: "Edit draft" }).click();
+    await page.getByRole("tab", { name: "Legacy Facebook" }).click();
+    await page.getByRole("button", { name: "Change to text or image" }).click();
+    await page.getByRole("button", { name: "Save draft" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    saved = (
+      await (await context.request.get(`/api/v1/posts/${draft.id}`)).json()
+    ).data;
+    expect(saved.variants[0].options).not.toHaveProperty("format");
+  });
+});

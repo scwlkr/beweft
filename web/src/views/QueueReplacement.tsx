@@ -16,8 +16,11 @@ import { Button } from "../components/ui/button";
 import { withMediaScheduleGuard } from "../mediaIntent";
 import {
   clearReplacement,
+  matchesReplacement,
   readReplacement,
+  recordReplacementRejection,
   saveReplacement,
+  type CurrentReplacementIntent,
 } from "../replacementIntent";
 import { readScheduleIntent, scheduleLock } from "../scheduleIntent";
 import type { PendingMedia } from "../usePendingMedia";
@@ -79,6 +82,7 @@ export function QueueReplacement({
       !pendingSchedule.ready ||
       !pendingMedia.ready ||
       pendingMedia.brand !== post.brand_id ||
+      !publication.scheduling_mode ||
       pendingSchedule.intent
     )
       return;
@@ -93,10 +97,16 @@ export function QueueReplacement({
     running.current = true;
     setBusy(true);
     setMessage("");
-    const intent = {
+    const intent: CurrentReplacementIntent = {
+      contract: "replace-v1",
       publicationId: publication.id,
       postId: post.id,
       brandId: post.brand_id,
+      channelId: publication.channel_id,
+      publicationPostVersion: publication.post_version,
+      postVersion: post.version,
+      scheduledAt: publication.scheduled_at,
+      schedulingMode: publication.scheduling_mode,
     };
     try {
       const done = await action(
@@ -145,7 +155,10 @@ export function QueueReplacement({
                       },
                       signal,
                     );
-                    if (result.previous_publication_id !== publication.id)
+                    if (
+                      result.previous_publication_id !== intent.publicationId ||
+                      !matchesReplacement(intent, result.publication)
+                    )
                       throw new Error(
                         "Replacement response did not match the original publication.",
                       );
@@ -153,13 +166,22 @@ export function QueueReplacement({
                   } catch (failure) {
                     if (
                       failure instanceof ApiError &&
-                      failure.status >= 400 &&
-                      failure.status < 500 &&
-                      failure.code !== "invalid_response" &&
-                      failure.code !== "contract_mismatch" &&
-                      failure.code !== "session_changed"
+                      ((failure.status === 409 &&
+                        failure.code === "conflict") ||
+                        (failure.status === 400 &&
+                          [
+                            "invalid_request",
+                            "provider_format_invalid",
+                          ].includes(failure.code)) ||
+                        (failure.status === 403 &&
+                          failure.code === "forbidden") ||
+                        (failure.status === 422 &&
+                          failure.code === "invalid_request"))
                     )
-                      clearReplacement(pendingSchedule.key, intent);
+                      recordReplacementRejection(pendingSchedule.key, intent, {
+                        status: failure.status,
+                        code: failure.code,
+                      });
                     throw failure;
                   }
                 },
@@ -226,6 +248,20 @@ export function QueueReplacement({
                 .map((id) => media.find((item) => item.id === id)?.name ?? id)
                 .join(", ") || "None"}
             </p>
+            {publication.payload.media_ids.map((id) => {
+              const frozen = publication.payload.media_metadata?.find(
+                (row) => row.id === id,
+              );
+              const name = media.find((item) => item.id === id)?.name ?? id;
+              return (
+                <p key={id}>
+                  {name} snapshot description:{" "}
+                  {frozen
+                    ? frozen.alt_text || "None"
+                    : "Unavailable in this snapshot"}
+                </p>
+              );
+            })}
             <p>
               Options: <code>{JSON.stringify(oldOptions)}</code>
             </p>
@@ -260,7 +296,8 @@ export function QueueReplacement({
               busy ||
               !pendingSchedule.ready ||
               !!pendingSchedule.intent ||
-              !pendingMedia.ready
+              !pendingMedia.ready ||
+              !publication.scheduling_mode
             }
             onClick={() => void replace()}
           >

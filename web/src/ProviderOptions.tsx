@@ -1,4 +1,5 @@
 import { Field } from "./components/shared";
+import { Button } from "./components/ui/button";
 export function ProviderOptions({
   provider,
   capabilities,
@@ -16,7 +17,7 @@ export function ProviderOptions({
       ? (capabilities as Record<string, unknown>)
       : {};
   const formats = Array.isArray(caps.formats) ? caps.formats : [];
-  if (provider === "facebook" && formats.includes("reel")) {
+  if (provider === "facebook") {
     const permissions =
       caps.permissions && typeof caps.permissions === "object"
         ? (caps.permissions as Record<string, unknown>)
@@ -28,7 +29,32 @@ export function ProviderOptions({
     const reel =
       actions.reel && typeof actions.reel === "object"
         ? (actions.reel as Record<string, unknown>)
-        : {};
+        : null;
+    const advertised =
+      formats.includes("reel") &&
+      reel !== null &&
+      ["granted", "missing", "unknown"].includes(String(reel.status));
+    if (!advertised)
+      return value.format === "reel" ? (
+        <section className="provider-options form-stack">
+          <p className="muted">
+            This draft is saved as a Reel, but this server does not advertise
+            Reel permission status. The Reel choice is retained until you change
+            it or update the server.
+          </p>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => {
+              const next = { ...value };
+              delete next.format;
+              onChange(next);
+            }}
+          >
+            Change to text or image
+          </Button>
+        </section>
+      ) : null;
     return (
       <section className="provider-options form-stack">
         <Field label="Facebook post format">
@@ -49,9 +75,9 @@ export function ProviderOptions({
           <p className="muted">
             Use one MP4 without a video description. Page permissions and
             account eligibility apply.{" "}
-            {reel.status === "missing"
+            {reel?.status === "missing"
               ? "The last permission check reported missing Reel permissions."
-              : reel.status !== "granted"
+              : reel?.status !== "granted"
                 ? "Reel permission status is not confirmed."
                 : "Reported Reel permissions are present; account eligibility is not yet verified."}
           </p>

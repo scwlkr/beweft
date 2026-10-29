@@ -19,6 +19,7 @@ import { Composer } from "./Composer";
 import { titles, zone } from "./navigation";
 import { useWorkspace } from "./useWorkspace";
 import { usePendingSchedule } from "./usePendingSchedule";
+import { isCurrentReplacement } from "./replacementIntent";
 import { usePendingReplacement } from "./usePendingReplacement";
 import { usePendingMedia } from "./usePendingMedia";
 import { Calendar } from "./views/Calendar";
@@ -79,6 +80,12 @@ export default function App() {
   );
   const pendingMedia = usePendingMedia(ready ? brandId : "", reconcileMedia);
   const [reviewMediaId, setReviewMediaId] = useState<string | null>(null);
+  const [confirmReplacementReview, setConfirmReplacementReview] =
+    useState(false);
+  useEffect(
+    () => setConfirmReplacementReview(false),
+    [pendingReplacement.review],
+  );
   useEffect(() => setReviewMediaId(null), [brandId]);
   const reviewMedia = media.find((item) => item.id === reviewMediaId);
   if (ready === null) return <Busy />;
@@ -189,7 +196,10 @@ export default function App() {
                 <div>
                   <p>
                     {pendingReplacement.intent
-                      ? "A queued replacement has an unconfirmed outcome. Check it before starting another publication."
+                      ? isCurrentReplacement(pendingReplacement.intent) &&
+                        pendingReplacement.intent.rejection
+                        ? "The server rejected this replacement. Review the original before starting another publication."
+                        : "A queued replacement has an unconfirmed outcome. Check it before starting another publication."
                       : pendingReplacement.error}
                   </p>
                   {pendingReplacement.intent && (
@@ -200,13 +210,76 @@ export default function App() {
                           p.id === pendingReplacement.intent?.publicationId,
                       )?.payload.title || "Untitled publication"}{" "}
                       · <code>{pendingReplacement.intent.publicationId}</code>.
-                      If it remains queued, you can cancel that original from
-                      its details, then check again. Review history before
-                      taking another action.
+                      Check its outcome before taking another action. If it is
+                      still queued, you can cancel the original and check again.
                     </p>
                   )}
                   {pendingReplacement.intent && pendingReplacement.error && (
                     <p>{pendingReplacement.error}</p>
+                  )}
+                  {pendingReplacement.review && (
+                    <div className="form-stack">
+                      <p>
+                        Original:{" "}
+                        {pendingReplacement.review.status.original.state.replaceAll(
+                          "_",
+                          " ",
+                        )}{" "}
+                        on{" "}
+                        {pendingReplacement.review.status.original.channel_name}{" "}
+                        · revision{" "}
+                        {pendingReplacement.review.status.original.post_version}
+                        .{" "}
+                        {pendingReplacement.review.rejected
+                          ? "The server rejected this replacement request; the original may still publish or be retried."
+                          : "The original reached a terminal state."}
+                      </p>
+                      <p>
+                        {pendingReplacement.review.status.replacement ? (
+                          <>
+                            Linked replacement:{" "}
+                            <code>
+                              {pendingReplacement.review.status.replacement.id}
+                            </code>{" "}
+                            · revision{" "}
+                            {
+                              pendingReplacement.review.status.replacement
+                                .post_version
+                            }{" "}
+                            ·{" "}
+                            {pendingReplacement.review.status.replacement.state.replaceAll(
+                              "_",
+                              " ",
+                            )}
+                            . Inspect it in Publishing before deciding.
+                          </>
+                        ) : (
+                          "No replacement is linked to this original."
+                        )}
+                      </p>
+                      <label className="checkbox-label">
+                        <input
+                          type="checkbox"
+                          checked={confirmReplacementReview}
+                          onChange={(event) =>
+                            setConfirmReplacementReview(event.target.checked)
+                          }
+                        />
+                        I reviewed these outcomes and understand that any new
+                        schedule is a separate action.
+                      </label>
+                      <Button
+                        variant="secondary"
+                        disabled={
+                          !confirmReplacementReview || pendingReplacement.busy
+                        }
+                        onClick={() =>
+                          void pendingReplacement.resolve().then(() => load())
+                        }
+                      >
+                        Finish review
+                      </Button>
+                    </div>
                   )}
                 </div>
                 {pendingReplacement.intent && (

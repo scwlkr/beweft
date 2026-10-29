@@ -11,6 +11,60 @@ use axum::{
 use serde_json::{Value, json};
 use sqlx::Row;
 use uuid::Uuid;
+/// Read the exact audit-linked successor in the same database snapshot as the
+/// original. No link is inconclusive: an earlier replacement may still run.
+pub async fn replacement_status(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>> {
+    let row = sqlx::query(
+        r#"WITH visible AS (
+            SELECT p.id,p.brand_id,p.post_id,p.channel_id,
+              jsonb_build_object('id',p.id,'post_id',p.post_id,'brand_id',p.brand_id,
+                'channel_id',p.channel_id,'channel_name',left(c.name,100),
+                'provider',left(c.provider,64),'post_version',p.post_version,
+                'scheduled_at',p.scheduled_at,'scheduling_mode',p.scheduling_mode,
+                'state',p.state,'created_at',p.created_at,'updated_at',p.updated_at) AS summary
+            FROM publications p JOIN channels c ON c.id=p.channel_id
+            WHERE p.id=$1 AND (cardinality($2::uuid[])=0 OR p.brand_id=ANY($2))
+        )
+        SELECT v.summary AS original,a.events,a.owner_matches,(
+            SELECT jsonb_build_object('id',r.id,'post_id',r.post_id,'brand_id',r.brand_id,
+                'channel_id',r.channel_id,'channel_name',left(rc.name,100),
+                'provider',left(rc.provider,64),'post_version',r.post_version,
+                'scheduled_at',r.scheduled_at,'scheduling_mode',r.scheduling_mode,
+                'state',r.state,'created_at',r.created_at,'updated_at',r.updated_at)
+            FROM publications r JOIN channels rc ON rc.id=r.channel_id
+            WHERE r.id::text=a.replacement_id AND r.brand_id=v.brand_id
+                AND r.post_id=v.post_id AND r.channel_id=v.channel_id
+        ) AS replacement
+        FROM visible v CROSS JOIN LATERAL (
+            SELECT count(*) AS events,COALESCE(bool_and(owner_id=$3),false) AS owner_matches,
+                max(detail->>'replacement_id') AS replacement_id
+            FROM audit_events WHERE action='replace_queued_content' AND subject_id=v.id
+        ) a"#,
+    )
+    .bind(id)
+    .bind(&auth.brand_ids)
+    .bind(auth.owner_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(ApiError::missing)?;
+    let original: Value = row.get("original");
+    let replacement: Option<Value> = row.get("replacement");
+    let events: i64 = row.get("events");
+    let owner_matches: bool = row.get("owner_matches");
+    if events > 1
+        || (events == 1
+            && (!owner_matches || replacement.is_none() || original["state"] != "canceled"))
+    {
+        return Err(ApiError::conflict(
+            "The replacement record is inconsistent; review it before proceeding",
+        ));
+    }
+    Ok(data(json!({"original":original,"replacement":replacement})))
+}
 pub async fn replace(
     State(state): State<AppState>,
     auth: Auth,

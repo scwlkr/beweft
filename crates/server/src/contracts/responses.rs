@@ -220,6 +220,13 @@ pub struct PublicationSummary {
     pub updated_at: DateTime<Utc>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
+pub struct ReplacementStatus {
+    pub original: PublicationSummary,
+    /// Null means no linked replacement is currently visible; a request may still be running.
+    #[schema(required = true)]
+    pub replacement: Option<PublicationSummary>,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct ScheduleRequestIntent {
     pub version: i32,
     pub channel_ids: Vec<Uuid>,

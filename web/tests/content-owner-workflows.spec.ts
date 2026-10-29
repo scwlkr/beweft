@@ -398,6 +398,20 @@ test("a committed replacement with a lost response blocks new scheduling until t
       async (route) => {
         const response = await route.fetch();
         expect(response.ok(), await response.text()).toBe(true);
+        const replacement = (await response.json()).data.publication;
+        const rescheduled = await context.request.post(
+          `/api/v1/publications/${replacement.id}/reschedule`,
+          {
+            data: {
+              scheduled_at: new Date(Date.now() + 2 * 86400000).toISOString(),
+            },
+            headers: {
+              "X-Beweft-Request": "1",
+              Origin: process.env.BEWEFT_TEST_URL!,
+            },
+          },
+        );
+        expect(rescheduled.ok(), await rescheduled.text()).toBe(true);
         await route.abort("failed");
       },
     );
@@ -497,6 +511,19 @@ test("a changed draft rejects stale queued replacement and reloads it for review
     expect(update.ok(), await update.text()).toBe(true);
     await page.getByRole("button", { name: "Replace queued content" }).click();
     await expect(page.getByText(/Replacement was not confirmed/)).toBeVisible();
+    await page.getByRole("button", { name: "Close dialog" }).click();
+    await page.getByRole("button", { name: "Check replacement" }).click();
+    await expect(
+      page.getByText(/server rejected this replacement request/i),
+    ).toBeVisible();
+    await page
+      .getByRole("checkbox", { name: /I reviewed these outcomes/ })
+      .check();
+    await page.getByRole("button", { name: "Finish review" }).click();
+    await expect(
+      page.getByRole("button", { name: "Check replacement" }),
+    ).toHaveCount(0);
+    await page.getByRole("button", { name: "View details" }).click();
     await page.getByRole("button", { name: "Compare and replace" }).click();
     await expect(page.getByText("Another editor changed this")).toBeVisible();
     const rows = (
@@ -550,5 +577,89 @@ test("a late template application cannot open its draft in a different brand", a
       ).json()
     ).data;
     expect(nextPosts).toEqual([]);
+  });
+});
+
+test("replacement review compares the frozen and current media descriptions", async () => {
+  await withWorkspace(async (page, context, write) => {
+    const brand = await write("/brands", {
+      name: "Snapshot description fixture",
+    });
+    const channel = await write("/channels", {
+      brand_id: brand.id,
+      provider: "manual",
+      name: "Description channel",
+      timezone: "UTC",
+    });
+    const upload = await context.request.post(
+      `/api/v1/media?brand_id=${brand.id}`,
+      {
+        multipart: {
+          file: {
+            name: "description.png",
+            mimeType: "image/png",
+            buffer: Buffer.from(
+              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1sAAAAASUVORK5CYII=",
+              "base64",
+            ),
+          },
+        },
+        headers: {
+          "X-Beweft-Request": "1",
+          Origin: process.env.BEWEFT_TEST_URL!,
+        },
+      },
+    );
+    expect(upload.ok(), await upload.text()).toBe(true);
+    const media = (await upload.json()).data;
+    const first = await context.request.patch(`/api/v1/media/${media.id}`, {
+      data: {
+        alt_text: "Old frozen description",
+        metadata_version: media.metadata_version,
+      },
+      headers: {
+        "X-Beweft-Request": "1",
+        Origin: process.env.BEWEFT_TEST_URL!,
+      },
+    });
+    expect(first.ok(), await first.text()).toBe(true);
+    const old = (await first.json()).data;
+    const post = await write("/posts", {
+      brand_id: brand.id,
+      title: "Description comparison",
+      text: "Fixture",
+      media_ids: [media.id],
+      variants: [{ channel_id: channel.id }],
+    });
+    await write(`/posts/${post.id}/schedule`, {
+      version: post.version,
+      channel_ids: [channel.id],
+      scheduled_at: new Date(Date.now() + 86400000).toISOString(),
+      media_versions: { [media.id]: old.metadata_version },
+    });
+    const updated = await context.request.patch(`/api/v1/media/${media.id}`, {
+      data: {
+        alt_text: "New current description",
+        metadata_version: old.metadata_version,
+      },
+      headers: {
+        "X-Beweft-Request": "1",
+        Origin: process.env.BEWEFT_TEST_URL!,
+      },
+    });
+    expect(updated.ok(), await updated.text()).toBe(true);
+    await context.addInitScript(
+      (id) => localStorage.setItem("beweft.brand", id),
+      brand.id,
+    );
+    await page.goto("/#queue");
+    await page.getByRole("button", { name: "View details" }).click();
+    await page.getByRole("button", { name: "Compare and replace" }).click();
+    await expect(
+      page.getByText(/snapshot description: Old frozen description/),
+    ).toBeVisible();
+    await expect(
+      page.getByText(/description: New current description/),
+    ).toBeVisible();
   });
 });
