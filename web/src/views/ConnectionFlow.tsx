@@ -169,6 +169,12 @@ export function ConnectionFlow({
             ))}
           </select>
         </Field>
+        {flow?.provider === "google_business" && (
+          <p className="muted">
+            Each choice is a location and the Google account that manages it.
+            Select the location that should receive this brand’s posts.
+          </p>
+        )}
         {flow?.destinations.length === 0 && (
           <p className="muted">
             No eligible destinations were returned. Check your provider
