@@ -389,6 +389,7 @@ pub struct ProviderReply {
     pub inbox_id: Uuid,
     pub text: String,
     pub state: String,
+    pub revision: i64,
     #[schema(required = true)]
     pub receipt: Option<Value>,
     #[schema(required = true)]

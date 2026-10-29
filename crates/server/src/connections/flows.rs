@@ -9,13 +9,17 @@ pub(super) fn recovery(message: &str) -> String {
 /// Bound an authorization operation by PostgreSQL's flow/session lifetime,
 /// accounting for query latency without consulting the application host clock.
 pub(super) fn authorization_deadline(
-    started: std::time::Instant,
+    started: Option<providers::SuspendInstant>,
     remaining: Option<f64>,
-) -> Result<std::time::Instant> {
+) -> Result<providers::Deadline> {
     remaining
         .filter(|seconds| seconds.is_finite() && *seconds > 1.0)
-        .map(|seconds| started + std::time::Duration::from_secs_f64((seconds - 1.0).min(60.0)))
-        .filter(|deadline| *deadline > std::time::Instant::now())
+        .and_then(|seconds| {
+            started?.deadline(std::time::Duration::from_secs_f64(
+                (seconds - 1.0).min(60.0),
+            ))
+        })
+        .filter(|deadline| deadline.remaining().is_some())
         .ok_or_else(|| {
             ApiError::conflict(recovery(
                 "Authorization or its browser session expired before the provider request.",
@@ -245,12 +249,12 @@ pub async fn callback(
         ));
     }
 
-    let started = std::time::Instant::now();
+    let started = providers::SuspendInstant::now();
     let remaining: Option<f64> = sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM (LEAST(f.expires_at,s.expires_at)-clock_timestamp()))::double precision FROM connection_flows f JOIN sessions s ON s.token_hash=f.session_hash AND s.owner_id=f.owner_id WHERE f.id=$1 AND f.consumed_at IS NOT NULL AND f.completed_at IS NULL AND f.oauth_generation=$2")
         .bind(id).bind(generation).fetch_optional(&mut *tx).await?;
     let deadline = authorization_deadline(started, remaining)?;
-    let candidates = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
-        let adapter = adapter_for(&app).await?.with_monotonic_deadline(deadline);
+    let candidates = deadline.run(async {
+        let adapter = adapter_for(&app).await?.with_deadline(deadline);
         let tokens = adapter
             .exchange(
                 &app,

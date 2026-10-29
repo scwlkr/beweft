@@ -89,12 +89,7 @@ impl Adapter {
                 "YouTube rejected this upload chunk; inspect its saved session before restarting",
             ));
         }
-        let v: Value = response.json().await.map_err(|_| {
-            error(
-                FailureKind::Uncertain,
-                "YouTube completion response was invalid",
-            )
-        })?;
+        let v = self.response_json(response, true).await?;
         let id = field(&v, "id")?;
         Ok(published(
             id.clone(),

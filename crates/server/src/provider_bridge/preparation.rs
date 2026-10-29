@@ -27,7 +27,7 @@ pub(super) async fn prepare_publication_on(
             .parse()
             .map_err(|_| ApiError::bad("Invalid publication media"))?;
         let row =
-            sqlx::query("SELECT name,mime,storage_key FROM media WHERE id=$1 AND brand_id=$2")
+            sqlx::query("SELECT name,mime,size,storage_key FROM media WHERE id=$1 AND brand_id=$2")
                 .bind(media_id)
                 .bind(
                     value["brand_id"]
@@ -54,6 +54,14 @@ pub(super) async fn prepare_publication_on(
                 "Publication media file is unavailable".into(),
             )
         })?;
+        let expected_size: i64 = row.get("size");
+        if !metadata.is_file() || metadata.len() != expected_size as u64 {
+            return Err(ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "provider_format_check_unavailable",
+                "Publication media file is unavailable or incomplete".into(),
+            ));
+        }
         let public_url = if delivery && state.config.public_url.starts_with("https://") {
             let token = crypto::random_secret();
             sqlx::query("INSERT INTO provider_media_tokens(token_hash,media_id,expires_at) VALUES($1,$2,now()+interval '2 hours')").bind(crypto::digest(&token)).bind(media_id).execute(&mut *db).await?;

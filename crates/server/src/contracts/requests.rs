@@ -61,6 +61,9 @@ pub enum ProviderReplyResolution {
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct ResolveProviderReplyRequest {
     pub resolution: ProviderReplyResolution,
+    pub observed_revision: i64,
+    /// Required and true for not_published: the owner attests the sender stopped.
+    pub sender_stopped: Option<bool>,
     pub note: String,
     pub external_url: Option<String>,
 }

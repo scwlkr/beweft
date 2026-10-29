@@ -10,7 +10,7 @@ pub async fn sync(
     // A sync keeps one connection through refresh and network reads. Reserve at
     // least one pool slot for other work and reject excess before acquiring one.
     let _permit = state
-        .sync_slots
+        .provider_slots
         .try_acquire()
         .map_err(|_| ApiError::conflict("Sync capacity is busy; try again shortly"))?;
     auth.brand(catalog::channel_brand(&state, id).await?)?;

@@ -141,6 +141,25 @@ fn is_public(ip: std::net::IpAddr) -> bool {
 }
 /// Resolve and pin federated hosts to public IPs for this operation, avoiding DNS rebinding.
 pub async fn adapter_for(app: &AppConfig) -> Result<Adapter> {
+    let deadline = providers::SuspendInstant::now()
+        .and_then(|start| start.deadline(std::time::Duration::from_secs(10)))
+        .ok_or_else(|| {
+            ApiError(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "provider_clock_unavailable",
+                "Provider elapsed-time clock is unavailable.".into(),
+            )
+        })?;
+    deadline.run(adapter_for_inner(app)).await.map_err(|_| {
+        ApiError(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "provider_setup_unavailable",
+            "Provider setup exceeded its time limit; retry after checking the connection.".into(),
+        )
+    })?
+}
+
+async fn adapter_for_inner(app: &AppConfig) -> Result<Adapter> {
     #[cfg(feature = "provider-fixtures")]
     if std::env::var("BEWEFT_ENABLE_FIXTURES").as_deref() == Ok("true")
         && let Ok(origin) = std::env::var("BEWEFT_PROVIDER_FIXTURE_ORIGIN")

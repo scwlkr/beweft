@@ -437,12 +437,14 @@ def run():
             media_key = sql(f"SELECT storage_key FROM media WHERE id='{asset['id']}'")
             media_path = Path(temp) / media_key
             held_path = Path(temp) / "temporarily-held-image"
-            for inaccessible in ("missing", "unreadable"):
+            for inaccessible in ("missing", "unreadable", "truncated"):
                 transient = request("/posts", {"brand_id":brand,"text":"retry image","media_ids":[asset["id"]]})
                 transient_id = str(uuid.uuid4())
                 transient_body = {"version":1,"channel_ids":[x["id"]],"scheduled_at":when,"request_id":transient_id}
-                if inaccessible == "missing":
+                if inaccessible in ("missing", "truncated"):
                     media_path.rename(held_path)
+                    if inaccessible == "truncated":
+                        media_path.write_bytes(b"incomplete")
                 else:
                     media_path.chmod(0)
                 try:
@@ -451,7 +453,9 @@ def run():
                     request(f"/schedule-requests/{transient_id}", expected=404)
                     assert sql(f"SELECT count(*) FROM publications WHERE post_id='{transient['id']}'") == "0"
                 finally:
-                    if inaccessible == "missing":
+                    if inaccessible in ("missing", "truncated"):
+                        if inaccessible == "truncated":
+                            media_path.unlink()
                         held_path.rename(media_path)
                     else:
                         media_path.chmod(0o600)
@@ -580,7 +584,7 @@ def run():
             posts_before = Fixture.counts.get("POST /2/tweets", 0)
             sql(f"UPDATE publications SET scheduled_at=clock_timestamp() WHERE id='{refresh_late['id']}'")
             wait_for(lambda: state_is(refresh_late["id"], "uncertain"), "refresh crosses lease", seconds=25)
-            assert Fixture.counts.get("x_refresh", 0) == refresh_before + 1
+            assert Fixture.counts.get("x_refresh", 0) == refresh_before + 1, (refresh_before, Fixture.counts.get("x_refresh", 0))
             assert Fixture.counts.get("POST /2/tweets", 0) == posts_before
             assert sql(f"SELECT count(*) FROM publication_attempts WHERE publication_id='{refresh_late['id']}' AND receipt IS NOT NULL") == "0"
             sql("DROP TRIGGER fixture_refresh_lease ON publication_attempts; DROP FUNCTION fixture_refresh_lease(); "
@@ -692,7 +696,10 @@ def run():
                            "expected_last_request_id":ahead_key}, api_origin=behind_origin)["state"] == "uncertain"
             assert Fixture.counts.get("POST /v23.0/comment-1/comments", 0) == before_near
             wait_for(lambda: sql(f"SELECT delivery_deadline<=clock_timestamp() FROM provider_replies WHERE id='{near_reply}'") == "t", "reply deadline elapsed")
-            request(f"/inbox/{item['id']}/replies/{near_reply}/resolve", {"resolution":"not_published","note":"Fixture saw no request"})
+            near_revision = request(f"/inbox/{item['id']}/replies")[0]["revision"]
+            resolution = {"resolution":"not_published","note":"Fixture saw no request","observed_revision":near_revision}
+            assert request(f"/inbox/{item['id']}/replies/{near_reply}/resolve", resolution, expected=400)["error"]["code"] == "reply_sender_attestation_required"
+            request(f"/inbox/{item['id']}/replies/{near_reply}/resolve", dict(resolution, sender_stopped=True))
             sql("DROP TRIGGER fixture_short_reply ON provider_replies; DROP FUNCTION fixture_short_reply();")
 
             # If an accepted reply response returns after its DB deadline,
@@ -715,14 +722,30 @@ def run():
             late_thread.start()
             assert Fixture.reply_started.wait(10), "reply did not reach the loopback fixture"
             behind.send_signal(signal.SIGSTOP)
+            wait_for(lambda: sql(f"SELECT delivery_deadline<=clock_timestamp() FROM provider_replies WHERE id='{late_reply}'") == "t", "held sender deadline elapsed")
+            # Quarantine can also happen before the sender finishes. Its later
+            # completion must invalidate this observation without overwriting it.
+            sql(f"UPDATE provider_replies SET state='uncertain',error='fixture quarantine',updated_at=clock_timestamp() WHERE id='{late_reply}'")
+            observed = request(f"/inbox/{item['id']}/replies")[0]
+            assert observed["id"] == late_reply and observed["state"] == "uncertain"
+            old_revision = observed["revision"]
+            outcome = {"resolution":"not_published","note":"Fixture inspected","observed_revision":old_revision,"sender_stopped":True}
+            began = time.monotonic()
+            busy = request(f"/inbox/{item['id']}/replies/{late_reply}/resolve", outcome, expected=409)
+            assert busy["error"]["code"] == "reply_execution_active" and time.monotonic() - began < 2
+            retry = {"request_id":str(uuid.uuid4()),"text":"Must wait","expected_last_request_id":late_reply}
+            assert request(f"/inbox/{item['id']}/reply", retry, expected=409)["error"]["code"] == "reply_execution_active"
+            assert request(f"/channels/{fb['id']}/disconnect", {"confirm_shared_impact":True}, expected=409)["error"]["code"] == "reply_execution_active"
+            assert request("/auth/status", cookie=False)
             Fixture.reply_release.set()
             assert Fixture.reply_returned.wait(5), "fixture reply response was not released"
-            time.sleep(4)
             behind.send_signal(signal.SIGCONT)
             late_thread.join(timeout=10)
             assert not late_thread.is_alive() and not late_errors and late_result[0]["state"] == "uncertain"
             assert sql(f"SELECT receipt IS NULL FROM provider_replies WHERE id='{late_reply}'") == "t"
-            request(f"/inbox/{item['id']}/replies/{late_reply}/resolve", {"resolution":"published","note":"Fixture observed the reply"})
+            assert late_result[0]["revision"] > old_revision
+            assert request(f"/inbox/{item['id']}/replies/{late_reply}/resolve", outcome, expected=409)["error"]["code"] == "reply_observation_changed"
+            request(f"/inbox/{item['id']}/replies/{late_reply}/resolve", {"resolution":"published","note":"Fixture observed the reply","observed_revision":late_result[0]["revision"]})
             sql("DROP TRIGGER fixture_late_reply ON provider_replies; DROP FUNCTION fixture_late_reply();")
             behind.send_signal(signal.SIGTERM)
             behind.wait(timeout=10)
@@ -731,9 +754,11 @@ def run():
             uncertain_key = str(uuid.uuid4())
             assert request(f"/inbox/{item['id']}/reply", {"request_id":uncertain_key,"text":"Uncertain fixture reply",
                            "expected_last_request_id":late_reply})["state"] == "uncertain"
-            assert request(f"/inbox/{item['id']}/replies")[0]["id"] == uncertain_key
-            request(f"/inbox/{item['id']}/replies/{uncertain_key}/resolve", {"resolution":"not_published","note":"Fixture checked"}, token=token, expected=403)
-            resolved = request(f"/inbox/{item['id']}/replies/{uncertain_key}/resolve", {"resolution":"not_published","note":"Fixture checked"})
+            uncertain_row = request(f"/inbox/{item['id']}/replies")[0]
+            assert uncertain_row["id"] == uncertain_key
+            resolution = {"resolution":"not_published","note":"Fixture checked","observed_revision":uncertain_row["revision"],"sender_stopped":True}
+            request(f"/inbox/{item['id']}/replies/{uncertain_key}/resolve", resolution, token=token, expected=403)
+            resolved = request(f"/inbox/{item['id']}/replies/{uncertain_key}/resolve", resolution)
             assert resolved["state"] == "failed" and resolved["receipt"]["verification"] == "owner_attestation"
 
             Fixture.feed_mode = "uncertain"
