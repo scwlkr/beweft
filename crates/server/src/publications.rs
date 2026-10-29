@@ -185,6 +185,32 @@ async fn change(
     } else {
         None
     };
+    let mut linkedin_checkpoint =
+        if provider == "linkedin" && ["retry", "reconcile"].contains(&action) {
+            crate::provider_bridge::checkpoint_for_recovery(state, &mut tx, id).await?
+        } else {
+            None
+        };
+    if action == "retry"
+        && let Some(cp) = linkedin_checkpoint.as_ref()
+    {
+        let (attempt, checkpoint) = crate::provider_bridge::linkedin_identity(cp)?;
+        if !crate::provider_bridge::linkedin_attested(cp, attempt, checkpoint) {
+            return Err(ApiError::conflict(
+                "Stop the sender, inspect LinkedIn, and record not-published for the current attempt and checkpoint before retrying",
+            ));
+        }
+        if current == "failed" {
+            sqlx::query("INSERT INTO audit_events(id,owner_id,action,subject_id,detail) VALUES($1,$2,'retry_linkedin_delivery',$3,$4)")
+                .bind(Uuid::new_v4()).bind(auth.owner_id).bind(id)
+                .bind(json!({"provider":provider,"attempt_id":attempt,"checkpoint_id":checkpoint,"stage":cp["stage"],"upload_id":cp["upload_id"],"media_ids":cp["media_ids"],"owner_attestation":cp["not_published_attestation"]}))
+                .execute(&mut *tx).await?;
+            sqlx::query("DELETE FROM provider_delivery_checkpoints WHERE publication_id=$1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
     if action == "retry"
         && let Some(cp) = meta_checkpoint.as_ref()
     {
@@ -237,12 +263,30 @@ async fn change(
                     && (x_checkpoint
                         .as_ref()
                         .is_some_and(crate::provider_bridge::x_public_boundary)
-                        || meta_checkpoint.is_some())) =>
+                        || meta_checkpoint.is_some()
+                        || linkedin_checkpoint.is_some())) =>
         {
             required(&body, "note")?;
             match body["resolution"].as_str() {
                 Some("published") => "published",
                 Some("not_published") => {
+                    if let Some(cp) = linkedin_checkpoint.as_mut() {
+                        auth.owner_session()?;
+                        let (attempt, checkpoint) = crate::provider_bridge::linkedin_identity(cp)?;
+                        if body["observed_attempt_id"] != json!(attempt)
+                            || body["observed_checkpoint_id"] != json!(checkpoint)
+                            || body["sender_stopped"] != true
+                            || body["provider_inspected"] != true
+                        {
+                            return Err(ApiError::conflict(
+                                "Stop the original sender, inspect LinkedIn, and attest not-published using the current attempt and checkpoint IDs",
+                            ));
+                        }
+                        cp["not_published_attestation"] =
+                            json!({"attempt_id":attempt,"checkpoint_id":checkpoint});
+                        crate::provider_bridge::save_recovery_checkpoint_tx(&mut tx, state, id, cp)
+                            .await?;
+                    }
                     if let Some(cp) = meta_checkpoint.as_mut() {
                         auth.owner_session()?;
                         let (attempt, checkpoint) = crate::provider_bridge::meta_identity(cp)?;

@@ -234,6 +234,61 @@ async fn fenced_step(
                     )));
                 }
             }
+            if channel.app.provider == "linkedin" && stage.starts_with("linkedin_") {
+                if matches!(stage, "linkedin_image_upload" | "linkedin_video_upload") {
+                    let expiry = saved["upload_expires_ms"].as_i64().unwrap_or(0);
+                    let live: bool = sqlx::query_scalar(
+                        "SELECT $1::bigint > EXTRACT(EPOCH FROM clock_timestamp()) * 1000",
+                    )
+                    .bind(expiry)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    if !live {
+                        return Ok(Err(providers::error(
+                            FailureKind::ExpiredSession,
+                            "LinkedIn upload URL expired; inspect the delivery before restarting.",
+                        )));
+                    }
+                }
+                if timing
+                    .as_ref()
+                    .is_some_and(|row| row.get::<bool, _>("waiting"))
+                {
+                    return Ok(Ok(Step::Wait(saved.clone())));
+                }
+                let previous = saved["attempt_id"]
+                    .as_str()
+                    .and_then(|value| value.parse::<Uuid>().ok());
+                if previous != Some(attempt) {
+                    if stage == "linkedin_post_started" {
+                        return Ok(Err(providers::error(
+                            FailureKind::Uncertain,
+                            "An earlier LinkedIn post may have started. Inspect LinkedIn before resolving it.",
+                        )));
+                    }
+                    let rebound = save_attempt_checkpoint_tx(
+                        &mut tx,
+                        state,
+                        id,
+                        attempt,
+                        saved,
+                        stage_started,
+                        None,
+                    )
+                    .await?;
+                    return Ok(Ok(Step::Checkpoint(rebound)));
+                }
+                if stage == "linkedin_post_started"
+                    && overall
+                        .and_then(|deadline| deadline.remaining())
+                        .is_none_or(|remaining| remaining < std::time::Duration::from_secs(80))
+                {
+                    return Ok(Err(providers::error(
+                        FailureKind::Uncertain,
+                        "The LinkedIn post boundary needs owner inspection before recovery.",
+                    )));
+                }
+            }
         }
         let mut result = adapter.publish_step(&channel, &p, cp.as_ref()).await;
         // Recheck under the same locks after network I/O, before mutating any
@@ -260,9 +315,16 @@ async fn fenced_step(
         let was_wait = matches!(&result, Ok(Step::Wait(_)));
         if let Ok(Step::Checkpoint(next) | Step::Wait(next)) = &mut result {
             let wait = if was_wait {
-                next["check_after_secs"]
-                    .as_u64()
-                    .map(|seconds| seconds.clamp(1, 60))
+                if matches!(
+                    next["stage"].as_str(),
+                    Some("linkedin_image_processing" | "linkedin_video_processing")
+                ) {
+                    Some(3)
+                } else {
+                    next["check_after_secs"]
+                        .as_u64()
+                        .map(|seconds| seconds.clamp(1, 60))
+                }
             } else {
                 None
             };
@@ -316,6 +378,7 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                 if stage.starts_with("x_")
                     || stage.starts_with("meta_")
                     || stage.starts_with("fb_reel_")
+                    || stage.starts_with("linkedin_")
                 {
                     completed_managed_checkpoint = true;
                     post_started = matches!(
@@ -325,6 +388,7 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                             | "meta_public"
                             | "meta_legacy_ambiguous"
                             | "fb_reel_public"
+                            | "linkedin_post_started"
                     );
                     let remaining = overall
                         .and_then(|deadline| deadline.remaining())
@@ -343,6 +407,10 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                     stage == "x_video_processing"
                         || stage.starts_with("meta_")
                         || stage.starts_with("fb_reel_")
+                        || matches!(
+                            stage,
+                            "linkedin_image_processing" | "linkedin_video_processing"
+                        )
                 }) =>
             {
                 return BridgeOutcome::Continue;

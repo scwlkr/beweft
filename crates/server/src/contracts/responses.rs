@@ -415,6 +415,8 @@ pub struct ProviderStatus {
     pub x_upload: Option<XUploadStatus>,
     #[schema(required = true)]
     pub meta_delivery: Option<MetaDeliveryStatus>,
+    #[schema(required = true)]
+    pub linkedin_delivery: Option<MetaDeliveryStatus>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct MetaDeliveryStatus {

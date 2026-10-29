@@ -1515,6 +1515,16 @@
       },
       "ProviderStatus": {
         "properties": {
+          "linkedin_delivery": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MetaDeliveryStatus"
+              }
+            ]
+          },
           "meta_delivery": {
             "oneOf": [
               {
@@ -1553,7 +1563,8 @@
           "reset_allowed",
           "reason",
           "x_upload",
-          "meta_delivery"
+          "meta_delivery",
+          "linkedin_delivery"
         ],
         "type": "object"
       },

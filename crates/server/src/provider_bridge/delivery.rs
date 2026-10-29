@@ -29,7 +29,10 @@ pub(super) async fn save_attempt_checkpoint_tx(
 ) -> Result<Value> {
     let mut cp = cp.clone();
     let managed_checkpoint = cp["stage"].as_str().is_some_and(|stage| {
-        stage.starts_with("x_") || stage.starts_with("meta_") || stage.starts_with("fb_reel_")
+        stage.starts_with("x_")
+            || stage.starts_with("meta_")
+            || stage.starts_with("fb_reel_")
+            || stage.starts_with("linkedin_")
     });
     if managed_checkpoint {
         cp["attempt_id"] = json!(attempt);

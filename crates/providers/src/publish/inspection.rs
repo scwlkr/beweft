@@ -204,6 +204,11 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
         if expected.is_some_and(|e| e != codec) {
             return Err(invalid("Image bytes do not match the declared MIME type"));
         }
+        if provider == "linkedin" && image(m) && width.saturating_mul(height) >= 36_152_320 {
+            return Err(invalid(
+                "LinkedIn images must have fewer than 36,152,320 pixels",
+            ));
+        }
         if provider == "threads" && image(m) {
             let ratio = width as f64 / height as f64;
             if !matches!(m.mime.as_str(), "image/jpeg" | "image/png")

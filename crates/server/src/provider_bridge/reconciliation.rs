@@ -112,6 +112,36 @@ pub(crate) fn meta_attested(cp: &Value, attempt: Uuid, checkpoint: Uuid) -> bool
         && cp["not_published_attestation"]["checkpoint_id"] == json!(checkpoint)
 }
 
+pub(crate) fn linkedin_public_boundary(cp: &Value) -> bool {
+    !matches!(
+        cp["stage"].as_str(),
+        Some(
+            "linkedin_image_init"
+                | "linkedin_image_upload"
+                | "linkedin_image_processing"
+                | "linkedin_video_init"
+                | "linkedin_video_upload"
+                | "linkedin_video_finalize"
+                | "linkedin_video_processing"
+        )
+    )
+}
+
+pub(crate) fn linkedin_identity(cp: &Value) -> Result<(Uuid, Uuid)> {
+    let parse = |name: &str| cp[name].as_str().and_then(|value| value.parse().ok());
+    match (parse("attempt_id"), parse("checkpoint_id")) {
+        (Some(attempt), Some(checkpoint)) => Ok((attempt, checkpoint)),
+        _ => Err(ApiError::conflict(
+            "The LinkedIn checkpoint has no valid recovery identity",
+        )),
+    }
+}
+
+pub(crate) fn linkedin_attested(cp: &Value, attempt: Uuid, checkpoint: Uuid) -> bool {
+    cp["not_published_attestation"]["attempt_id"] == json!(attempt)
+        && cp["not_published_attestation"]["checkpoint_id"] == json!(checkpoint)
+}
+
 pub async fn reset_x_upload(
     State(state): State<AppState>,
     auth: Auth,
@@ -379,7 +409,26 @@ pub async fn provider_status(
     } else {
         None
     };
+    let linkedin_delivery = if provider == "linkedin" {
+        cp.as_ref().map(|cp| {
+            let (attempt, checkpoint) = linkedin_identity(cp)?;
+            let public = linkedin_public_boundary(cp);
+            let retry_allowed = current == "failed" && linkedin_attested(cp, attempt, checkpoint);
+            let reason = if current == "published" {
+                "A publication is recorded; this delivery cannot be retried."
+            } else if retry_allowed {
+                "An explicit retry starts a fresh LinkedIn delivery and retains the earlier checkpoint identity in the audit record."
+            } else if ["uncertain", "failed"].contains(&current.as_str()) {
+                "Stop the original sender, inspect LinkedIn, and record a not-published resolution for these exact IDs before retrying."
+            } else {
+                "Delivery is active or queued. Wait and reload status before recovery."
+            };
+            Ok::<_, ApiError>(json!({"phase":if public {"post_started"} else {"upload"},"attempt_id":attempt,"checkpoint_id":checkpoint,"retry_allowed":retry_allowed,"reason":reason}))
+        }).transpose()?
+    } else {
+        None
+    };
     Ok(data(
-        json!({"session_expired":expired,"reset_allowed":provider == "youtube" && expired && attested && current == "failed","reason":if provider == "youtube" && expired {Some("Inspect YouTube Studio, record not-published reconciliation, then reset this expired upload before retrying.")}else{None},"x_upload":x_upload,"meta_delivery":meta_delivery}),
+        json!({"session_expired":expired,"reset_allowed":provider == "youtube" && expired && attested && current == "failed","reason":if provider == "youtube" && expired {Some("Inspect YouTube Studio, record not-published reconciliation, then reset this expired upload before retrying.")}else{None},"x_upload":x_upload,"meta_delivery":meta_delivery,"linkedin_delivery":linkedin_delivery}),
     ))
 }

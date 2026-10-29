@@ -85,12 +85,12 @@ pub fn capabilities() -> Vec<Capabilities> {
         Capabilities {
             id: "linkedin",
             name: "LinkedIn",
-            formats: &["text"],
+            formats: &["text", "image", "video"],
             oauth: true,
             analytics: false,
             inbox: false,
             reply: false,
-            reason: "Member text publishing. Organization, media and restricted read access use manual handoff in this release.",
+            reason: "Member posts support text, JPEG/PNG images or one MP4 video. Organization publishing and restricted member reads are not implemented.",
         },
         Capabilities {
             id: "pinterest",

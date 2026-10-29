@@ -20,7 +20,7 @@ fn required_scopes(provider: &str, action: &str) -> Vec<&'static str> {
         ("threads", "metrics") => vec!["threads_manage_insights"],
         ("mastodon", "publish" | "media" | "reply") => vec!["write"],
         ("mastodon", "metrics" | "inbox") => vec!["read"],
-        ("linkedin", "publish") => vec!["w_member_social"],
+        ("linkedin", "publish" | "media") => vec!["w_member_social"],
         ("pinterest", "publish" | "media") => vec!["pins:write"],
         _ => vec![],
     }
