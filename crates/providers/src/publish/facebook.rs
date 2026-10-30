@@ -5,7 +5,7 @@ fn facebook_video_id(cp: &Value) -> Result<String> {
     if id.len() > 32 || !id.bytes().all(|b| b.is_ascii_digit()) {
         return Err(error(
             FailureKind::Uncertain,
-            "Invalid Facebook Reel checkpoint; inspect the provider before retrying",
+            "Invalid Facebook checkpoint; inspect the provider before retrying",
         ));
     }
     Ok(id)
@@ -269,7 +269,8 @@ impl Adapter {
         if publishing == "complete"
             && status["publishing_phase"]["publish_status"] == "published"
             && status["video_status"] == "ready"
-            && status["uploading_phase"]["status"] == "complete"
+            && (status["uploading_phase"].is_null()
+                || status["uploading_phase"]["status"] == "complete")
             && status["processing_phase"]["status"] == "complete"
         {
             return Ok(published(
