@@ -6,6 +6,64 @@ API bound to loopback; replace `<installation>`, `<backup>` and image references
 with paths and names you choose. Docker Engine, Docker Compose and Python 3.8+
 are required on Linux or macOS. The scripts use Unix file permissions and locks.
 
+## Example workspace
+
+The demo creates a **separate** installation and seeds fictional content through
+the normal API. It needs a trusted, already-built local application image and
+the locally available `postgres:17-alpine` image. Choose an unused directory,
+Compose project and port. For example, after building or obtaining your own
+local image:
+
+```sh
+./project demo create .local/demo beweft-demo 3001 <trusted-local-image>
+```
+
+Open `http://localhost:3001` and sign in with the initial example credentials
+`demo@example.com` / `BeweftDemo123!`. These credentials are public and are for
+this isolated demo only. The directory has its own private generated secrets,
+database and media volumes. Never expose this installation to a network or use
+these credentials for a real account. The demo command requires an unused
+project beginning with `beweft-demo`, a non-3000 port and a new directory; it
+never adopts an existing installation. Standard installation ownership and
+image-pinning checks still apply.
+
+The sample includes fictional brands, manually prepared X, Instagram and
+YouTube channels, images, ideas, templates, drafts, posting rules, a queue and
+an exact calendar appointment. The completed handoff is an owner-attested
+example explicitly stating that no public post was made. These are **manual**
+channels, not provider connections; analytics is unavailable. No provider app,
+token or live publication is created. If you later connect a real channel,
+normal publishing behavior applies.
+
+Use `localhost` for the demo and `127.0.0.1` for an installation at
+`127.0.0.1:3000`: browsers share cookies across ports on the same hostname.
+If your other installation also uses `localhost`, use separate browser profiles
+or change that installation's origin deliberately before using both. Keep the
+demo directory and its database if you want your practice changes to persist.
+The usual `./project compose .local/demo up -d --wait` command starts it again.
+
+The command checkpoints completed API writes in a private marker tied to the
+installation and pinned image. `./project demo resume .local/demo` resumes a
+partially completed seed only while that owned API is running. Once seeding is
+complete, resume does nothing: it does not reset the password or replace edits.
+If you changed the owner password before an interrupted seed finished, pipe the
+current password as one UTF-8 line from a private source to
+`./project demo resume .local/demo --password-stdin`. The command preserves
+spaces, reads at most 1024 password bytes, and never saves or prints it. Do not
+put the password in command arguments or shell history. The input must be a
+non-interactive stream and provide a line or end of file within ten seconds.
+Completed seeds do not read the stream.
+If a request was interrupted with an uncertain outcome, resume stops without
+retrying it; inspect the demo and its marker before deciding what to do. If
+setup stopped before creating a marker, the directory is not adopted on retry;
+preserve it and use a new directory and project for a new demo. There is no
+automatic reset or deletion. The credentials above describe only the initial
+password; a password you later choose remains in effect.
+
+For a disposable integration rehearsal of these guards and the seed, run
+`BEWEFT_DEMO_TEST_IMAGE=<trusted-local-image> python3 scripts/tests/demo_rehearsal.py`.
+It uses uniquely named local Docker resources and removes them afterward.
+
 ## Create a local installation
 
 From the repository checkout:

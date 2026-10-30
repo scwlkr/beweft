@@ -24,6 +24,10 @@ not require a public hostname or social account. The application source is MIT;
 the image also contains third-party GPL/LGPL components with separate
 [redistribution requirements](docs/image-licenses.md).
 
+For a separate local workspace populated with example content, see the
+[demo setup](docs/self-hosting.md#example-workspace). It starts with manual
+practice channels and does not connect a social account.
+
 No live social account or publication has been verified. Fixture results are
 kept distinct from real provider outcomes. The [API contract](docs/api-contract.md)
 and [provider research](docs/research/provider-capabilities.md) describe current
