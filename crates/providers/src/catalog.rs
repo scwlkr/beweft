@@ -89,8 +89,8 @@ pub fn capabilities() -> Vec<Capabilities> {
             oauth: false,
             analytics: true,
             inbox: true,
-            reply: false,
-            reason: "Configure the account's PDS origin and connect with an app password. Video eligibility and daily limits apply; replies use manual handoff.",
+            reply: true,
+            reason: "Configure the account's PDS origin and connect with an app password. Video eligibility and daily limits apply; replies supported.",
         },
         Capabilities {
             id: "linkedin",

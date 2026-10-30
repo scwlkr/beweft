@@ -79,6 +79,75 @@ impl Adapter {
                     .header("Idempotency-Key", idempotency_key)
                     .json(&json!({"status":format!("{mentions} {text}"),"in_reply_to_id":item_id,"visibility":visibility,"allowed_mentions":context.recipients.iter().map(|r| &r.id).collect::<Vec<_>>()}))
             }
+            "bluesky" => {
+                if text.chars().count() > 300 {
+                    return Err(invalid(
+                        "Bluesky reply text exceeds the supported length",
+                    ));
+                }
+                let origin = instance_origin(&c.app)?;
+                let mut uri_parts = item_id
+                    .strip_prefix("at://")
+                    .unwrap_or(item_id)
+                    .splitn(3, '/');
+                let repo = uri_parts
+                    .next()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| invalid("Bluesky reply target is invalid"))?
+                    .to_owned();
+                let collection = uri_parts.next().unwrap_or("");
+                let rkey = uri_parts.next().unwrap_or("");
+                if collection != "app.bsky.feed.post" || rkey.is_empty() {
+                    return Err(invalid("Bluesky reply target is invalid"));
+                }
+                let record_response = self
+                    .send(
+                        self.request(
+                            Method::GET,
+                            &format!("{origin}/xrpc/com.atproto.repo.getRecord"),
+                            token,
+                        )?
+                        .query(&[
+                            ("repo", repo.as_str()),
+                            ("collection", "app.bsky.feed.post"),
+                            ("rkey", rkey),
+                        ]),
+                        false,
+                    )
+                    .await?;
+                let parent_cid = field(&record_response, "cid")?;
+                let root_value = &record_response["value"]["reply"]["root"];
+                let (root_uri, root_cid) = if root_value.is_object()
+                    && root_value["uri"].as_str().is_some()
+                    && root_value["cid"].as_str().is_some()
+                {
+                    (
+                        root_value["uri"].as_str().unwrap().to_owned(),
+                        root_value["cid"].as_str().unwrap().to_owned(),
+                    )
+                } else {
+                    (item_id.to_owned(), parent_cid.clone())
+                };
+                let created = chrono::Utc::now().to_rfc3339();
+                self.request(
+                    Method::POST,
+                    &format!("{origin}/xrpc/com.atproto.repo.createRecord"),
+                    token,
+                )?
+                .json(&json!({
+                    "repo": c.identity.id,
+                    "collection": "app.bsky.feed.post",
+                    "record": {
+                        "$type": "app.bsky.feed.post",
+                        "text": text,
+                        "createdAt": created,
+                        "reply": {
+                            "root": {"uri": root_uri, "cid": root_cid},
+                            "parent": {"uri": item_id, "cid": parent_cid}
+                        }
+                    }
+                }))
+            }
             // Threads replies need the same persisted container state machine as posts.
             _ => {
                 return Err(error(
@@ -88,6 +157,27 @@ impl Adapter {
             }
         };
         let v = self.send(request, true).await?;
+        if c.app.provider == "bluesky" {
+            if let Some(uri) = v["uri"].as_str() {
+                let cid = field(&v, "cid")?;
+                let rkey = uri.rsplit('/').next().unwrap_or("");
+                if rkey.is_empty() {
+                    return Err(error(
+                        FailureKind::Uncertain,
+                        "Bluesky did not return a usable reply record key",
+                    ));
+                }
+                let url = Some(format!(
+                    "https://bsky.app/profile/{}/post/{}",
+                    c.identity.id, rkey
+                ));
+                return Ok(Step::Published {
+                    external_id: uri.to_owned(),
+                    external_url: url,
+                    receipt: json!({"uri":uri,"cid":cid}),
+                });
+            }
+        }
         let id = field(&v, "id")?;
         Ok(Step::Published {
             external_id: id.clone(),
