@@ -157,18 +157,26 @@ impl Adapter {
             }
         };
         let v = self.send(request, true).await?;
-        if let Some(uri) = v["uri"].as_str() {
-            let cid = v["cid"].as_str().unwrap_or("").to_owned();
-            let rkey = uri.rsplit('/').next().unwrap_or("");
-            let url = Some(format!(
-                "https://bsky.app/profile/{}/post/{}",
-                c.identity.id, rkey
-            ));
-            return Ok(Step::Published {
-                external_id: uri.to_owned(),
-                external_url: url,
-                receipt: json!({"uri":uri,"cid":cid}),
-            });
+        if c.app.provider == "bluesky" {
+            if let Some(uri) = v["uri"].as_str() {
+                let cid = field(&v, "cid")?;
+                let rkey = uri.rsplit('/').next().unwrap_or("");
+                if rkey.is_empty() {
+                    return Err(error(
+                        FailureKind::Uncertain,
+                        "Bluesky did not return a usable reply record key",
+                    ));
+                }
+                let url = Some(format!(
+                    "https://bsky.app/profile/{}/post/{}",
+                    c.identity.id, rkey
+                ));
+                return Ok(Step::Published {
+                    external_id: uri.to_owned(),
+                    external_url: url,
+                    receipt: json!({"uri":uri,"cid":cid}),
+                });
+            }
         }
         let id = field(&v, "id")?;
         Ok(Step::Published {
