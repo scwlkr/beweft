@@ -92,6 +92,9 @@ export function PublicationDetails({
       "google_business",
     ].includes(p.provider),
   );
+  const xThread =
+    p.provider === "x" && p.payload.options?.x_thread !== undefined;
+  const [xThreadCancelAllowed, setXThreadCancelAllowed] = useState(false);
   const [copyStatus, setCopyStatus] = useState("");
   const [url, setUrl] = useState("");
   const [note, setNote] = useState("");
@@ -366,6 +369,7 @@ export function PublicationDetails({
           <XRecovery
             publication={p}
             onRetryAllowed={setRetryAllowed}
+            onCancelAllowed={setXThreadCancelAllowed}
             action={action}
             pending={pending}
           />
@@ -400,6 +404,7 @@ export function PublicationDetails({
           </Button>
         )}
         {["queued", "manual_required", "failed"].includes(p.state) &&
+          (!xThread || p.state === "queued" || xThreadCancelAllowed) &&
           (p.provider !== "google_business" ||
             p.state !== "failed" ||
             retryAllowed) && (

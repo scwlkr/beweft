@@ -28,7 +28,7 @@ checks are recorded in the orchestration record.
 
 ## Remaining feasible product work
 
-X threads, ordinary Facebook Page video, Instagram Stories eligibility,
+Ordinary Facebook Page video, Instagram Stories eligibility,
 Threads/Bluesky replies, LinkedIn organization opt-in, expanded Pinterest
 formats/reads, and Google Business Profile reviews, replies and insights
 remain local implementation work. Google Business Profile direct posting and

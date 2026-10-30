@@ -15,6 +15,8 @@ Research checked 2026-10-29. This is an implementation decision record, **not** 
 
 ### X cost and retry constraints
 
+X's [Manage Posts guide](https://docs.x.com/x-api/posts/manage-tweets/introduction) describes creating threads with reply-linked posts and separately states that self-serve replies require the original author to have summoned the replying account. The guide does not clarify the self-reply case, so an account's thread eligibility remains unverified until qualified. Each segment is a separate write; do not perform automatic metered reads or blindly resend a request with an unknown outcome.
+
 Current [X pricing](https://docs.x.com/x-api/getting-started/pricing) is pay-per-use rather than the older subscription tiers: the published table lists $0.015 per post-create request and $0.200 when creating with a URL; post reads are $0.005 per returned resource. Rates can change; the operator must inspect their console, approve costs and set spending limits. This research authorizes no purchases or paid requests. Polling analytics/inbox can cost more than posting. Persist usage timestamps and honor provider rate-limit responses; do not retry an uncertain create blindly.
 
 ### YouTube documentation change

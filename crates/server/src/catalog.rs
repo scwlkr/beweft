@@ -50,14 +50,14 @@ pub fn manual_capabilities() -> Value {
     json!({"execution":"manual","verification":"owner_attestation","formats":["text","image","video"],"publishing":true,"analytics":false,"inbox":false})
 }
 pub(crate) fn decorate_channel(mut channel: Value) -> Value {
-    // Existing direct channels retain their granted scopes in stored JSON. Use
-    // the installed Bluesky adapter's format description without changing those
-    // permissions or requiring accounts to reconnect after an upgrade.
-    if channel["provider"] == "bluesky"
+    // Refresh local format descriptions for existing direct channels without
+    // changing their stored grants or requiring an account reconnect.
+    let provider = channel["provider"].as_str().unwrap_or("").to_owned();
+    if matches!(provider.as_str(), "bluesky" | "x")
         && channel["capabilities"]["execution"] == "direct"
         && let Some(capability) = beweft_providers::capabilities()
             .into_iter()
-            .find(|c| c.id == "bluesky")
+            .find(|c| c.id == provider)
     {
         channel["capabilities"]["formats"] = json!(capability.formats);
         channel["capabilities"]["reason"] = json!(capability.reason);

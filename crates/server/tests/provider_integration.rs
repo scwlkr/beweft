@@ -40,6 +40,7 @@ include!("provider_db/shared_provider.rs");
 include!("provider_db/post_grant_recovery.rs");
 include!("provider_db/revocation_latch.rs");
 include!("provider_db/x_legacy.rs");
+include!("provider_db/x_thread.rs");
 include!("provider_db/google_business.rs");
 #[path = "../../providers/tests/support/mod.rs"]
 mod media_fixture;
@@ -64,6 +65,7 @@ async fn provider_database_security_and_recovery() {
     reconciliation_serialization_and_expired_reset(&h).await;
     fenced_writes_and_small_pool(&h).await;
     legacy_x_recovery_uses_observed_identity_without_provider_writes(&h).await;
+    x_thread_recovery_and_receipts(&h).await;
     reply_recovery_and_unresolved_guard(&h).await;
     concurrent_reply_claims_with_small_pool(&h).await;
     delayed_reply_cannot_bypass_terminal_history(&h).await;

@@ -10,10 +10,12 @@ import {
 import type {
   ReconcileRequest,
   ResetXUploadRequest,
+  XThreadStatus,
   XUploadStatus,
 } from "../lib/api-contract.generated";
 import { ErrorNotice, Field } from "../components/shared";
 import { Button } from "../components/ui/button";
+import { XThreadRecovery } from "./XThreadRecovery";
 
 const XCheckpoint: z.ZodType<XUploadStatus> = z.object({
   phase: z.enum(["upload", "post_started"]),
@@ -22,7 +24,29 @@ const XCheckpoint: z.ZodType<XUploadStatus> = z.object({
   reset_allowed: z.boolean(),
   reason: z.string(),
 });
-const Status = z.object({ x_upload: XCheckpoint.nullable().optional() });
+const ThreadCheckpoint: z.ZodType<XThreadStatus> = z
+  .object({
+    phase: z.enum(["preparing", "ready", "request_started", "complete"]),
+    confirmed_ids: z.array(z.string().regex(/^\d{1,19}$/)),
+    next_index: z.number().int().min(0),
+    total: z.number().int().min(2).max(10),
+    remaining_texts: z.array(z.string()),
+    attempt_id: z.string().uuid(),
+    checkpoint_id: z.string().uuid(),
+    root_request_started: z.boolean().default(false),
+  })
+  .refine(
+    (value) =>
+      value.next_index === value.confirmed_ids.length &&
+      value.next_index <= value.total &&
+      value.remaining_texts.length === value.total - value.next_index &&
+      new Set(value.confirmed_ids).size === value.confirmed_ids.length,
+  );
+const Status = z.object({
+  x_upload: XCheckpoint.nullable().optional(),
+  x_thread: ThreadCheckpoint.nullable().optional(),
+  x_thread_retry_allowed: z.boolean().optional(),
+});
 const ResetResult = z.object({
   state: z.literal("failed"),
   session_reset: z.literal(true),
@@ -38,11 +62,13 @@ export function XRecovery({
   action,
   pending,
   onRetryAllowed,
+  onCancelAllowed,
 }: {
   publication: Publication;
   action: Action;
   pending: boolean;
   onRetryAllowed: (allowed: boolean) => void;
+  onCancelAllowed: (allowed: boolean) => void;
 }) {
   const [status, setStatus] = useState<z.infer<typeof Status> | undefined>();
   const [error, setError] = useState("");
@@ -59,6 +85,7 @@ export function XRecovery({
   const [busy, setBusy] = useState(false);
   const alive = useRef(false);
   const running = useRef(false);
+  const threadIntent = publication.payload.options?.x_thread !== undefined;
 
   useEffect(() => {
     alive.current = true;
@@ -84,6 +111,7 @@ export function XRecovery({
     setInspected(false);
     setRestart(false);
     onRetryAllowed(false);
+    onCancelAllowed(false);
     api(
       `/publications/${publication.id}/provider-status`,
       Status,
@@ -94,7 +122,17 @@ export function XRecovery({
       .then((result) => {
         if (!active || !isCurrentWorkspaceSession(session)) return;
         setStatus(result);
-        onRetryAllowed(result.x_upload === null);
+        onRetryAllowed(
+          threadIntent
+            ? result.x_upload === null && result.x_thread_retry_allowed === true
+            : result.x_upload === null,
+        );
+        onCancelAllowed(
+          !threadIntent ||
+            result.x_thread?.phase === "preparing" ||
+            (result.x_upload === null &&
+              result.x_thread_retry_allowed === true),
+        );
       })
       .catch((failure) => {
         if (
@@ -108,7 +146,14 @@ export function XRecovery({
       active = false;
       controller.abort();
     };
-  }, [publication.id, publication.updated_at, refresh, onRetryAllowed]);
+  }, [
+    publication.id,
+    publication.updated_at,
+    refresh,
+    onRetryAllowed,
+    onCancelAllowed,
+    threadIntent,
+  ]);
 
   const checkpoint = status?.x_upload;
   const observed = status !== undefined && checkpoint !== undefined;
@@ -240,6 +285,21 @@ export function XRecovery({
           recording a not-published outcome or retrying.
         </p>
       )}
+      {threadIntent && status && status.x_thread === undefined && (
+        <p>
+          This server cannot report X thread progress. Update the server before
+          recovery.
+        </p>
+      )}
+      {threadIntent &&
+        status &&
+        status.x_thread === null &&
+        !status.x_thread_retry_allowed && (
+          <p>
+            No usable X thread checkpoint is recorded. Inspect the actual chain;
+            a missing checkpoint cannot prove that nothing was sent.
+          </p>
+        )}
       {!status && !error && <p>Checking X recovery status…</p>}
       {error && (
         <p>
@@ -280,7 +340,17 @@ export function XRecovery({
         Check X recovery status
       </Button>
       {notice && <p role="status">{notice}</p>}
-      {canResolve && (
+      {threadIntent && status?.x_thread && (
+        <XThreadRecovery
+          key={`${status.x_thread.attempt_id}:${status.x_thread.checkpoint_id}`}
+          publicationId={publication.id}
+          thread={status.x_thread}
+          action={action}
+          pending={pending}
+          onChanged={() => setRefresh((value) => value + 1)}
+        />
+      )}
+      {!threadIntent && canResolve && (
         <form
           className="form-stack"
           onSubmit={(event) => {
@@ -388,7 +458,9 @@ export function XRecovery({
                 checked={inspected}
                 onChange={(event) => setInspected(event.target.checked)}
               />
-              I inspected X for this attempt before resetting.
+              {threadIntent
+                ? "I inspected X and confirmed the root operation definitively ended without creating a post."
+                : "I inspected X for this attempt before resetting."}
             </label>
           )}
           <label className="checkbox-label">

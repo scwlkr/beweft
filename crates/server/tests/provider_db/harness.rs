@@ -7,6 +7,8 @@ struct Provider {
     media_received: std::sync::Mutex<Vec<u8>>,
     post_mode: AtomicUsize,
     post_writes: AtomicUsize,
+    x_thread_sequence: AtomicUsize,
+    x_thread_posts: std::sync::Mutex<Vec<Value>>,
     post_started: Notify,
     post_release: Notify,
     media_block: AtomicUsize,
@@ -143,6 +145,15 @@ async fn mock(State(s): State<Arc<Provider>>, r: Request) -> Response {
                 2 => {
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     Json(json!({"data":{"id":"987654321"}})).into_response()
+                }
+                mode @ (3 | 4 | 5) => {
+                    let body: Value = serde_json::from_slice(&to_bytes(r.into_body(), 10000).await.unwrap()).unwrap();
+                    s.x_thread_posts.lock().unwrap().push(body);
+                    let index = s.x_thread_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                    if (mode == 4 && index == 2) || (mode == 5 && index == 1) {
+                        return StatusCode::BAD_GATEWAY.into_response();
+                    }
+                    Json(json!({"data":{"id":(1000+index).to_string()}})).into_response()
                 }
                 _ => Json(json!({"data":{"id":"987654321"}})).into_response(),
             }

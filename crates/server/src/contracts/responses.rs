@@ -414,6 +414,10 @@ pub struct ProviderStatus {
     #[schema(required = true)]
     pub x_upload: Option<XUploadStatus>,
     #[schema(required = true)]
+    pub x_thread: Option<XThreadStatus>,
+    /// True only after an explicitly authorized X thread reset with no later attempt.
+    pub x_thread_retry_allowed: bool,
+    #[schema(required = true)]
     pub meta_delivery: Option<MetaDeliveryStatus>,
     #[schema(required = true)]
     pub linkedin_delivery: Option<MetaDeliveryStatus>,
@@ -459,6 +463,28 @@ pub struct XUploadStatus {
 pub enum XUploadPhase {
     Upload,
     PostStarted,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct XThreadStatus {
+    pub phase: XThreadPhase,
+    pub confirmed_ids: Vec<String>,
+    /// Zero-based index of the first unconfirmed segment.
+    pub next_index: u32,
+    pub total: u32,
+    /// Unconfirmed does not mean unsent; the first may already exist on X.
+    pub remaining_texts: Vec<String>,
+    pub attempt_id: Uuid,
+    pub checkpoint_id: Uuid,
+    /// True only for an explicit current root-write checkpoint with zero confirmed IDs.
+    pub root_request_started: bool,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum XThreadPhase {
+    Preparing,
+    Ready,
+    RequestStarted,
+    Complete,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct ProviderReconcilePending {

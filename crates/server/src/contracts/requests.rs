@@ -372,6 +372,12 @@ pub struct ReconcileRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     /// For Google not-published recovery, inspection confirms the remote operation definitively failed, stopped, or was canceled. An absent post is not enough.
     pub provider_inspected: Option<bool>,
+    /// Complete ordered X post IDs for owner-attested thread completion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_ids: Option<Vec<String>>,
+    /// Explicitly attest that the remote X thread root operation definitively ended without creating a post.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_root_definitively_ended: Option<bool>,
 }
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]

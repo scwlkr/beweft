@@ -884,6 +884,56 @@ export function useComposer({
       return;
     }
     if (mode !== "draft") {
+      const unavailableXThread = channels.find((c) => {
+        if (
+          !selected.includes(c.id) ||
+          c.provider !== "x" ||
+          options[c.id]?.x_thread === undefined
+        )
+          return false;
+        const caps = c.capabilities;
+        return (
+          !caps ||
+          typeof caps !== "object" ||
+          !("formats" in caps) ||
+          !Array.isArray(caps.formats) ||
+          !caps.formats.includes("thread")
+        );
+      });
+      if (unavailableXThread) {
+        setTab(unavailableXThread.id);
+        setError(
+          "This server does not advertise X thread publishing. Update the server before scheduling these saved replies.",
+        );
+        return;
+      }
+      const invalidXThread = channels.find((c) => {
+        if (!selected.includes(c.id) || c.provider !== "x") return false;
+        const value = options[c.id]?.x_thread;
+        if (value === undefined) return false;
+        if (!value || typeof value !== "object" || Array.isArray(value))
+          return true;
+        const thread = value as Record<string, unknown>;
+        return (
+          Object.keys(thread).length !== 1 ||
+          !Array.isArray(thread.replies) ||
+          thread.replies.length < 1 ||
+          thread.replies.length > 9 ||
+          thread.replies.some(
+            (reply) =>
+              typeof reply !== "string" ||
+              !reply.trim() ||
+              Array.from(reply).length > 280,
+          )
+        );
+      });
+      if (invalidXThread) {
+        setTab(invalidXThread.id);
+        setError(
+          "Each X thread reply needs 1–280 characters; use at most nine replies.",
+        );
+        return;
+      }
       const youtube = channels.find(
         (c) =>
           selected.includes(c.id) &&

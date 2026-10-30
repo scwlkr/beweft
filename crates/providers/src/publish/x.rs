@@ -2,6 +2,36 @@ use super::*;
 
 const X_CHUNK: u64 = 4 * 1024 * 1024;
 
+/// Thread replies are part of the immutable publication snapshot. Keep the
+/// format intentionally narrow: root media is handled by the existing path.
+pub(super) fn x_thread_replies(p: &Publication) -> Result<Option<Vec<&str>>> {
+    let Some(thread) = p.options.get("x_thread") else {
+        return Ok(None);
+    };
+    let object = thread
+        .as_object()
+        .ok_or_else(|| invalid("X thread must contain an ordered replies array"))?;
+    if object.len() != 1 || !object.contains_key("replies") {
+        return Err(invalid("X thread accepts only an ordered replies array"));
+    }
+    let replies = thread["replies"]
+        .as_array()
+        .ok_or_else(|| invalid("X thread replies must be an array"))?;
+    if !(1..=9).contains(&replies.len()) {
+        return Err(invalid("X thread needs 1–9 text-only replies"));
+    }
+    replies
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|text| !text.trim().is_empty() && text.chars().count() <= 280)
+                .ok_or_else(|| invalid("Each X thread reply needs 1–280 characters of text"))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
 fn uncertain_x(message: &str) -> ProviderError {
     error(FailureKind::Uncertain, message)
 }
@@ -48,6 +78,31 @@ fn x_expiry(value: &Value) -> Result<u64> {
 
 fn x_checkpoint_id(cp: &Value) -> Result<String> {
     x_id(cp)
+}
+
+fn valid_x_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 19 && id.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn x_post_media<'a>(p: &Publication, cp: &'a Value) -> Result<&'a Vec<Value>> {
+    let ids = cp["media_ids"]
+        .as_array()
+        .ok_or_else(|| uncertain_x("Invalid X post checkpoint"))?;
+    if ids.len() != p.media.len()
+        || ids
+            .iter()
+            .any(|id| id.as_str().is_none_or(|id| !valid_x_id(id)))
+    {
+        return Err(uncertain_x("Invalid X post media checkpoint"));
+    }
+    if p.media.first().is_some_and(video)
+        && (cp["id"] != ids[0]
+            || cp["total_bytes"].as_u64() != Some(p.media[0].source.len())
+            || cp["offset"].as_u64() != Some(p.media[0].source.len()))
+    {
+        return Err(uncertain_x("Invalid X video post checkpoint"));
+    }
+    Ok(ids)
 }
 
 fn x_processing(data: &Value, expected: &str, cp: &Value, finalizing: bool) -> Result<Step> {
@@ -115,25 +170,20 @@ impl Adapter {
                 "An older X media attempt may have created a post. Inspect X before resolving it.",
             ));
         }
+        if matches!(
+            stage,
+            "x_thread_ready" | "x_thread_post_started" | "x_thread_complete"
+        ) {
+            return self.publish_x_thread(token, p, cp).await;
+        }
         if stage == "x_post_started" {
-            let ids = cp["media_ids"]
-                .as_array()
-                .ok_or_else(|| uncertain_x("Invalid X post checkpoint"))?;
-            if ids.len() != p.media.len()
-                || ids.iter().any(|id| {
-                    id.as_str().is_none_or(|id| {
-                        id.is_empty() || id.len() > 19 || !id.bytes().all(|b| b.is_ascii_digit())
-                    })
-                })
-            {
-                return Err(uncertain_x("Invalid X post media checkpoint"));
-            }
-            if p.media.first().is_some_and(video)
-                && (cp["id"] != ids[0]
-                    || cp["total_bytes"].as_u64() != Some(p.media[0].source.len())
-                    || cp["offset"].as_u64() != Some(p.media[0].source.len()))
-            {
-                return Err(uncertain_x("Invalid X video post checkpoint"));
+            let ids = x_post_media(p, cp)?;
+            if x_thread_replies(p)?.is_some() {
+                let mut next = cp.clone();
+                next["stage"] = json!("x_thread_post_started");
+                next["confirmed_ids"] = json!([]);
+                next["next_index"] = json!(0);
+                return Ok(Step::Checkpoint(next));
             }
             let mut body = json!({"text":p.text});
             if !ids.is_empty() {
@@ -166,6 +216,86 @@ impl Adapter {
             return self.publish_x_video(token, media, cp).await;
         }
         self.publish_x_images(token, p, cp).await
+    }
+
+    async fn publish_x_thread(
+        &self,
+        token: Option<&str>,
+        p: &Publication,
+        cp: &Value,
+    ) -> Result<Step> {
+        let replies =
+            x_thread_replies(p)?.ok_or_else(|| uncertain_x("X thread snapshot is missing"))?;
+        let total = replies.len() + 1;
+        let raw = cp["confirmed_ids"]
+            .as_array()
+            .ok_or_else(|| uncertain_x("Invalid X thread checkpoint"))?;
+        let mut ids = Vec::with_capacity(raw.len());
+        for raw_id in raw {
+            let id = raw_id
+                .as_str()
+                .filter(|id| valid_x_id(id))
+                .ok_or_else(|| uncertain_x("Invalid X thread post ID"))?;
+            if ids.contains(&id) {
+                return Err(uncertain_x("Duplicate X thread post ID"));
+            }
+            ids.push(id);
+        }
+        if ids.len() > total || cp["next_index"].as_u64() != Some(ids.len() as u64) {
+            return Err(uncertain_x("Invalid X thread progress"));
+        }
+        match checkpoint_stage(cp) {
+            "x_thread_complete" if ids.len() == total => {
+                let root = ids[0].to_owned();
+                Ok(published(
+                    root.clone(),
+                    Some(format!("https://x.com/i/status/{root}")),
+                    json!({"id":root,"thread_ids":ids}),
+                ))
+            }
+            "x_thread_ready" if !ids.is_empty() && ids.len() < total => {
+                let mut next = cp.clone();
+                next["stage"] = json!("x_thread_post_started");
+                Ok(Step::Checkpoint(next))
+            }
+            "x_thread_post_started" if ids.len() < total => {
+                let body = if ids.is_empty() {
+                    let media_ids = x_post_media(p, cp)?;
+                    let mut root = json!({"text":p.text});
+                    if !media_ids.is_empty() {
+                        root["media"] = json!({"media_ids":media_ids});
+                    }
+                    root
+                } else {
+                    json!({"text":replies[ids.len()-1],"reply":{"in_reply_to_tweet_id":ids[ids.len()-1]}})
+                };
+                let value = self
+                    .send(
+                        self.request(Method::POST, "https://api.x.com/2/tweets", token)?
+                            .json(&body),
+                        true,
+                    )
+                    .await?;
+                let id = x_id(x_data(&value)?)?;
+                if ids.contains(&id.as_str()) {
+                    return Err(uncertain_x("X returned a duplicate thread post ID"));
+                }
+                // The caller commits this checkpoint before it can issue the
+                // next reply, even for the final successful response.
+                let mut confirmed: Vec<String> = ids.iter().map(|id| (*id).to_owned()).collect();
+                confirmed.push(id);
+                let mut next = cp.clone();
+                next["next_index"] = json!(confirmed.len());
+                next["confirmed_ids"] = json!(confirmed);
+                next["stage"] = json!(if confirmed.len() == total {
+                    "x_thread_complete"
+                } else {
+                    "x_thread_ready"
+                });
+                Ok(Step::Checkpoint(next))
+            }
+            _ => Err(uncertain_x("Invalid X thread checkpoint state")),
+        }
     }
 
     async fn publish_x_images(

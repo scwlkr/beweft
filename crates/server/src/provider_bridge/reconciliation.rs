@@ -208,7 +208,7 @@ pub async fn reset_x_upload(
         .await?;
     let mut tx = state.db.begin().await?;
     crate::schedules::lock_channel(&mut tx, channel).await?;
-    let row = sqlx::query("SELECT p.brand_id,p.state,c.provider FROM publications p JOIN channels c ON c.id=p.channel_id WHERE p.id=$1 FOR UPDATE OF p")
+    let row = sqlx::query("SELECT p.brand_id,p.state,p.payload,c.provider FROM publications p JOIN channels c ON c.id=p.channel_id WHERE p.id=$1 FOR UPDATE OF p")
         .bind(id).fetch_one(&mut *tx).await?;
     auth.brand(row.get("brand_id"))?;
     let current: String = row.get("state");
@@ -222,6 +222,24 @@ pub async fn reset_x_upload(
     let cp = x_checkpoint_on(&state, &mut tx, id)
         .await?
         .ok_or_else(|| ApiError::conflict("There is no X checkpoint to reset"))?;
+    let payload: Value = row.get("payload");
+    let mut thread_safe_reset = false;
+    let mut thread_reset_evidence = Value::Null;
+    if has_x_thread(&payload) {
+        x_thread_status(&payload, &cp)?;
+        thread_safe_reset = x_thread_pre_public(&cp)
+            || (current == "failed" && x_thread_root_ended_attested(&payload, &cp)?);
+        if !thread_safe_reset {
+            return Err(ApiError::conflict(
+                "An X thread may already have a public segment. Inspect the chain; resetting or retrying the whole thread is unavailable.",
+            ));
+        }
+        thread_reset_evidence = if x_thread_pre_public(&cp) {
+            json!({"kind":"pre_public"})
+        } else {
+            json!({"kind":"owner_attested_root_ended","attestation":cp["thread_root_ended_attestation"]})
+        };
+    }
     let (attempt, checkpoint) = x_identity(&cp)?;
     if (attempt, checkpoint) != (input.observed_attempt_id, input.observed_checkpoint_id) {
         return Err(ApiError::conflict(
@@ -243,6 +261,12 @@ pub async fn reset_x_upload(
     {
         return Err(ApiError::conflict("This is not an X delivery checkpoint"));
     }
+    let attempt_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM publication_attempts WHERE publication_id=$1 ORDER BY id FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
     sqlx::query("DELETE FROM provider_delivery_checkpoints WHERE publication_id=$1")
         .bind(id)
         .execute(&mut *tx)
@@ -250,7 +274,7 @@ pub async fn reset_x_upload(
     sqlx::query("UPDATE publications SET state='failed',lease_until=NULL,updated_at=clock_timestamp() WHERE id=$1").bind(id).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO audit_events(id,owner_id,action,subject_id,detail) VALUES($1,$2,'reset_x_upload',$3,$4)")
         .bind(Uuid::new_v4()).bind(auth.owner_id).bind(id)
-        .bind(json!({"attempt_id":attempt,"checkpoint_id":checkpoint,"sender_stopped":true,"confirm_restart":true,"provider_inspected":input.provider_inspected}))
+        .bind(json!({"attempt_id":attempt,"checkpoint_id":checkpoint,"attempt_ids":attempt_ids,"thread_safe_reset":thread_safe_reset,"thread_reset_evidence":thread_reset_evidence,"sender_stopped":true,"confirm_restart":true,"provider_inspected":input.provider_inspected}))
         .execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(data(
@@ -273,6 +297,15 @@ pub async fn reconcile(
     .ok_or_else(|| ApiError::conflict("Only uncertain publications can be reconciled"))?;
     let channel_id = crate::error::uuid(&prepared, "channel_id")?;
     auth.brand(crate::error::uuid(&prepared, "brand_id")?)?;
+    let provider: String = sqlx::query_scalar("SELECT provider FROM channels WHERE id=$1")
+        .bind(channel_id)
+        .fetch_one(&state.db)
+        .await?;
+    if provider == "x" && has_x_thread(&prepared["payload"]) {
+        return Ok(data(
+            json!({"state":"uncertain","reason":"Inspect the X reply chain and record its complete ordered IDs using owner reconciliation. No automatic X thread lookup is performed."}),
+        ));
+    }
     // Refresh commits before any checkpoint lookup, status probe or inconclusive return.
     connections::load_channel(&state, channel_id).await?;
     let p = {
@@ -430,12 +463,14 @@ pub async fn provider_status(
     auth: Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>> {
-    let row = sqlx::query("SELECT p.brand_id,p.state,c.provider FROM publications p JOIN channels c ON c.id=p.channel_id WHERE p.id=$1")
+    let row = sqlx::query("SELECT p.brand_id,p.state,p.payload,c.provider FROM publications p JOIN channels c ON c.id=p.channel_id WHERE p.id=$1")
         .bind(id)
         .fetch_one(&state.db)
         .await?;
     auth.brand(row.get("brand_id"))?;
     let provider: String = row.get("provider");
+    let payload: Value = row.get("payload");
+    let thread_intent = provider == "x" && has_x_thread(&payload);
     let cp = if provider == "x" {
         let mut db = state.db.acquire().await?;
         x_checkpoint_on(&state, &mut db, id).await?
@@ -454,12 +489,19 @@ pub async fn provider_status(
         cp.as_ref().filter(|cp| cp["stage"].as_str().is_some_and(|s| s.starts_with("x_"))).map(|cp| {
             let (attempt, checkpoint) = x_identity(cp)?;
             let public = x_public_boundary(cp);
+            let thread_reset = !thread_intent || x_thread_pre_public(cp)
+                || (current == "failed" && x_thread_root_ended_attested(&payload, cp)?);
             let reset_allowed = ["uncertain", "failed"].contains(&current.as_str())
-                && (!public || (current == "failed" && x_attested(cp, attempt, checkpoint)));
+                && (!public || (current == "failed" && x_attested(cp, attempt, checkpoint)))
+                && thread_reset;
                 let reason = if current == "published" {
                     "A provider receipt is recorded; this delivery cannot be reset."
                 } else if !["uncertain", "failed"].contains(&current.as_str()) {
                     "Delivery is still active or queued. Wait and reload status before recovery."
+                } else if thread_intent && !thread_reset {
+                    "A thread segment may be public. Inspect the actual reply chain; whole-thread reset and retry are unavailable."
+                } else if thread_intent && public && reset_allowed {
+                    "The owner attested that the root operation definitively ended without a post. Reset, then explicitly decide whether to retry; this attestation is not provider proof."
                 } else if public && reset_allowed {
                     "The owner recorded a not-published observation for these IDs. Confirm the original sender stopped, then reset before an explicit retry."
                 } else if public {
@@ -471,6 +513,23 @@ pub async fn provider_status(
         }).transpose()?
     } else {
         None
+    };
+    let x_thread = if thread_intent {
+        cp.as_ref()
+            .map(|cp| x_thread_status(&payload, cp))
+            .transpose()?
+    } else {
+        None
+    };
+    let x_thread_retry_allowed = if thread_intent
+        && current == "failed"
+        && cp.is_none()
+        && valid_x_thread_snapshot(&payload)
+    {
+        let mut db = state.db.acquire().await?;
+        x_thread_reset_covers_attempts(&mut db, id).await?
+    } else {
+        false
     };
     let meta_delivery = if matches!(provider.as_str(), "facebook" | "instagram" | "threads") {
         cp.as_ref().map(|cp| {
@@ -535,6 +594,6 @@ pub async fn provider_status(
         None
     };
     Ok(data(
-        json!({"session_expired":expired,"reset_allowed":provider == "youtube" && expired && attested && current == "failed","reason":if expired && provider == "bluesky" {Some("The Bluesky processing window ended. Reconcile the saved video job before continuing.")} else if expired && provider == "youtube" {Some("Inspect YouTube Studio, record not-published reconciliation, then reset this expired upload before retrying.")}else{None},"x_upload":x_upload,"meta_delivery":meta_delivery,"linkedin_delivery":linkedin_delivery,"google_delivery":google_delivery}),
+        json!({"session_expired":expired,"reset_allowed":provider == "youtube" && expired && attested && current == "failed","reason":if expired && provider == "bluesky" {Some("The Bluesky processing window ended. Reconcile the saved video job before continuing.")} else if expired && provider == "youtube" {Some("Inspect YouTube Studio, record not-published reconciliation, then reset this expired upload before retrying.")}else{None},"x_upload":x_upload,"x_thread":x_thread,"x_thread_retry_allowed":x_thread_retry_allowed,"meta_delivery":meta_delivery,"linkedin_delivery":linkedin_delivery,"google_delivery":google_delivery}),
     ))
 }

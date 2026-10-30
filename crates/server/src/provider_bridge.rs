@@ -48,6 +48,12 @@ pub use execution::publish;
 pub(crate) use preparation::checkpoint_on as checkpoint_for_recovery;
 mod validation;
 pub use validation::ScheduleFormatValidator;
+mod x_thread;
+pub(crate) use x_thread::{
+    has_x_thread, valid_x_thread_snapshot, x_thread_completion, x_thread_current_root_started,
+    x_thread_pre_public, x_thread_reset_covers_attempts, x_thread_root_ended_attested,
+    x_thread_status,
+};
 mod inbox;
 mod media;
 mod observations;
