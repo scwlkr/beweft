@@ -95,11 +95,18 @@ already exist locally; setup does not pull it. Pass `--postgres-image
 PostgreSQL ID is also part of the reservation, so editing the installation file
 cannot silently change the database image.
 
-`build` uses a unique local image tag and records its immutable image ID in the
-private `installation-state.json` before any Compose resources are created. Alternatively,
+`build` creates a uniquely tagged local image, `beweft:<project>-<12 hex digits>`,
+and records its immutable SHA-256 image ID in the private `installation-state.json`
+before any Compose resources are created. Alternatively,
 `./project image <installation> <existing-local-image>` pins a previously built
-local image. Normal Compose startup cannot build or select a mutable tag. To
-change an existing installation's image, use the backup-first upgrade command.
+local image. Normal Compose startup cannot build or select a mutable tag, and
+only the backup-first upgrade changes the application pin. The database schema is
+the 14 SQL migrations in `migrations/` (`0001` through `0014`), applied
+automatically at startup; application upgrades are not automatically reversed.
+The worker reports readiness through `beweft-worker --healthcheck`, which performs
+a 3-second database probe inside a 4-second outer deadline and uses the stable
+`compose-primary` ID. A restored worker remains held and fails that check until
+explicitly activated.
 Use the `./project` wrapper for installation operations; direct Docker Compose
 commands bypass its ownership checks. The wrapper accepts `--profile` before a
 Compose command and allows managed `up`, `start`, `stop`, `restart`, `down`,

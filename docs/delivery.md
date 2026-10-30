@@ -5,6 +5,13 @@ for source and installation checkpoints. The practical local release target is
 2026-10-29 at 16:30 America/Chicago. Hosting remains local until the owner chooses
 a server/domain. No live provider publication is authorized for tests.
 
+## Capabilities and limits
+
+- Capabilities: owner authentication and sessions; multiple brands; ideas and reusable templates; drafts with channel variants; media descriptions and byte storage; queueing, exact schedules, manual handoff and publication recovery; brand/owner security controls; scoped Rust CLI/MCP; self-host operations (setup, build, compose, backup, restore, activate, upgrade, release) and isolated demo workspaces.
+- Supported providers/formats and their limits are listed in [provider-setup.md](provider-setup.md); fixture results do not prove live access.
+- Limits: no live social account or public post has been verified; additional provider formats remain in development; PostgreSQL major-version migration and physical host-reboot recovery are unqualified; hosting stays local until the owner chooses a server/domain and HTTPS origin.
+- Fixture and demo results are kept distinct from real provider outcomes.
+
 ## Reviewed and landed
 
 The original PR stack #4–#8 and continuation milestones through #28 are merged
