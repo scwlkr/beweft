@@ -148,6 +148,45 @@ impl Adapter {
                     }
                 }))
             }
+            "threads" => {
+                if text.chars().count() > 500 {
+                    return Err(invalid("Threads reply text exceeds the supported length"));
+                }
+                let account = &c.identity.id;
+                let base = "https://graph.threads.net/v1.0";
+                let container = self
+                    .send(
+                        self.request(
+                            Method::POST,
+                            &format!("{base}/{account}/threads"),
+                            token,
+                        )?
+                        .form(&json!({"media_type":"TEXT","text":text,"reply_to_id":item_id})),
+                        true,
+                    )
+                    .await?;
+                let container_id = field(&container, "id")?;
+                let published = self
+                    .send(
+                        self.request(
+                            Method::POST,
+                            &format!("{base}/{account}/threads_publish"),
+                            token,
+                        )?
+                        .form(&[("creation_id", container_id.as_str())]),
+                        true,
+                    )
+                    .await?;
+                let id = field(&published, "id")?;
+                return Ok(Step::Published {
+                    external_id: id.clone(),
+                    external_url: published["permalink"]
+                        .as_str()
+                        .or_else(|| published["url"].as_str())
+                        .map(str::to_owned),
+                    receipt: json!({"id":id}),
+                });
+            }
             // Threads replies need the same persisted container state machine as posts.
             _ => {
                 return Err(error(

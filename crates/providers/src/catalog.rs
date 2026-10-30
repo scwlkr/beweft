@@ -69,8 +69,8 @@ pub fn capabilities() -> Vec<Capabilities> {
             oauth: true,
             analytics: true,
             inbox: true,
-            reply: false,
-            reason: "Threads app and publishing scopes required. Text, single-media posts and carousels.",
+            reply: true,
+            reason: "Threads app and publishing scopes required. Text, single-media posts and carousels; text replies supported.",
         },
         Capabilities {
             id: "mastodon",
