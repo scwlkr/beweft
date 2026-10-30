@@ -35,6 +35,7 @@ pub(super) async fn save_attempt_checkpoint_tx(
         stage.starts_with("x_")
             || stage.starts_with("meta_")
             || stage.starts_with("fb_reel_")
+            || stage.starts_with("fb_video_")
             || stage.starts_with("linkedin_")
             || stage.starts_with("bsky_")
             || stage.starts_with("google_post_")

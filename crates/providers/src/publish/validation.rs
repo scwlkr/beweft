@@ -106,51 +106,70 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
             super::google_business::post_body(p, false)?;
         }
         "facebook" => {
-            if p.options.get("format").is_some_and(|v| v != "reel") {
+            if p.options
+                .get("format")
+                .is_some_and(|v| v != "reel" && v != "video")
+            {
                 return Err(invalid(
-                    "Facebook format must be reel when publishing video",
+                    "Facebook format must be reel or video when publishing video",
                 ));
             }
-            if p.options["format"] == "reel" {
+            if p.options["format"] == "reel" || p.options["format"] == "video" {
                 if p.media.len() != 1
                     || p.media[0].mime != "video/mp4"
                     || !p.media[0].alt_text.trim().is_empty()
                 {
                     return Err(invalid(
-                        "Facebook Reels require one MP4; video descriptions are not supported by this adapter",
+                        "Facebook video and Reels require one MP4; media descriptions are not supported by this adapter",
                     ));
                 }
             } else if p.media.len() > 1 || p.media.iter().any(|m| !image(m)) {
                 return Err(invalid(
-                    "Facebook supports text, one image, or one video with format=reel. Standard video uses manual handoff.",
+                    "Facebook supports text, one image, or one MP4 with format=reel or format=video.",
                 ));
             }
         }
         "instagram" => {
-            if p.options.get("format").is_some() {
+            let story = p.options["format"] == "story";
+            if p.options.get("format").is_some() && !story {
                 return Err(invalid(
-                    "Instagram Stories are not implemented; use manual handoff. Carousels are selected by the attachment count.",
+                    "Instagram format must be story or omitted. Carousels are selected by the attachment count.",
+                ));
+            }
+            if story
+                && p.options.as_object().is_some_and(|options| {
+                    options
+                        .keys()
+                        .any(|key| key != "format" && key != "alt_text")
+                })
+            {
+                return Err(invalid(
+                    "Instagram Stories do not support extra publishing options in this adapter. Text and media descriptions remain saved but are not sent.",
                 ));
             }
             if p.media.is_empty()
                 || p.media.len() > 10
+                || (story && p.media.len() != 1)
                 || p.media
                     .iter()
                     .any(|m| !matches!(m.mime.as_str(), "image/jpeg" | "video/mp4"))
             {
                 return Err(invalid(
-                    "Instagram supports one JPEG or MP4 Reel, or a carousel of 2–10 JPEG/MP4 items",
+                    "Instagram supports one JPEG or MP4 Story, one JPEG or MP4 Reel, or a carousel of 2–10 JPEG/MP4 items",
                 ));
             }
-            if p.media
-                .iter()
-                .any(|m| video(m) && !m.alt_text.trim().is_empty())
+            if !story
+                && p.media
+                    .iter()
+                    .any(|m| video(m) && !m.alt_text.trim().is_empty())
             {
                 return Err(invalid(
                     "Instagram video descriptions are not supported by this adapter",
                 ));
             }
-            post_limit(p, 2200)?;
+            if !story {
+                post_limit(p, 2200)?;
+            }
         }
         "threads" => {
             if p.options.get("format").is_some() {

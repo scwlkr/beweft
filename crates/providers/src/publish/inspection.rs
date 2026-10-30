@@ -50,7 +50,7 @@ async fn probe_with_program(m: &Media, program: &str) -> Result<Value> {
     }
     cmd.args([
         "-show_entries",
-        "format=duration:stream=codec_type,codec_name,profile,width,height,duration,avg_frame_rate,sample_aspect_ratio,pix_fmt,field_order,channels",
+        "format=duration:stream=codec_type,codec_name,profile,width,height,duration,avg_frame_rate,sample_aspect_ratio,pix_fmt,field_order,channels,sample_rate,bit_rate",
         "-show_error",
         "-of",
         "json",
@@ -156,7 +156,11 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
             ("x", _) => 256 * 1024 * 1024,
             ("bluesky", t) if t.starts_with("image/") => 2_000_000,
             ("bluesky", _) => 300_000_000,
+            ("instagram", t) if t.starts_with("image/") && p.options["format"] == "story" => {
+                8_000_000
+            }
             ("instagram" | "threads", t) if t.starts_with("image/") => 8 * 1024 * 1024,
+            ("instagram", _) if p.options["format"] == "story" => 100_000_000,
             ("mastodon", t) if t.starts_with("image/") => 16 * 1024 * 1024,
             ("mastodon", _) => 99 * 1024 * 1024,
             ("facebook", t) if t.starts_with("image/") => 10 * 1024 * 1024,
@@ -237,7 +241,7 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
                 "Bluesky images must fit within 4000 by 4000 pixels",
             ));
         }
-        if provider == "instagram" {
+        if provider == "instagram" && p.options["format"] != "story" {
             let ratio = width as f64 / height as f64;
             if image(m) && (!(320..=1440).contains(&width) || !(0.8..=1.91).contains(&ratio)) {
                 return Err(invalid(
@@ -252,8 +256,10 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
                 .and_then(|s| s.parse::<f64>().ok())
                 .unwrap_or(0.0);
             let max_duration = match provider {
+                "instagram" if p.options["format"] == "story" => 60.0,
                 "instagram" => 900.0,
-                "facebook" => 60.0,
+                "facebook" if p.options["format"] == "reel" => 60.0,
+                "facebook" => 900.0,
                 "threads" => 300.0,
                 "mastodon" => 3600.0,
                 "youtube" => 43200.0,
@@ -263,7 +269,7 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
             };
             let minimum = match provider {
                 "instagram" => 3.0,
-                "facebook" => 4.0,
+                "facebook" if p.options["format"] == "reel" => 4.0,
                 "x" => 0.5,
                 _ => 0.0,
             };
@@ -288,7 +294,47 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
                     "Meta video requires MP4, H.264/HEVC, optional AAC audio, and maximum width 1920",
                 ));
             }
-            if provider == "facebook" {
+            if provider == "instagram" && p.options["format"] == "story" {
+                let ratio = width as f64 / height as f64;
+                let rate = visual["avg_frame_rate"].as_str().and_then(|s| {
+                    let (n, d) = s.split_once('/')?;
+                    let n: f64 = n.parse().ok()?;
+                    let d: f64 = d.parse().ok()?;
+                    (d > 0.0).then_some(n / d)
+                });
+                let audio: Vec<_> = streams
+                    .iter()
+                    .filter(|s| s["codec_type"] == "audio")
+                    .collect();
+                if !(0.1..=10.0).contains(&ratio)
+                    || !rate.is_some_and(|fps| fps.is_finite() && (23.0..=60.0).contains(&fps))
+                    || visual["pix_fmt"] != "yuv420p"
+                    || visual["field_order"]
+                        .as_str()
+                        .is_some_and(|v| !matches!(v, "progressive" | "unknown"))
+                    || visual["bit_rate"]
+                        .as_str()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .is_some_and(|v| v > 25_000_000)
+                    || audio.len() > 1
+                    || audio.iter().any(|s| {
+                        !matches!(s["channels"].as_u64(), Some(1 | 2))
+                            || s["sample_rate"]
+                                .as_str()
+                                .and_then(|v| v.parse::<u64>().ok())
+                                .is_some_and(|v| v > 48_000)
+                            || s["bit_rate"]
+                                .as_str()
+                                .and_then(|v| v.parse::<u64>().ok())
+                                .is_some_and(|v| v > 128_000)
+                    })
+                {
+                    return Err(invalid(
+                        "Instagram Story video requires 23–60 fps, 4:2:0 progressive video, aspect ratio 1:10–10:1, and optional mono/stereo AAC",
+                    ));
+                }
+            }
+            if provider == "facebook" && p.options["format"] == "reel" {
                 let rate = visual["avg_frame_rate"].as_str().and_then(|s| {
                     let (n, d) = s.split_once('/')?;
                     let n: f64 = n.parse().ok()?;
@@ -309,6 +355,18 @@ pub async fn inspect_media(provider: &str, p: &Publication) -> Result<()> {
                         "Facebook Reels require MP4 H.264/HEVC, optional AAC, at least 540×960 in 9:16, and 23–60 fps",
                     ));
                 }
+            }
+            if provider == "facebook"
+                && p.options["format"] == "video"
+                && (m.mime != "video/mp4"
+                    || !matches!(codec, "h264" | "hevc")
+                    || streams
+                        .iter()
+                        .any(|s| s["codec_type"] == "audio" && s["codec_name"] != "aac"))
+            {
+                return Err(invalid(
+                    "Facebook standard video supports MP4 H.264/HEVC with optional AAC audio in this adapter",
+                ));
             }
             if provider == "x" {
                 let rate = visual["avg_frame_rate"].as_str().and_then(|s| {

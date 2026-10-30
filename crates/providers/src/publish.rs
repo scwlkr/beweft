@@ -158,6 +158,12 @@ impl Adapter {
         if c.app.provider == "facebook" && p.options["format"] == "reel" {
             require_permission(c, "reel")?;
         }
+        if c.app.provider == "facebook" && p.options["format"] == "video" {
+            require_permission(c, "video")?;
+        }
+        if c.app.provider == "instagram" && p.options["format"] == "story" {
+            require_permission(c, "story")?;
+        }
         validate(&c.app.provider, p)?;
         inspect_media(&c.app.provider, p).await?;
         let empty = json!({});

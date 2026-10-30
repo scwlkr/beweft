@@ -5,7 +5,7 @@ use std::{collections::HashSet, time::Duration};
 /// bytes shared by channels of the same provider are inspected only once.
 pub struct ScheduleFormatValidator {
     deadline: tokio::time::Instant,
-    inspected: HashSet<(String, Vec<Uuid>)>,
+    inspected: HashSet<(String, String, Vec<Uuid>)>,
 }
 
 impl Default for ScheduleFormatValidator {
@@ -59,6 +59,24 @@ impl ScheduleFormatValidator {
                 "Google photos require an actual public HTTPS server origin; local, private and reserved origins cannot be fetched.",
             ));
         }
+        if provider == "facebook"
+            && p.options["format"] == "video"
+            && !providers::google_public_origin(&state.config.public_url)
+        {
+            return Err(ApiError::bad_code(
+                "provider_format_invalid",
+                "Facebook standard video requires an actual public HTTPS server origin; local, private and reserved origins cannot be fetched.",
+            ));
+        }
+        if provider == "instagram"
+            && p.options["format"] == "story"
+            && !providers::google_public_origin(&state.config.public_url)
+        {
+            return Err(ApiError::bad_code(
+                "provider_format_invalid",
+                "Instagram Stories require an actual public HTTPS server origin; local, private and reserved origins cannot be fetched.",
+            ));
+        }
         if !p.media.is_empty()
             && matches!(
                 provider.as_str(),
@@ -74,7 +92,11 @@ impl ScheduleFormatValidator {
         }
         let ids: Vec<Uuid> =
             serde_json::from_value(payload["media_ids"].clone()).map_err(ApiError::internal)?;
-        let key = (provider.clone(), ids);
+        let key = (
+            provider.clone(),
+            p.options["format"].as_str().unwrap_or("").to_owned(),
+            ids,
+        );
         if !p.media.is_empty() && !self.inspected.contains(&key) {
             tokio::time::timeout_at(self.deadline, providers::inspect_media(&provider, &p))
                 .await

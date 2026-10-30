@@ -1,6 +1,6 @@
 use super::*;
 
-fn meta_id(value: &str) -> Result<&str> {
+pub(super) fn meta_id(value: &str) -> Result<&str> {
     if value.is_empty()
         || value.len() > 128
         || !value
@@ -57,6 +57,15 @@ impl Adapter {
         let account = id_path(&c.identity.id);
         let stage = checkpoint_stage(cp);
         let ig = c.app.provider == "instagram";
+        let story = ig && p.options["format"] == "story";
+        if story
+            && self.fixture_origin.is_none()
+            && !super::google_business::google_public_origin(public_media(&p.media[0])?)
+        {
+            return Err(invalid(
+                "Instagram Stories require an actual public HTTPS media URL",
+            ));
+        }
         let base = if ig {
             "https://graph.instagram.com/v23.0"
         } else {
@@ -102,14 +111,18 @@ impl Adapter {
                 }
                 item
             } else {
-                let mut single = if ig {
+                let mut single = if story {
+                    json!({"media_type":"STORIES"})
+                } else if ig {
                     json!({"caption":p.text})
                 } else {
                     json!({"text":p.text,"media_type":"TEXT"})
                 };
                 if let Some(m) = p.media.first() {
                     if video(m) {
-                        single["media_type"] = json!(if ig { "REELS" } else { "VIDEO" });
+                        if !story {
+                            single["media_type"] = json!(if ig { "REELS" } else { "VIDEO" });
+                        }
                         single["video_url"] = json!(public_media(m)?);
                     } else {
                         if !ig {
@@ -117,7 +130,7 @@ impl Adapter {
                         }
                         single["image_url"] = json!(public_media(m)?);
                     }
-                    if !m.alt_text.is_empty() && (!ig || image(m)) {
+                    if !story && !m.alt_text.is_empty() && (!ig || image(m)) {
                         single["alt_text"] = json!(m.alt_text);
                     }
                 }
@@ -210,6 +223,12 @@ impl Adapter {
                     false,
                 )
                 .await?;
+            if story && v["id"].as_str() != Some(container.as_str()) {
+                return Err(error(
+                    FailureKind::Uncertain,
+                    "Instagram returned a different Story container identifier",
+                ));
+            }
             let status = v[if ig { "status_code" } else { "status" }]
                 .as_str()
                 .unwrap_or("");
@@ -259,7 +278,7 @@ impl Adapter {
             }
             return Ok(Step::Checkpoint(next));
         }
-        let v = self
+        let result = self
             .send(
                 self.request(
                     Method::POST,
@@ -272,8 +291,19 @@ impl Adapter {
                 .form(&[("creation_id", &container)]),
                 true,
             )
-            .await?;
-        let id = field(&v, "id")?;
+            .await;
+        let v =
+            if story {
+                result.map_err(|_| error(FailureKind::Uncertain,
+                "Instagram may have accepted the Story. Inspect its outcome before retrying."))?
+            } else {
+                result?
+            };
+        let id = field(&v, "id").map_err(|error| if story {
+            crate::error(FailureKind::Uncertain,
+                "Instagram did not return a usable Story ID. Inspect its outcome before retrying.")
+        } else { error })?;
+        meta_id(&id)?;
         Ok(published(
             id.clone(),
             None,
