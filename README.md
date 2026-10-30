@@ -28,6 +28,28 @@ For a separate local workspace populated with example content, see the
 [demo setup](docs/self-hosting.md#example-workspace). It starts with manual
 practice channels and does not connect a social account.
 
+## Local setup
+
+From a checkout:
+
+```sh
+./project setup .local/beweft beweft 3000
+./project build .local/beweft
+./project compose .local/beweft up -d --wait --no-build --pull never
+```
+
+Open `http://127.0.0.1:3000`, create the owner with the setup secret from
+`.local/beweft/installation.env`, and choose an owner password. For an isolated
+example workspace:
+
+```sh
+./project demo create .local/demo beweft-demo 3001 <trusted-local-image>
+./project demo resume .local/demo
+```
+
+Run `./project --help` for the complete command list. Backup, restore, upgrade
+and recovery steps are in [self-hosting.md](docs/self-hosting.md).
+
 No live social account or publication has been verified. Fixture results are
 kept distinct from real provider outcomes. The [API contract](docs/api-contract.md)
 and [provider research](docs/research/provider-capabilities.md) describe current
