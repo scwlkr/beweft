@@ -25,6 +25,7 @@ struct Fixture {
     rejection: String,
     processing: String,
     reel_publish_status: String,
+    status_id: Option<String>,
     upload_bytes: usize,
 }
 async fn provider(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Response {
@@ -68,6 +69,9 @@ async fn provider(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Res
             assert_eq!(body["video_id"], "12345");
             Json(json!({"success":true})).into_response()
         };
+    }
+    if path == "/v23.0/123/videos" {
+        return Json(json!({"id":"12345"})).into_response();
     }
     if path == "/video-upload/v23.0/12345" {
         assert_eq!(headers["authorization"], "OAuth fixture-token");
@@ -117,9 +121,234 @@ async fn provider(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Res
         } else {
             &f.processing
         };
-        return Json(json!({"status_code":status,"status":status})).into_response();
+        let id = f
+            .status_id
+            .as_deref()
+            .unwrap_or_else(|| path.rsplit('/').next().unwrap());
+        return Json(json!({"id":id,"status_code":status,"status":status})).into_response();
     }
     (StatusCode::NOT_FOUND, "unexpected route").into_response()
+}
+
+#[tokio::test]
+async fn facebook_video_and_instagram_stories_preserve_delivery_boundaries() {
+    assert_eq!(
+        std::env::var("BEWEFT_REQUIRE_PROVIDER_FIXTURES").as_deref(),
+        Ok("true")
+    );
+    assert_eq!(
+        std::env::var("BEWEFT_PROVIDER_TEST_SANDBOX").as_deref(),
+        Ok("1")
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let fixture = Arc::new(Mutex::new(Fixture::default()));
+    let app = Router::new()
+        .fallback(any(provider))
+        .with_state(fixture.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let adapter = Adapter::fixture(&origin).unwrap();
+
+    // A landscape, ten-fps MP4 is accepted by the standard-video adapter;
+    // the stricter Reel shape must not be silently applied to it.
+    let fb = channel("facebook");
+    let mut video = publication(vec![media(true)]);
+    video.options = json!({"format":"video"});
+    let Step::Checkpoint(start) = adapter.publish_step(&fb, &video, None).await.unwrap() else {
+        panic!("public boundary")
+    };
+    assert_eq!(start["stage"], "fb_video_public");
+    assert!(fixture.lock().unwrap().requests.is_empty());
+    let Step::Checkpoint(processing) = adapter
+        .publish_step(&fb, &video, Some(&start))
+        .await
+        .unwrap()
+    else {
+        panic!("video ID")
+    };
+    assert_eq!(processing["stage"], "fb_video_processing");
+    assert_eq!(processing["video_id"], "12345");
+    let Step::Wait(_) = adapter
+        .publish_step(&fb, &video, Some(&processing))
+        .await
+        .unwrap()
+    else {
+        panic!("processing stays unresolved")
+    };
+    assert!(matches!(
+        adapter
+            .publish_step(&fb, &video, Some(&processing))
+            .await
+            .unwrap(),
+        Step::Published { .. }
+    ));
+    {
+        let f = fixture.lock().unwrap();
+        let creates: Vec<_> = f
+            .requests
+            .iter()
+            .filter(|(path, _)| path == "POST /v23.0/123/videos")
+            .collect();
+        assert_eq!(creates.len(), 1);
+        assert_eq!(creates[0].1["file_url"], "https://media.fixture/video");
+        assert_eq!(creates[0].1["description"], "Fixture caption");
+        assert_eq!(creates[0].1["published"], true);
+    }
+    fixture.lock().unwrap().reel_publish_status = "scheduled".into();
+    assert_eq!(
+        adapter
+            .reconcile(&fb, &video, &processing)
+            .await
+            .err()
+            .unwrap()
+            .kind,
+        FailureKind::Uncertain
+    );
+    fixture.lock().unwrap().reel_publish_status.clear();
+    fixture.lock().unwrap().rejection = "/v23.0/123/videos".into();
+    assert_eq!(
+        adapter
+            .publish_step(&fb, &video, Some(&start))
+            .await
+            .err()
+            .unwrap()
+            .kind,
+        FailureKind::Uncertain
+    );
+    fixture.lock().unwrap().rejection.clear();
+
+    let ig = channel("instagram"); // Legacy grants have unknown scopes and no account-type metadata.
+    let mut denied = ig.clone();
+    denied.tokens.scopes_known = true;
+    denied.tokens.scopes = vec!["instagram_business_basic".into()];
+    let mut image = media(false);
+    image.source = MediaSource::Bytes(support::custom_bytes(false, "540x960", "4"));
+    let mut image_story = publication(vec![image]);
+    image_story.options = json!({"format":"story"});
+    assert_eq!(
+        adapter
+            .publish_step(&denied, &image_story, None)
+            .await
+            .err()
+            .unwrap()
+            .kind,
+        FailureKind::Authentication
+    );
+    for is_video in [false, true] {
+        let mut item = if is_video {
+            reel()
+        } else {
+            image_story.media[0].clone()
+        };
+        item.public_url = Some(
+            if is_video {
+                "https://media.fixture/video"
+            } else {
+                "https://media.fixture/image"
+            }
+            .into(),
+        );
+        item.alt_text = "Keep this description locally".into();
+        let mut story = publication(vec![item]);
+        story.options = json!({"format":"story"});
+        let start = fixture.lock().unwrap().requests.len();
+        let Step::Checkpoint(container) = adapter.publish_step(&ig, &story, None).await.unwrap()
+        else {
+            panic!("container")
+        };
+        let Step::Checkpoint(ready) = adapter
+            .publish_step(&ig, &story, Some(&container))
+            .await
+            .unwrap()
+        else {
+            panic!("ready")
+        };
+        let Step::Checkpoint(public) = adapter
+            .publish_step(&ig, &story, Some(&ready))
+            .await
+            .unwrap()
+        else {
+            panic!("public boundary")
+        };
+        assert_eq!(public["stage"], "meta_public");
+        assert!(matches!(
+            adapter
+                .publish_step(&ig, &story, Some(&public))
+                .await
+                .unwrap(),
+            Step::Published { .. }
+        ));
+        let f = fixture.lock().unwrap();
+        let requests = &f.requests[start..];
+        let body = &requests
+            .iter()
+            .find(|(path, _)| path == "POST /v23.0/123/media")
+            .unwrap()
+            .1;
+        assert_eq!(body["media_type"], "STORIES");
+        assert!(body.get("caption").is_none() && body.get("alt_text").is_none());
+        assert_eq!(
+            body[if is_video { "video_url" } else { "image_url" }],
+            if is_video {
+                "https://media.fixture/video"
+            } else {
+                "https://media.fixture/image"
+            }
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(path, _)| path.ends_with("media_publish"))
+                .count(),
+            1
+        );
+    }
+    let Step::Checkpoint(container) = adapter.publish_step(&ig, &image_story, None).await.unwrap()
+    else {
+        panic!("container")
+    };
+    fixture.lock().unwrap().status_id = Some("wrong".into());
+    assert_eq!(
+        adapter
+            .publish_step(&ig, &image_story, Some(&container))
+            .await
+            .err()
+            .unwrap()
+            .kind,
+        FailureKind::Uncertain
+    );
+    fixture.lock().unwrap().status_id = None;
+    fixture.lock().unwrap().rejection = "/v23.0/123/media_publish".into();
+    let public = json!({"stage":"meta_public","container_id":"42","expires_after_secs":3600});
+    assert_eq!(
+        adapter
+            .publish_step(&ig, &image_story, Some(&public))
+            .await
+            .err()
+            .unwrap()
+            .kind,
+        FailureKind::Uncertain
+    );
+    fixture.lock().unwrap().rejection.clear();
+    fixture.lock().unwrap().processing = "PUBLISHED".into();
+    let before = fixture.lock().unwrap().requests.len();
+    assert!(
+        adapter
+            .reconcile(&ig, &image_story, &public)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let f = fixture.lock().unwrap();
+    let reads = &f.requests[before..];
+    assert_eq!(reads.len(), 1);
+    assert_eq!(reads[0].0, "GET /v23.0/42");
+    drop(f);
+    let mut unsupported = image_story.clone();
+    unsupported.options["stickers"] = json!(["link"]);
+    assert!(validate("instagram", &unsupported).is_err());
+    server.abort();
+    let _ = server.await;
 }
 fn channel(provider: &str) -> Channel {
     Channel {

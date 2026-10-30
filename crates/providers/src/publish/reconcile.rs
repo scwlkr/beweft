@@ -72,7 +72,7 @@ impl Adapter {
             "facebook"
                 if matches!(
                     checkpoint_stage(cp),
-                    "fb_reel_public" | "fb_reel_processing"
+                    "fb_reel_public" | "fb_reel_processing" | "fb_video_processing"
                 ) =>
             {
                 let id = field(cp, "video_id")?;
@@ -97,6 +97,33 @@ impl Adapter {
                     }
                     _ => Ok(None),
                 }
+            }
+            "instagram"
+                if p.options["format"] == "story" && checkpoint_stage(cp) == "meta_public" =>
+            {
+                // A published container status cannot supply the missing media
+                // ID from a lost publish response. Probe only the saved ID;
+                // leave every outcome uncertain for explicit owner recovery.
+                let container = field(cp, "container_id")?;
+                super::meta::meta_id(&container)?;
+                let status = self
+                    .send(
+                        self.request(
+                            Method::GET,
+                            &format!("https://graph.instagram.com/v23.0/{}", id_path(&container)),
+                            token,
+                        )?
+                        .query(&[("fields", "status_code")]),
+                        false,
+                    )
+                    .await?;
+                if status["id"].as_str() != Some(container.as_str()) {
+                    return Err(error(
+                        FailureKind::Uncertain,
+                        "Instagram returned a different Story container identifier",
+                    ));
+                }
+                Ok(None)
             }
             "bluesky" => {
                 // These stages precede the public record boundary. A saved job

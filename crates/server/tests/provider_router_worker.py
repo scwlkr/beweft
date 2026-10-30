@@ -86,6 +86,9 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     reel_started = threading.Event()
     reel_release = threading.Event()
     reel_returned = threading.Event()
+    video_mode = "success"
+    story_publish_mode = "success"
+    story_publish_sent = False
     meta_next = 8000
     meta_bodies = []
     bsky_mode = "normal"
@@ -179,10 +182,11 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             phase = "in_progress" if self.reel_mode == "pending" else "not_started" if self.reel_mode in ("uncertain", "blocked") else "error" if self.reel_mode == "ended" else "complete"
             return self.respond({"id":"12345", "status":{"video_status":"ready" if phase == "complete" else "processing", "uploading_phase":{"status":"complete"}, "processing_phase":{"status":"complete"}, "publishing_phase":{"status":phase,"publish_status":"published"}}})
         if path.startswith("/v23.0/") and path.rsplit("/", 1)[-1].isdigit():
-            return self.respond({"status_code":"FINISHED"})
+            status = "PUBLISHED" if self.story_publish_mode == "lost" and self.story_publish_sent else "FINISHED"
+            return self.respond({"id":path.rsplit("/", 1)[-1], "status_code":status})
         if path == "/v23.0/oauth/access_token":
             return self.respond({"access_token":"facebook-long-fixture", "expires_in":7200,
-                                 "scope":"pages_manage_posts pages_read_engagement pages_manage_engagement"})
+                                 "scope":"pages_show_list pages_manage_posts pages_read_engagement pages_manage_engagement"})
         if path == "/v23.0/me/accounts":
             return self.respond({"data":[{"id":"destination", "name":"Fixture Page",
                                            "access_token":"page-fixture", "tasks":["CREATE_CONTENT"]}]})
@@ -245,21 +249,36 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             assert self.headers.get("Authorization") == "OAuth page-fixture"
             assert self.headers.get("offset") == "0" and int(self.headers["file_size"]) == len(body)
             return self.respond({"success":True})
+        if path == "/v23.0/destination/videos":
+            value = {k:v[0] for k,v in urllib.parse.parse_qs(body.decode(), keep_blank_values=True).items()}
+            assert self.headers.get("Authorization") == "Bearer page-fixture"
+            assert value["published"] == "true" and "upload_phase" not in value
+            url = value["file_url"].replace("https://fixture.google.com", self.app_origin, 1)
+            with urllib.request.urlopen(url, timeout=5) as response:
+                assert response.read()
+            if self.video_mode == "lost":
+                return self.respond({}, 502)
+            return self.respond({"id":"12345"})
         if path == "/v23.0/ig-destination/media":
             value = {k:v[0] for k,v in urllib.parse.parse_qs(body.decode(), keep_blank_values=True).items()}
             if "is_carousel_item" in value:
                 value["is_carousel_item"] = value["is_carousel_item"] == "true"
-            if value.get("is_carousel_item"):
-                url = value.get("image_url", value.get("video_url")).replace("https://media.fixture", self.app_origin, 1)
+            if value.get("is_carousel_item") or value.get("media_type") == "STORIES":
+                url = value.get("image_url", value.get("video_url")).replace("https://fixture.google.com", self.app_origin, 1)
                 with urllib.request.urlopen(url, timeout=5) as response:
                     fetched = response.read()
                 assert fetched
+            if value.get("media_type") == "STORIES":
+                type(self).story_publish_sent = False
             with self.lock:
                 self.meta_bodies.append(value)
                 type(self).meta_next += 1
                 created = str(self.meta_next)
             return self.respond({"id":created})
         if path == "/v23.0/ig-destination/media_publish":
+            type(self).story_publish_sent = True
+            if self.story_publish_mode == "lost":
+                return self.respond({}, 502)
             return self.respond({"id":"ig-published"})
         if path == "/v23.0/oauth/access_token":
             return self.respond({"access_token":"facebook-short-fixture", "expires_in":7200})
@@ -344,7 +363,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             return self.respond({}, headers={"Location":"https://www.googleapis.com/upload/youtube/v3/videos/session-fixture"})
         if path == "/v23.0/destination/photos":
             value = json.loads(body)
-            url = value["url"].replace("https://media.fixture", self.app_origin, 1)
+            url = value["url"].replace("https://fixture.google.com", self.app_origin, 1)
             try:
                 with urllib.request.urlopen(url, timeout=5) as response:
                     data = response.read()
@@ -427,7 +446,7 @@ def run():
         skewed_mono = float(subprocess.check_output([monotonic_binary], env=skew_env))
         assert 0 <= skewed_mono - normal_mono < 3, "fixture changed the monotonic clock"
         env = dict(os.environ, DATABASE_URL=f"postgres://{USER}:{PASSWORD}@localhost:{PORT}/{DB}",
-                   BEWEFT_PUBLIC_URL="https://media.fixture", BEWEFT_BIND=app_origin.removeprefix("http://"),
+                   BEWEFT_PUBLIC_URL="https://fixture.google.com", BEWEFT_BIND=app_origin.removeprefix("http://"),
                    BEWEFT_MEDIA_DIR=temp, BEWEFT_SETUP_SECRET="isolated-provider-router-secret",
                    BEWEFT_ENCRYPTION_KEY="41" * 32, BEWEFT_ENABLE_FIXTURES="true",
                    BEWEFT_REQUIRE_PROVIDER_FIXTURES="true", BEWEFT_PROVIDER_FIXTURE_ORIGIN=fixture_origin)
@@ -436,7 +455,7 @@ def run():
         processes.append(server)
 
         def request(path, body=None, method=None, token=None, cookie=True, expected=200, api_origin=None):
-            headers = {"Origin":"https://media.fixture", "X-Beweft-Request":"1"}
+            headers = {"Origin":"https://fixture.google.com", "X-Beweft-Request":"1"}
             if cookie and cookies:
                 headers["Cookie"] = "; ".join(f"{key}={value}" for key, value in cookies.items())
             if token is not None:
@@ -464,7 +483,7 @@ def run():
             boundary = "provider-router-fixture"
             body = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\nContent-Type: {mime}\r\n\r\n'.encode()
                     + data + f"\r\n--{boundary}--\r\n".encode())
-            headers = {"Origin":"https://media.fixture", "X-Beweft-Request":"1",
+            headers = {"Origin":"https://fixture.google.com", "X-Beweft-Request":"1",
                        "Cookie":"; ".join(f"{k}={v}" for k,v in cookies.items()),
                        "Content-Type":f"multipart/form-data; boundary={boundary}"}
             req = urllib.request.Request(app_origin + f"/api/v1/media?brand_id={brand}", data=body, headers=headers)
@@ -626,6 +645,18 @@ def run():
             assert fb["connection_status"] == "connected" and fb["manual_guidance"] is None
             assert fb["capabilities"]["verification"] == "identity_verified_publishing_unverified"
             assert fb["capabilities"]["permissions"]["actions"]["publish"]["status"] == "granted"
+            # Older connected grants retain their stored JSON and credentials;
+            # installed format/action metadata is reconstructed on read.
+            for current, format_name, action in [(fb, "video", "video"), (ig, "story", "story")]:
+                sql(f"UPDATE channels SET capabilities=jsonb_set(capabilities, '{{permissions,actions}}', (capabilities->'permissions'->'actions') - '{action}') WHERE id='{current['id']}'")
+                before_caps = sql(f"SELECT capabilities::text FROM channels WHERE id='{current['id']}'")
+                decorated = next(item for item in request(f"/channels?brand_id={brand}") if item["id"] == current["id"])
+                assert format_name in decorated["capabilities"]["formats"]
+                assert decorated["capabilities"]["permissions"]["actions"][action]["status"] == "granted"
+                assert sql(f"SELECT capabilities::text FROM channels WHERE id='{current['id']}'") == before_caps
+            sql(f"UPDATE channels SET capabilities=jsonb_set(jsonb_set(capabilities, '{{permissions,source}}', '\"provider_did_not_report_scopes\"'::jsonb), '{{permissions,reported_scopes}}', '[]'::jsonb) WHERE id='{ig['id']}'")
+            unknown_ig = next(item for item in request(f"/channels?brand_id={brand}") if item["id"] == ig["id"])
+            assert unknown_ig["capabilities"]["permissions"]["actions"]["story"]["status"] == "unknown"
             token = request("/tokens", {"name":"Read only", "scopes":["read"], "brand_ids":[brand]})["token"]
             request("/provider-apps", token=token, expected=403)
             request("/connections/facebook/removal-status", token=token, expected=403)
@@ -1205,10 +1236,75 @@ def run():
             assert created[2]["media_type"] == "CAROUSEL" and created[2]["children"] == "8001,8002"
             assert request(f"/publications/{carousel['id']}/attempts")[0]["receipt"]["provider_receipt"]["id"] == "ig-published"
 
+            # A lost Story publish response is read back only by its saved
+            # container; PUBLISHED without a media ID is still uncertain.
+            Fixture.story_publish_mode = "lost"
+            prior_publish = Fixture.counts.get("POST /v23.0/ig-destination/media_publish", 0)
+            story = schedule(brand, ig["id"], "Keep for other channels", [asset["id"]], title="Local title", options={"format":"story"})
+            wait_for(lambda: state_is(story["id"], "uncertain"), "lost Instagram Story publish", seconds=35)
+            body = Fixture.meta_bodies[-1]
+            assert body["media_type"] == "STORIES" and "caption" not in body and "alt_text" not in body
+            snapshot = publication(story["id"])["payload"]
+            assert snapshot["text"] == "Keep for other channels" and snapshot["title"] == "Local title"
+            assert snapshot["media_metadata"][0]["alt_text"] == "Changed later"
+            assert Fixture.counts["POST /v23.0/ig-destination/media_publish"] == prior_publish + 1
+            request(f"/publications/{story['id']}/cancel", {}, expected=409)
+            assert request(f"/publications/{story['id']}/provider-reconcile", {})["state"] == "uncertain"
+            assert Fixture.counts["POST /v23.0/ig-destination/media_publish"] == prior_publish + 1
+            story_status = request(f"/publications/{story['id']}/provider-status")["meta_delivery"]
+            assert story_status["phase"] == "post_started" and not story_status["retry_allowed"]
+            sql(f"UPDATE publications SET state='queued' WHERE id='{story['id']}'; UPDATE provider_delivery_checkpoints SET not_before=NULL WHERE publication_id='{story['id']}'")
+            wait_for(lambda: state_is(story["id"], "uncertain"), "stale Story claim quarantined", seconds=35)
+            assert Fixture.counts["POST /v23.0/ig-destination/media_publish"] == prior_publish + 1
+            assert request(f"/publications/{story['id']}/provider-status")["meta_delivery"]["attempt_id"] == story_status["attempt_id"]
+            story_resolution = {"resolution":"not_published", "note":"Fixture remote operation ended",
+                                "observed_attempt_id":story_status["attempt_id"], "observed_checkpoint_id":story_status["checkpoint_id"],
+                                "sender_stopped":True, "provider_inspected":True, "remote_definitively_ended":True}
+            request(f"/publications/{story['id']}/reconcile", {**story_resolution,"remote_definitively_ended":False}, expected=409)
+            request(f"/publications/{story['id']}/reconcile", {**story_resolution,"observed_checkpoint_id":str(uuid.uuid4())}, expected=409)
+            Fixture.story_publish_mode = "success"
+            request(f"/publications/{story['id']}/reconcile", story_resolution)
+            assert publication(story["id"])["state"] == "failed"
+            request(f"/publications/{story['id']}/retry", {})
+            wait_for(lambda: state_is(story["id"], "published"), "explicit Story retry", seconds=35)
+            assert Fixture.counts["POST /v23.0/ig-destination/media_publish"] == prior_publish + 2
+
             # Facebook's accepted finish is not a receipt until status confirms publication.
             reel_file = Path(temp) / "reel.mp4"
             subprocess.run(["ffmpeg","-nostdin","-v","error","-f","lavfi","-i","color=c=blue:s=540x960:r=24",
                             "-t","4","-c:v","libx264","-preset","ultrafast","-pix_fmt","yuv420p","-movflags","+faststart",str(reel_file)], check=True)
+            story_video = upload(brand, reel_file.read_bytes(), "story.mp4", "video/mp4")
+            before_stories = len(Fixture.meta_bodies)
+            movie_story = schedule(brand, ig["id"], "Saved video caption", [story_video["id"]], options={"format":"story"})
+            wait_for(lambda: state_is(movie_story["id"], "published"), "Instagram video Story", seconds=35)
+            body = Fixture.meta_bodies[before_stories]
+            assert body["media_type"] == "STORIES" and "video_url" in body and "caption" not in body
+
+            # A standard landscape Page video uses the v23 file_url flow, not
+            # the Reel path, and an accepted processing ID stays uncertain.
+            Fixture.reel_mode = "pending"
+            before_video = Fixture.counts.get("POST /v23.0/destination/videos", 0)
+            pending_video = schedule(brand, fb["id"], "Page video", [video_asset["id"]], options={"format":"video"})
+            wait_for(lambda: state_is(pending_video["id"], "uncertain"), "accepted Facebook video processing", seconds=35)
+            assert Fixture.counts["POST /v23.0/destination/videos"] == before_video + 1
+            assert request(f"/publications/{pending_video['id']}/provider-status")["meta_delivery"]["phase"] == "post_started"
+            request(f"/publications/{pending_video['id']}/cancel", {}, expected=409)
+            video_status = request(f"/publications/{pending_video['id']}/provider-status")["meta_delivery"]
+            sql(f"UPDATE publications SET state='queued' WHERE id='{pending_video['id']}'; UPDATE provider_delivery_checkpoints SET not_before=NULL WHERE publication_id='{pending_video['id']}'")
+            wait_for(lambda: state_is(pending_video["id"], "uncertain"), "stale Page video claim quarantined", seconds=35)
+            assert Fixture.counts["POST /v23.0/destination/videos"] == before_video + 1
+            assert request(f"/publications/{pending_video['id']}/provider-status")["meta_delivery"]["attempt_id"] == video_status["attempt_id"]
+            Fixture.reel_mode = "success"
+            assert request(f"/publications/{pending_video['id']}/provider-reconcile", {})["state"] == "published"
+            assert Fixture.counts["POST /v23.0/destination/videos"] == before_video + 1
+            Fixture.video_mode = "lost"
+            lost_video = schedule(brand, fb["id"], "Lost Page video response", [video_asset["id"]], options={"format":"video"})
+            wait_for(lambda: state_is(lost_video["id"], "uncertain"), "lost Facebook video response", seconds=35)
+            assert Fixture.counts["POST /v23.0/destination/videos"] == before_video + 2
+            request(f"/publications/{lost_video['id']}/retry", {}, expected=409)
+            assert request(f"/publications/{lost_video['id']}/provider-reconcile", {})["state"] == "uncertain"
+            assert Fixture.counts["POST /v23.0/destination/videos"] == before_video + 2
+            Fixture.video_mode = "success"
             reel_brand = request("/brands", {"name":"Reel recovery fixture"})["id"]
             reel_fb = connect("facebook", reel_brand)
             reel_asset = upload(reel_brand, reel_file.read_bytes(), "reel.mp4", "video/mp4")
@@ -1280,7 +1376,9 @@ def run():
             request(f"/publications/{uncertain_reel['id']}/retry", {}, expected=409)
             Fixture.reel_mode = "ended"
             resolution = {"resolution":"not_published", "note":"Fixture confirmed remote operation ended", "observed_attempt_id":observed["attempt_id"],
-                          "observed_checkpoint_id":observed["checkpoint_id"], "sender_stopped":True, "provider_inspected":True}
+                          "observed_checkpoint_id":observed["checkpoint_id"], "sender_stopped":True, "provider_inspected":True,
+                          "remote_definitively_ended":True}
+            request(f"/publications/{uncertain_reel['id']}/reconcile", {**resolution,"remote_definitively_ended":False}, expected=409)
             request(f"/publications/{uncertain_reel['id']}/reconcile", {**resolution,"sender_stopped":False}, expected=409)
             request(f"/publications/{uncertain_reel['id']}/reconcile", {**resolution,"observed_checkpoint_id":str(uuid.uuid4())}, expected=409)
             assert Fixture.counts["reel_finish"] == writes

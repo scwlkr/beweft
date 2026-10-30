@@ -289,6 +289,16 @@ async fn change(
         } else {
             None
         };
+    if let Some(cp) = meta_checkpoint.as_ref() {
+        let (attempt, checkpoint) = crate::provider_bridge::meta_identity(cp)?;
+        let matches_row: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM provider_delivery_checkpoints cp JOIN publication_attempts a ON a.id=cp.attempt_id AND a.publication_id=cp.publication_id WHERE cp.publication_id=$1 AND cp.attempt_id=$2 AND cp.checkpoint_id=$3)")
+            .bind(id).bind(attempt).bind(checkpoint).fetch_one(&mut *tx).await?;
+        if !matches_row {
+            return Err(ApiError::conflict(
+                "Meta delivery identity changed; reload before recovery",
+            ));
+        }
+    }
     if let Some(cp) = google_checkpoint.as_ref() {
         let (attempt, checkpoint) = crate::provider_bridge::google_identity(cp)?;
         let matches_row: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM provider_delivery_checkpoints cp JOIN publication_attempts a ON a.id=cp.attempt_id AND a.publication_id=cp.publication_id WHERE cp.publication_id=$1 AND cp.attempt_id=$2 AND cp.checkpoint_id=$3)")
@@ -454,8 +464,16 @@ async fn change(
                                 "Stop the original sender, inspect the provider, and attest not-published using the current Meta attempt and checkpoint IDs",
                             ));
                         }
-                        cp["not_published_attestation"] =
-                            json!({"attempt_id":attempt,"checkpoint_id":checkpoint});
+                        let public = crate::provider_bridge::meta_public_boundary(cp);
+                        if public && body["remote_definitively_ended"] != true {
+                            return Err(ApiError::conflict(
+                                "Confirm the remote Meta operation definitively failed, stopped, or was canceled. An absent post or stopped local sender alone is not proof.",
+                            ));
+                        }
+                        cp["not_published_attestation"] = json!({
+                            "attempt_id":attempt,"checkpoint_id":checkpoint,
+                            "remote_definitively_ended": if public { json!(true) } else { Value::Null }
+                        });
                         crate::provider_bridge::save_recovery_checkpoint_tx(&mut tx, state, id, cp)
                             .await?;
                     }

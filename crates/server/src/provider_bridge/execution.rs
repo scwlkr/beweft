@@ -151,9 +151,10 @@ async fn fenced_step(
             let is_x = channel.app.provider == "x" && stage.starts_with("x_");
             let is_meta = matches!(channel.app.provider.as_str(), "instagram" | "threads")
                 && stage.starts_with("meta_");
-            let is_reel = channel.app.provider == "facebook" && stage.starts_with("fb_reel_");
-            if is_x || is_meta || is_reel {
-                let needs_expiry = (is_meta || is_reel)
+            let is_facebook_video = channel.app.provider == "facebook"
+                && (stage.starts_with("fb_reel_") || stage.starts_with("fb_video_"));
+            if is_x || is_meta || is_facebook_video {
+                let needs_expiry = (is_meta || is_facebook_video)
                     || matches!(
                         stage,
                         "x_video_append"
@@ -233,6 +234,8 @@ async fn fenced_step(
                             | "meta_legacy_ambiguous"
                             | "fb_reel_public"
                             | "fb_reel_processing"
+                            | "fb_video_public"
+                            | "fb_video_processing"
                     );
                     if is_public && (!is_x || p.options.get("x_thread").is_some()) {
                         return Ok(Err(providers::error(
@@ -263,7 +266,7 @@ async fn fenced_step(
                 // fits inside the original job's remaining time.
                 if matches!(
                     stage,
-                    "x_post_started" | "x_thread_post_started" | "meta_public" | "fb_reel_public"
+                    "x_post_started" | "x_thread_post_started" | "meta_public" | "fb_reel_public" | "fb_video_public"
                 ) && overall
                     .and_then(|deadline| deadline.remaining())
                     .is_none_or(|remaining| remaining < std::time::Duration::from_secs(80))
@@ -487,6 +490,7 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
         .and_then(|start| start.deadline(std::time::Duration::from_secs(180)));
     let mut completed_managed_checkpoint = false;
     let mut post_started = false;
+    let mut meta_public_started = false;
     let mut accepted_reel = false;
     // A prior thread checkpoint is already across a public boundary, even
     // between replies. Never turn it into an ordinary queued publication.
@@ -521,6 +525,7 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
         Ok(None) => false,
         Err(error) => return BridgeOutcome::Uncertain { reason: error.2 },
     };
+    let mut accepted_video = false;
     let mut accepted_google = false;
     for step in 0..48 {
         if overall.and_then(|deadline| deadline.remaining()).is_none() {
@@ -547,12 +552,14 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                 if stage.starts_with("x_")
                     || stage.starts_with("meta_")
                     || stage.starts_with("fb_reel_")
+                    || stage.starts_with("fb_video_")
                     || stage.starts_with("linkedin_")
                     || stage.starts_with("bsky_")
                     || stage.starts_with("google_post_")
                 {
                     completed_managed_checkpoint = true;
                     accepted_reel = stage == "fb_reel_processing";
+                    accepted_video = stage == "fb_video_processing";
                     thread_public |= stage.starts_with("x_thread_");
                     accepted_google = stage == "google_post_processing";
                     post_started = matches!(
@@ -566,12 +573,23 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                             | "meta_legacy_ambiguous"
                             | "fb_reel_public"
                             | "fb_reel_processing"
+                            | "fb_video_public"
+                            | "fb_video_processing"
                             | "linkedin_post_started"
                             | "bsky_post_started"
                             | "bsky_video_upload_started"
                             | "bsky_image_upload_started"
                             | "google_post_started"
                             | "google_post_processing"
+                    );
+                    meta_public_started = matches!(
+                        stage,
+                        "meta_public"
+                            | "meta_legacy_ambiguous"
+                            | "fb_reel_public"
+                            | "fb_reel_processing"
+                            | "fb_video_public"
+                            | "fb_video_processing"
                     );
                     let remaining = overall
                         .and_then(|deadline| deadline.remaining())
@@ -593,8 +611,30 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                     reason: "Facebook accepted the Reel and is still processing it. Check provider status before resolving its outcome.".into(),
                 };
             }
+            Ok(Ok(Step::Wait(next))) if next["stage"] == "fb_video_processing" => {
+                return BridgeOutcome::Uncertain {
+                    reason: "Facebook accepted the video and is still processing it. Check provider status before resolving its outcome.".into(),
+                };
+            }
             Ok(Ok(Step::Wait(next))) if next["stage"] == "google_post_processing" => {
                 return BridgeOutcome::Uncertain { reason: "Google accepted the post and may still publish it. Check its saved status before resolving the outcome.".into() };
+            }
+            Ok(Ok(Step::Wait(next)))
+                if matches!(
+                    next["stage"].as_str(),
+                    Some(
+                        "meta_public"
+                            | "meta_legacy_ambiguous"
+                            | "fb_reel_public"
+                            | "fb_video_public"
+                    )
+                ) =>
+            {
+                return BridgeOutcome::Uncertain {
+                    reason:
+                        "A Meta public write may have started. Inspect its outcome before retrying."
+                            .into(),
+                };
             }
             Ok(Ok(Step::Wait(next)))
                 if next["stage"].as_str().is_some_and(|stage| {
@@ -602,6 +642,7 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                         || stage == "bsky_video_processing"
                         || stage.starts_with("meta_")
                         || stage.starts_with("fb_reel_")
+                        || stage.starts_with("fb_video_")
                         || matches!(
                             stage,
                             "linkedin_image_processing" | "linkedin_video_processing"
@@ -628,6 +669,9 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
             Ok(Err(e)) if accepted_reel => {
                 return BridgeOutcome::Uncertain { reason: e.message };
             }
+            Ok(Err(e)) if accepted_video => {
+                return BridgeOutcome::Uncertain { reason: e.message };
+            }
             Ok(Err(e)) if thread_public => {
                 return BridgeOutcome::Uncertain {
                     reason: format!(
@@ -637,6 +681,11 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                 };
             }
             Ok(Err(e)) if accepted_google => {
+                return BridgeOutcome::Uncertain { reason: e.message };
+            }
+            // A saved public boundary may already have sent a request even if
+            // a later local validation, refresh, or provider response failed.
+            Ok(Err(e)) if meta_public_started => {
                 return BridgeOutcome::Uncertain { reason: e.message };
             }
             Ok(Err(e))
@@ -649,9 +698,8 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
             }
             Ok(Err(e)) => return BridgeOutcome::Rejected { reason: e.message },
             Err(e) if e.1 == "delivery_paused" && step == 0 => {
-                // A legacy queued checkpoint may already represent an accepted
-                // public Reel. A pause racing its first claim must not put it
-                // back in the ordinary queue.
+                // A legacy queued checkpoint may already represent a public
+                // Meta write. A pause racing its first claim must not queue it.
                 match super::preparation::checkpoint(state, id).await {
                     Ok(Some(cp))
                         if matches!(
@@ -659,6 +707,10 @@ pub async fn publish(state: &AppState, value: &Value) -> BridgeOutcome {
                             Some(
                                 "fb_reel_public"
                                     | "fb_reel_processing"
+                                    | "fb_video_public"
+                                    | "fb_video_processing"
+                                    | "meta_public"
+                                    | "meta_legacy_ambiguous"
                                     | "x_post_started"
                                     | "x_legacy_ambiguous"
                             )

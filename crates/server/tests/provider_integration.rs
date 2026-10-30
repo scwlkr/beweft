@@ -42,6 +42,7 @@ include!("provider_db/revocation_latch.rs");
 include!("provider_db/x_legacy.rs");
 include!("provider_db/x_thread.rs");
 include!("provider_db/google_business.rs");
+include!("provider_db/meta_recovery.rs");
 #[path = "../../providers/tests/support/mod.rs"]
 mod media_fixture;
 #[tokio::test]
@@ -73,5 +74,6 @@ async fn provider_database_security_and_recovery() {
     refresh_survives_downstream_rollback(&h).await;
     provider_fetches_committed_media_during_post(&h).await;
     bluesky_quota_retry_preserves_identity_and_requires_a_finished_sender(&h).await;
+    meta_public_recovery_requires_new_remote_end_attestation(&h).await;
     h.state.db.close().await;
 }

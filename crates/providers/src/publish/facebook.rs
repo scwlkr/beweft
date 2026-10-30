@@ -25,6 +25,9 @@ impl Adapter {
         if p.options["format"] == "reel" {
             return self.publish_facebook_reel(c, p, cp).await;
         }
+        if p.options["format"] == "video" {
+            return self.publish_facebook_video(c, p, cp).await;
+        }
         if !checkpoint_stage(cp).is_empty() {
             return Err(error(
                 FailureKind::Uncertain,
@@ -55,6 +58,61 @@ impl Adapter {
             Some(format!("https://www.facebook.com/{id}")),
             json!({"id":id}),
         ))
+    }
+
+    async fn publish_facebook_video(
+        &self,
+        c: &Channel,
+        p: &Publication,
+        cp: &Value,
+    ) -> Result<Step> {
+        if self.fixture_origin.is_none()
+            && !super::google_business::google_public_origin(public_media(&p.media[0])?)
+        {
+            return Err(invalid(
+                "Facebook standard video requires an actual public HTTPS media URL",
+            ));
+        }
+        match checkpoint_stage(cp) {
+            "" => Ok(Step::Checkpoint(json!({
+                "stage":"fb_video_public", "expires_after_secs":3600
+            }))),
+            "fb_video_public" => {
+                let url = format!(
+                    "https://graph.facebook.com/v23.0/{}/videos",
+                    id_path(&c.identity.id)
+                );
+                let v = self
+                    .send(
+                        self.request(Method::POST, &url, Some(&c.tokens.access_token))?
+                            .form(&[
+                                ("file_url", public_media(&p.media[0])?),
+                                ("published", "true"),
+                                ("description", p.text.as_str()),
+                                ("title", p.title.as_str()),
+                            ]),
+                        true,
+                    )
+                    .await
+                    .map_err(|_| error(FailureKind::Uncertain,
+                        "Facebook may have accepted the video. Inspect its outcome before retrying."))?;
+                let id = field(&v, "id").map_err(|_| error(FailureKind::Uncertain,
+                    "Facebook did not return a usable video ID. Inspect its outcome before retrying."))?;
+                facebook_video_id(&json!({"video_id":id}))?;
+                Ok(Step::Checkpoint(facebook_checkpoint(
+                    "fb_video_processing",
+                    &id,
+                )))
+            }
+            "fb_video_processing" => {
+                let id = facebook_video_id(cp)?;
+                self.facebook_reel_status(c, &id, cp).await
+            }
+            _ => Err(error(
+                FailureKind::Uncertain,
+                "Invalid Facebook video checkpoint; inspect the provider before retrying",
+            )),
+        }
     }
 
     async fn publish_facebook_reel(
@@ -166,6 +224,11 @@ impl Adapter {
         id: &str,
         cp: &Value,
     ) -> Result<Step> {
+        let format = if checkpoint_stage(cp) == "fb_video_processing" {
+            "video"
+        } else {
+            "Reel"
+        };
         let v = self
             .send(
                 self.request(
@@ -180,7 +243,7 @@ impl Adapter {
         if v["id"].as_str() != Some(id) {
             return Err(error(
                 FailureKind::Uncertain,
-                "Facebook returned a different Reel status identifier",
+                &format!("Facebook returned a different {format} status identifier"),
             ));
         }
         let status = &v["status"];
@@ -198,12 +261,15 @@ impl Adapter {
         {
             return Err(error(
                 FailureKind::Uncertain,
-                "Facebook reported Reel processing or publishing failure; inspect the outcome before retrying",
+                &format!(
+                    "Facebook reported {format} processing or publishing failure; inspect the outcome before retrying"
+                ),
             ));
         }
         if publishing == "complete"
             && status["publishing_phase"]["publish_status"] == "published"
             && status["video_status"] == "ready"
+            && status["uploading_phase"]["status"] == "complete"
             && status["processing_phase"]["status"] == "complete"
         {
             return Ok(published(
@@ -227,7 +293,9 @@ impl Adapter {
             if polls >= 9 {
                 return Err(error(
                     FailureKind::Uncertain,
-                    "Facebook Reel processing did not finish within the supported polling window. Inspect its outcome before retrying.",
+                    &format!(
+                        "Facebook {format} processing did not finish within the supported polling window. Inspect its outcome before retrying."
+                    ),
                 ));
             }
             let mut wait = cp.clone();
@@ -237,7 +305,9 @@ impl Adapter {
         }
         Err(error(
             FailureKind::Uncertain,
-            "Facebook has not confirmed the Reel was published; inspect its status before retrying",
+            &format!(
+                "Facebook has not confirmed the {format} was published; inspect its status before retrying"
+            ),
         ))
     }
 }

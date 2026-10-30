@@ -53,7 +53,7 @@ pub(crate) fn decorate_channel(mut channel: Value) -> Value {
     // Refresh local format descriptions for existing direct channels without
     // changing their stored grants or requiring an account reconnect.
     let provider = channel["provider"].as_str().unwrap_or("").to_owned();
-    if matches!(provider.as_str(), "bluesky" | "x")
+    if matches!(provider.as_str(), "bluesky" | "x" | "facebook" | "instagram")
         && channel["capabilities"]["execution"] == "direct"
         && let Some(capability) = beweft_providers::capabilities()
             .into_iter()
@@ -61,6 +61,35 @@ pub(crate) fn decorate_channel(mut channel: Value) -> Value {
     {
         channel["capabilities"]["formats"] = json!(capability.formats);
         channel["capabilities"]["reason"] = json!(capability.reason);
+        if matches!(capability.id, "facebook" | "instagram") {
+            let action = if capability.id == "facebook" {
+                "video"
+            } else {
+                "story"
+            };
+            let permissions = &mut channel["capabilities"]["permissions"];
+            if !permissions.is_object() {
+                *permissions = json!({"source":"provider_did_not_report_scopes", "reported_scopes":[], "actions":{}});
+            }
+            let known = permissions["source"] == "provider_token_response"
+                && permissions["reported_scopes"]
+                    .as_array()
+                    .is_some_and(|values| values.iter().all(Value::is_string));
+            let scopes: Vec<String> = permissions["reported_scopes"]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !permissions["actions"].is_object() {
+                permissions["actions"] = json!({});
+            }
+            permissions["actions"][action] =
+                beweft_providers::action_permission(capability.id, action, &scopes, known);
+        }
     }
     crate::manual_channels::decorate(channel)
 }
