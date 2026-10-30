@@ -29,6 +29,7 @@ fn required_scopes(provider: &str, action: &str) -> Vec<&'static str> {
         ("instagram", "metrics") => vec!["instagram_business_basic"],
         ("threads", "publish" | "media") => vec!["threads_content_publish"],
         ("threads", "inbox") => vec!["threads_read_replies"],
+        ("threads", "reply") => vec!["threads_manage_replies"],
         ("threads", "metrics") => vec!["threads_manage_insights"],
         ("mastodon", "publish" | "media" | "reply") => vec!["write"],
         ("mastodon", "metrics" | "inbox") => vec!["read"],
