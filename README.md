@@ -1,5 +1,10 @@
 # beweft
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/backend-Rust%2FAxum-orange)](crates)
+[![React](https://img.shields.io/badge/web-React%2FTailwind-61dafb)](web)
+[![Self-hosted](https://img.shields.io/badge/deployment-self--hosted-green)](docs/self-hosting.md)
+
 beweft is an open-source, self-hosted social media manager in active development.
 It gives one owner a workspace for multiple brands and their own social
 connections, with an original unicorn identity.

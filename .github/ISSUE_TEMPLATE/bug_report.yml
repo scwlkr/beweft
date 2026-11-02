@@ -1,0 +1,26 @@
+name: Bug report
+description: Report a reproducible defect in beweft
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: beweft version/image, browser, deployment method
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues
+        - label: I did not include credentials or private data
