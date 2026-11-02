@@ -62,6 +62,14 @@ example workspace:
 Run `./project --help` for the complete command list. Backup, restore, upgrade
 and recovery steps are in [self-hosting.md](docs/self-hosting.md).
 
+## Roadmap
+
+- LinkedIn organization publishing opt-in
+- Pinterest reads and expanded formats
+- Threads/Bluesky replies depth
+- Analytics and unified inbox depth
+- Responsive/mobile polish
+
 ## Capability snapshot
 
 | Area | Status |
