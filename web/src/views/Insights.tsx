@@ -159,10 +159,8 @@ export function Insights({
                     ))}
                   </div>
                 ) : (
-                  <Empty title="Real insight starts with real data">
-                    When a supported provider supplies metrics, they appear here
-                    with their source and coverage. Unavailable metrics are
-                    never replaced with made-up numbers.
+                  <Empty title="No provider metrics yet">
+                    When a supported provider supplies metrics, they appear here with their source and coverage. Unavailable metrics are never replaced with made-up numbers.
                   </Empty>
                 )}
               </>
