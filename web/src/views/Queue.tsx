@@ -176,7 +176,14 @@ export function Queue({
             variant="ghost"
             onClick={() => setSelectedIds(new Set())}
           >
-            Clear
+            Clear selection
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setSelectedIds(new Set())}
+          >
+            Cancel selected
           </Button>
         </div>
       )}
