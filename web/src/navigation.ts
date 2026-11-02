@@ -2,6 +2,7 @@ import {
   BarChart3,
   CalendarDays,
   FileText,
+  Home,
   Image,
   Inbox,
   Layers3,
@@ -10,6 +11,7 @@ import {
   Settings2,
 } from "lucide-react";
 export type Route =
+  | "home"
   | "queue"
   | "calendar"
   | "ideas"
@@ -25,6 +27,7 @@ export const routes: {
   icon: typeof Layers3;
   group?: boolean;
 }[] = [
+  { id: "home", name: "Home", icon: Home },
   { id: "queue", name: "Publishing", icon: Layers3 },
   { id: "calendar", name: "Calendar", icon: CalendarDays },
   { id: "ideas", name: "Ideas", icon: Lightbulb },
@@ -36,6 +39,10 @@ export const routes: {
   { id: "settings", name: "Settings", icon: Settings2 },
 ];
 export const titles: Record<Route, [string, string]> = {
+  home: [
+    "Welcome back",
+    "See what's coming up and jump right into your next post.",
+  ],
   queue: [
     "Your publishing rhythm",
     "A clear view of what’s next, and what needs a little care.",
@@ -68,5 +75,5 @@ export const titles: Record<Route, [string, string]> = {
   ],
 };
 export const routeFromHash = (): Route =>
-  routes.find((r) => r.id === location.hash.slice(1))?.id ?? "queue";
+  routes.find((r) => r.id === location.hash.slice(1))?.id ?? "home";
 export const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;

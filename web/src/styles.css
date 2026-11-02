@@ -435,6 +435,156 @@ code {
   align-items: center;
   gap: 16px;
 }
+
+.home-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.home-hero {
+  background: radial-gradient(circle at top left, rgba(168, 85, 247, 0.18), transparent 55%),
+    var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: clamp(24px, 4vw, 40px);
+  box-shadow: var(--shadow-soft);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 24px;
+}
+
+.home-hero h2 {
+  margin: 12px 0 10px;
+  font-family: "Fraunces", serif;
+  font-size: clamp(28px, 4vw, 44px);
+}
+
+.home-hero p {
+  margin: 0 0 18px;
+  color: var(--muted-foreground);
+  max-width: 520px;
+}
+
+.home-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.home-cards {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.home-card {
+  grid-column: 1 / -1;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-soft);
+}
+
+@media (min-width: 1080px) {
+  .home-card:nth-child(1),
+  .home-card:nth-child(2) {
+    grid-column: span 6;
+  }
+  .home-card:nth-child(3),
+  .home-card:nth-child(4) {
+    grid-column: span 6;
+  }
+}
+
+.home-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 10px;
+}
+
+.home-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+}
+
+.home-card-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.home-empty {
+  margin: 0;
+  color: var(--muted-foreground);
+}
+
+.home-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.home-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  gap: 12px;
+}
+
+.home-list-item-clickable {
+  cursor: pointer;
+}
+
+.home-list-item-clickable:hover {
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+}
+
+.home-list-title {
+  font-weight: 600;
+}
+
+.home-list-meta {
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.home-list-arrow {
+  color: var(--muted-foreground);
+}
+
+.home-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.home-stat {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.home-stat-value {
+  font-size: clamp(28px, 4vw, 40px);
+  font-family: "Fraunces", serif;
+}
+
+.home-stat-label {
+  color: var(--muted-foreground);
+}
 .timezone {
   display: flex;
   align-items: center;

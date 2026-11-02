@@ -26,6 +26,7 @@ import { Calendar } from "./views/Calendar";
 import { ConnectionFlow } from "./views/ConnectionFlow";
 import { Connections } from "./views/Connections";
 import { Drafts } from "./views/Drafts";
+import { Home } from "./views/Home";
 import { Ideas } from "./views/Ideas";
 import { Insights } from "./views/Insights";
 import { MediaDetails, MediaLibrary } from "./views/MediaLibrary";
@@ -169,7 +170,7 @@ export default function App() {
                 </h1>
                 <p>{titles[route][1]}</p>
               </div>
-              {brand && ["queue", "calendar", "drafts"].includes(route) && (
+              {brand && ["home", "queue", "calendar", "drafts"].includes(route) && (
                 <Button onClick={() => setComposer(null)}>
                   <Plus size={18} />
                   Create post
@@ -354,26 +355,41 @@ export default function App() {
                 </Empty>
               ) : (
                 <>
-                  {["queue", "drafts", "ideas", "media"].includes(route) && (
-                    <div className="search-row">
-                      <label className="search-box">
-                        <Search size={17} />
-                        <input
-                          aria-label={`Search ${route}`}
-                          placeholder={`Search ${route === "queue" ? "posts" : route}…`}
-                          value={search}
-                          onChange={(e) => setSearch(e.target.value)}
-                        />
-                        {search && (
-                          <button
-                            aria-label="Clear search"
-                            onClick={() => setSearch("")}
-                          >
-                            <X size={15} />
-                          </button>
-                        )}
-                      </label>
-                    </div>
+                  {!["home"].includes(route) &&
+                    ["queue", "drafts", "ideas", "media"].includes(route) && (
+                      <div className="search-row">
+                        <label className="search-box">
+                          <Search size={17} />
+                          <input
+                            aria-label={`Search ${route}`}
+                            placeholder={`Search ${route === "queue" ? "posts" : route}…`}
+                            value={search}
+                            onChange={(e) => setSearch(e.target.value)}
+                          />
+                          {search && (
+                            <button
+                              aria-label="Clear search"
+                              onClick={() => setSearch("")}
+                            >
+                              <X size={15} />
+                            </button>
+                          )}
+                        </label>
+                      </div>
+                    )}
+                  {route === "home" && brand && (
+                    <Home
+                      brand={brand}
+                      channels={channels}
+                      posts={posts}
+                      publications={publications}
+                      media={media}
+                      onCompose={(initial) => setComposer(initial ?? null)}
+                      onGo={(r) => {
+                        go(r as any);
+                        location.hash = "#" + r;
+                      }}
+                    />
                   )}
                   {route === "queue" && (
                     <Queue
