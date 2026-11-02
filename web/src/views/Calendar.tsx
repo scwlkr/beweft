@@ -1,6 +1,7 @@
 import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
-import { useState } from "react";
-import { type Publication } from "../api";
+import { useEffect, useState } from "react";
+import { z } from "zod";
+import { api, ScheduleSchema, type Publication, type Schedule } from "../api";
 import { Network } from "../components/brand";
 import { State, Time } from "../components/shared";
 import { Button } from "../components/ui/button";
@@ -11,17 +12,29 @@ type Action = (
   message?: string,
 ) => Promise<boolean>;
 const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 export function Calendar({
   publications,
   onCompose,
+  channels,
 }: {
   publications: Publication[];
   onCompose: (date: string) => void;
+  channels?: any[];
 }) {
   const [month, setMonth] = useState(
     () => new Date(new Date().getFullYear(), new Date().getMonth(), 1),
   );
   const [selected, setSelected] = useState<string | null>(null);
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+
+  useEffect(() => {
+    const ch = channels?.[0]?.id;
+    if (!ch) return;
+    api(`/schedules?channel_id=${ch}`, z.array(ScheduleSchema))
+      .then(setSchedules)
+      .catch(() => setSchedules([]));
+  }, [channels]);
   const start = new Date(month);
   start.setDate(1 - ((start.getDay() + 6) % 7));
   const days = Array.from({ length: 42 }, (_, i) => {
@@ -90,6 +103,11 @@ export function Calendar({
           const items = visible.filter(
             (p) => dateKey(new Date(p.scheduled_at)) === dateKey(d),
           );
+          const dow = d.getDay(); // 0 Sun
+          const jsDow = dow === 0 ? 7 : dow;
+          const slots = schedules
+            .filter((s) => s.days.includes(jsDow))
+            .map((s) => s.time.slice(0, 5));
           return (
             <button
               key={dateKey(d)}
@@ -98,6 +116,16 @@ export function Calendar({
               aria-label={`${d.toLocaleDateString()}, ${items.length} posts`}
             >
               <span className="day-number">{d.getDate()}</span>
+              {slots.length > 0 && d.getMonth() === month.getMonth() && (
+                <div className="calendar-slots">
+                  {slots.slice(0, 2).map((t) => (
+                    <span key={t} className="calendar-slot">
+                      {t}
+                    </span>
+                  ))}
+                  {slots.length > 2 && <span className="calendar-slot">+{slots.length - 2}</span>}
+                </div>
+              )}
               {items.slice(0, 3).map((p) => (
                 <div className={`calendar-post calendar-${p.state}`} key={p.id}>
                   <span>

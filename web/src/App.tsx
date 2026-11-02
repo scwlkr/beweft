@@ -413,6 +413,7 @@ export default function App() {
                   {route === "calendar" && (
                     <Calendar
                       publications={publications}
+                      channels={channels}
                       onCompose={(date) => setComposer({ composeDate: date })}
                     />
                   )}
