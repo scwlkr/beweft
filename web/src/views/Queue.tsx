@@ -52,11 +52,15 @@ export function Queue({
 }) {
   const [view, setView] = useState("upcoming");
   const [channel, setChannel] = useState("all");
+  const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<Publication | null>(null);
   const history = ["published", "fixture_complete", "canceled"];
   const filtered = publications.filter(
     (p) =>
       (channel === "all" || p.channel_id === channel) &&
+      (search === "" ||
+        p.payload.text.toLowerCase().includes(search.toLowerCase()) ||
+        (p.payload.title ?? "").toLowerCase().includes(search.toLowerCase())) &&
       (view === "history"
         ? history.includes(p.state)
         : view === "attention"
@@ -128,6 +132,13 @@ export function Queue({
             </option>
           ))}
         </select>
+        <input
+          type="search"
+          placeholder="Search posts…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          aria-label="Search posts"
+        />
       </div>
       {filtered.length === 0 ? (
         <Empty
