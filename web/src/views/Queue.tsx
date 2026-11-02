@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, CalendarDays, Image, Plus } from "lucide-react";
+import { ArrowDown, ArrowUp, CalendarDays, Copy, Image, Plus } from "lucide-react";
 import { useState } from "react";
 import { z } from "zod";
 import {
@@ -172,6 +172,14 @@ export function Queue({
                 </div>
                 {p.payload.title && <h3>{p.payload.title}</h3>}
                 <p className="post-copy">{p.payload.text}</p>
+                <button
+                  type="button"
+                  className="text-link"
+                  onClick={() => navigator.clipboard?.writeText(p.payload.text)}
+                  title="Copy post text"
+                >
+                  <Copy size={14} /> Copy text
+                </button>
                 {p.payload.media_ids.length > 0 && (
                   <div className="post-attachments">
                     {p.payload.media_ids.map((id) => {
