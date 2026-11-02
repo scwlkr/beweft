@@ -38,17 +38,21 @@ export function Home({ brand, channels, posts, publications, media, onCompose, o
     <div className="home-grid">
       <section className="home-hero">
         <div>
-          <div className="eyebrow">QUICK START</div>
+          <div className="eyebrow">HOME</div>
           <h2>What's on deck for {brand.name}</h2>
-          <p>Plan ahead, stay consistent, and publish with confidence.</p>
+          <p>Plan ahead, stay consistent, and publish with confidence across all your channels.</p>
           <div className="home-hero-actions">
             <Button onClick={() => onCompose()}>
               <Plus size={18} />
-              New post
+              Create post
             </Button>
             <Button variant="secondary" onClick={() => onGo("calendar")}>
               <CalendarDays size={18} />
               View calendar
+            </Button>
+            <Button variant="ghost" onClick={() => onGo("ideas")}>
+              <Lightbulb size={18} />
+              Capture idea
             </Button>
           </div>
         </div>
