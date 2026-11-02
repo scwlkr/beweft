@@ -53,19 +53,25 @@ export function Queue({
   const [view, setView] = useState("upcoming");
   const [channel, setChannel] = useState("all");
   const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<"newest" | "oldest">("newest");
   const [selected, setSelected] = useState<Publication | null>(null);
   const history = ["published", "fixture_complete", "canceled"];
-  const filtered = publications.filter(
-    (p) =>
-      (channel === "all" || p.channel_id === channel) &&
-      (search === "" ||
-        p.payload.text.toLowerCase().includes(search.toLowerCase()) ||
-        (p.payload.title ?? "").toLowerCase().includes(search.toLowerCase())) &&
-      (view === "history"
+  const filtered = publications
+    .filter(
+      (p) =>
+        (channel === "all" || p.channel_id === channel) &&
+        (search === "" ||
+          p.payload.text.toLowerCase().includes(search.toLowerCase()) ||
+          (p.payload.title ?? "").toLowerCase().includes(search.toLowerCase())) &&
+        (view === "history"
         ? history.includes(p.state)
         : view === "attention"
           ? ["failed", "uncertain", "manual_required"].includes(p.state)
           : !history.includes(p.state)),
+  ).sort((a, b) =>
+    sort === "newest"
+      ? b.scheduled_at.localeCompare(a.scheduled_at)
+      : a.scheduled_at.localeCompare(b.scheduled_at),
   );
   const reorder = async (p: Publication, direction: number) => {
     const queue = allPublications
@@ -131,6 +137,10 @@ export function Queue({
               {c.name}
             </option>
           ))}
+        </select>
+        <select value={sort} onChange={(e) => setSort(e.target.value as "newest" | "oldest")} aria-label="Sort posts">
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
         </select>
         <input
           type="search"
