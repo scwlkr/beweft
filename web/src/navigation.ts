@@ -28,7 +28,7 @@ export const routes: {
   group?: boolean;
 }[] = [
   { id: "home", name: "Home", icon: Home },
-  { id: "queue", name: "Publishing", icon: Layers3 },
+  { id: "queue", name: "Queue", icon: Layers3 },
   { id: "calendar", name: "Calendar", icon: CalendarDays },
   { id: "ideas", name: "Ideas", icon: Lightbulb },
   { id: "drafts", name: "Drafts", icon: FileText },
