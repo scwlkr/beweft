@@ -1186,6 +1186,55 @@ code {
   flex-direction: column;
   gap: 13px;
 }
+
+.schedule-options {
+  display: grid;
+  grid-template-columns: repeat(1, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (min-width: 640px) {
+  .schedule-options {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.schedule-option {
+  border: 1px solid var(--border, var(--line));
+  background: var(--background);
+  border-radius: var(--radius-md, 12px);
+  padding: 12px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+.schedule-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.schedule-option.active {
+  border-color: color-mix(in srgb, var(--primary) 70%, transparent);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 30%, transparent);
+}
+
+.schedule-option:hover:not(:disabled):not(.active) {
+  border-color: color-mix(in srgb, var(--foreground) 20%, transparent);
+}
+
+.schedule-option-title {
+  font-weight: 600;
+}
+
+.schedule-option-desc {
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
 .preview-card {
   border: 1px solid var(--line);
   border-radius: 12px;

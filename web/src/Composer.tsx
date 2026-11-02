@@ -341,19 +341,47 @@ export function Composer({
           )}
           <div className="schedule-choice">
             <Field label="When should this go out?">
-              <select
-                value={mode}
-                onChange={(e) => setMode(e.target.value as typeof mode)}
-                disabled={
-                  correctionBusy ||
-                  correction.kind === "loading" ||
-                  correction.kind === "error"
-                }
-              >
-                <option value="draft">Save as draft</option>
-                <option value="queue">Next available queue slot</option>
-                <option value="exact">Choose a date and time</option>
-              </select>
+              <div className="schedule-options">
+                <button
+                  type="button"
+                  className={`schedule-option ${mode === "draft" ? "active" : ""}`}
+                  onClick={() => setMode("draft")}
+                  disabled={
+                    correctionBusy ||
+                    correction.kind === "loading" ||
+                    correction.kind === "error"
+                  }
+                >
+                  <div className="schedule-option-title">Save as draft</div>
+                  <div className="schedule-option-desc">Keep it private until you're ready</div>
+                </button>
+                <button
+                  type="button"
+                  className={`schedule-option ${mode === "queue" ? "active" : ""}`}
+                  onClick={() => setMode("queue")}
+                  disabled={
+                    correctionBusy ||
+                    correction.kind === "loading" ||
+                    correction.kind === "error"
+                  }
+                >
+                  <div className="schedule-option-title">Add to queue</div>
+                  <div className="schedule-option-desc">Publish in next available slot</div>
+                </button>
+                <button
+                  type="button"
+                  className={`schedule-option ${mode === "exact" ? "active" : ""}`}
+                  onClick={() => setMode("exact")}
+                  disabled={
+                    correctionBusy ||
+                    correction.kind === "loading" ||
+                    correction.kind === "error"
+                  }
+                >
+                  <div className="schedule-option-title">Set date and time</div>
+                  <div className="schedule-option-desc">Schedule for a specific moment</div>
+                </button>
+              </div>
             </Field>
             {mode === "exact" && (
               <Field
