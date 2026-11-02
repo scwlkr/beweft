@@ -49,8 +49,8 @@ export const titles: Record<Route, [string, string]> = {
   ],
   calendar: ["The bigger picture", "Make room for your next great idea."],
   ideas: [
-    "A place for every spark",
-    "Catch it now. Shape it when you’re ready.",
+    "Content planner",
+    "Capture ideas, organize by groups, and turn them into posts.",
   ],
   drafts: ["Work in progress", "Good things take a few drafts."],
   media: [
