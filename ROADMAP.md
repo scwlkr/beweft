@@ -19,6 +19,7 @@ This roadmap tracks progress toward Buffer-level functionality. It is continuous
 - [x] **Templates copy polish** (Nov 2 2026) - Templates library naming
 - [x] **Calendar quick actions** (Nov 2 2026) - New post button in toolbar
 - [x] **Calendar posting slots visualization** (Nov 2 2026) - Show channel posting schedule times on calendar
+- [x] **Analytics/Insights copy polish** (Nov 2 2026) - Clearer labels and messaging
 
 ## High Priority (Remaining)
 - [ ] **Content Planner ideas flow** - Stronger idea-to-post workflow with tags/groups
