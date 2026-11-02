@@ -52,15 +52,26 @@ export function Queue({
 }) {
   const [view, setView] = useState("upcoming");
   const [channel, setChannel] = useState("all");
+  const [status, setStatus] = useState("all");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<"newest" | "oldest">("newest");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Publication | null>(null);
   const history = ["published", "fixture_complete", "canceled"];
+  const statusOptions = [
+    { value: "all", label: "All statuses" },
+    { value: "queued", label: "Queued" },
+    { value: "sending", label: "Sending" },
+    { value: "published", label: "Published" },
+    { value: "failed", label: "Failed" },
+    { value: "uncertain", label: "Uncertain" },
+    { value: "manual_required", label: "Needs handoff" },
+  ];
   const filtered = publications
     .filter(
       (p) =>
         (channel === "all" || p.channel_id === channel) &&
+        (status === "all" || p.state === status) &&
         (search === "" ||
           p.payload.text.toLowerCase().includes(search.toLowerCase()) ||
           (p.payload.title ?? "").toLowerCase().includes(search.toLowerCase())) &&
@@ -136,6 +147,13 @@ export function Queue({
           {channels.map((c) => (
             <option key={c.id} value={c.id}>
               {c.name}
+            </option>
+          ))}
+        </select>
+        <select value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Filter by status">
+          {statusOptions.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
             </option>
           ))}
         </select>
