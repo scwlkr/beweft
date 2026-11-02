@@ -5,14 +5,16 @@ This roadmap tracks progress toward Buffer-level functionality. It is continuous
 ## Completed
 - [x] **Home dashboard** (Nov 2 2026) - Buffer-style home with upcoming posts, latest drafts, quick actions, and week overview
 - [x] **Navigation refresh** - Added Home as default route with cleaner organization
+- [x] **Improved scheduling UX** (Nov 2 2026) - Card-style options for draft/queue/schedule like Buffer
+- [x] **Queue labels polish** (Nov 2 2026) - Queue/Sent terminology
+- [x] **Content Planner copy** (Nov 2 2026) - Ideas renamed to Content planner
 
 ## In Progress
-- [ ] **Improved scheduling UX** - Make "Next available", "Prioritize", and "Set date/time" more prominent like Buffer
 - [ ] **Calendar enhancements** - Drag-and-drop, better month/week views, posting slots visualization
 - [ ] **Queue improvements** - Better filtering, bulk actions, clearer status indicators
 
 ## High Priority (Remaining)
-- [ ] **Content Planner ideas flow** - Stronger idea-to-post workflow with tags/groups (already have ideas, enhance UX)
+- [ ] **Content Planner ideas flow** - Stronger idea-to-post workflow with tags/groups
 - [ ] **Community/Inbox polish** - Make inbox more prominent and easier to use
 - [ ] **Analytics/Insights enhancements** - Add more visualizations, better empty states, export options
 - [ ] **Templates library** - Improve discoverability and usage
