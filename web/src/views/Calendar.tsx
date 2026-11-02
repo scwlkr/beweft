@@ -111,7 +111,7 @@ export function Calendar({
         })}
       </div>
       <p className="muted calendar-hint">
-        Select a day to see its posts or schedule something new. Dates use your browser’s timezone.
+        Select a day to see its posts or schedule something new. Click a day to add posts. Dates use your browser’s timezone.
       </p>
       {selected && (
         <Dialog
