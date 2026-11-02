@@ -53,8 +53,8 @@ export function PostPreview({
         <CalendarClock size={19} />
         <p>
           {channel?.provider === "manual"
-            ? "Manual channels become a handoff task when due. You publish in the network app, then record the outcome here."
-            : "Publishing formats and account requirements vary by channel."}
+            ? "Manual channels become a handoff task when due. Publish in the network app and record the outcome here."
+            : "Platform previews are approximate. Actual rendering may vary by network and format."}
         </p>
       </div>
     </aside>
