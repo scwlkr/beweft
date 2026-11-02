@@ -55,6 +55,19 @@ example workspace:
 Run `./project --help` for the complete command list. Backup, restore, upgrade
 and recovery steps are in [self-hosting.md](docs/self-hosting.md).
 
+## Capability snapshot
+
+| Area | Status |
+| --- | --- |
+| Owner auth + multiple brands | ✅ |
+| Drafts, templates, ideas | ✅ |
+| Media library + descriptions | ✅ |
+| Queue + exact scheduling | ✅ |
+| Manual handoff + recovery | ✅ |
+| X, Bluesky, Facebook, Instagram, Threads, LinkedIn member | ✅ formats in progress |
+| Analytics / inbox | Partial, honest availability |
+| Live provider verification | Not yet verified |
+
 No live social account or publication has been verified. Fixture results are
 kept distinct from real provider outcomes. The [API contract](docs/api-contract.md)
 and [provider research](docs/research/provider-capabilities.md) describe current
