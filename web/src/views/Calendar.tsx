@@ -72,7 +72,13 @@ export function Calendar({
             Today
           </Button>
         </div>
-        <span className="muted">{zone}</span>
+        <div className="calendar-toolbar-actions">
+          <Button size="sm" onClick={() => onCompose(dateKey(new Date()))}>
+            <Plus size={16} />
+            New post
+          </Button>
+          <span className="muted">{zone}</span>
+        </div>
       </div>
       <div className="calendar-grid">
         {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => (
