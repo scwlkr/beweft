@@ -2252,7 +2252,8 @@ code {
     font-size: 11px;
     padding: 8px 10px;
   }
-  .view-toolbar select {
+  .view-toolbar select,
+  .view-toolbar input[type="search"] {
     max-width: none;
     width: 100%;
   }
