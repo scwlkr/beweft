@@ -106,7 +106,7 @@ export function Queue({
             aria-pressed={view === "upcoming"}
             onClick={() => setView("upcoming")}
           >
-            Upcoming{" "}
+            Queue{" "}
             <span>
               {publications.filter((p) => !history.includes(p.state)).length}
             </span>
@@ -121,7 +121,7 @@ export function Queue({
             aria-pressed={view === "history"}
             onClick={() => setView("history")}
           >
-            History
+            Sent
           </button>
         </div>
         <label className="sr-only" htmlFor="channel-filter">
