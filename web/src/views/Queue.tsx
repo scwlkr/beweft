@@ -54,6 +54,7 @@ export function Queue({
   const [channel, setChannel] = useState("all");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<"newest" | "oldest">("newest");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Publication | null>(null);
   const history = ["published", "fixture_complete", "canceled"];
   const filtered = publications
@@ -150,6 +151,17 @@ export function Queue({
           aria-label="Search posts"
         />
       </div>
+      {selectedIds.size > 0 && (
+        <div className="bulk-actions">
+          <span>{selectedIds.size} selected</span>
+          <Button
+            variant="ghost"
+            onClick={() => setSelectedIds(new Set())}
+          >
+            Clear
+          </Button>
+        </div>
+      )}
       {filtered.length === 0 ? (
         <Empty
           title={
@@ -178,6 +190,19 @@ export function Queue({
         <div className="publication-list">
           {filtered.map((p) => (
             <article className="publication-card" key={p.id}>
+              <label className="publication-select">
+                <input
+                  type="checkbox"
+                  checked={selectedIds.has(p.id)}
+                  onChange={(e) => {
+                    const next = new Set(selectedIds);
+                    if (e.target.checked) next.add(p.id);
+                    else next.delete(p.id);
+                    setSelectedIds(next);
+                  }}
+                  aria-label="Select post"
+                />
+              </label>
               <div className="publication-time">
                 <CalendarDays size={16} />
                 <Time value={p.scheduled_at} />
