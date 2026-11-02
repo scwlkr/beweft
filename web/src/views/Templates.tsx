@@ -190,7 +190,7 @@ export function Templates({
     <div className="form-stack">
       <div className="view-toolbar">
         <div>
-          <h2>Reusable templates</h2>
+          <h2>Templates library</h2>
           <p className="muted">
             Save a starting point, then make an unscheduled draft whenever you
             need it.
