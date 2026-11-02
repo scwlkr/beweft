@@ -91,10 +91,9 @@ export function Insights({
             {kind === "analytics" && "summary" in result && (
               <>
                 <div className="section-heading">
-                  <h2>Your publishing activity</h2>
+                  <h2>Publishing activity</h2>
                   <p>
-                    These are local workflow counts, not social network reach or
-                    engagement.
+                    Local workflow counts. Provider metrics appear when supported connections sync.
                   </p>
                 </div>
                 <div className="activity-counts">
