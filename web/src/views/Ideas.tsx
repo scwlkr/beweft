@@ -444,11 +444,11 @@ export function Ideas({
                           )}
                         </small>
                         <Button
-                          variant="ghost"
+                          variant="secondary"
                           size="sm"
                           onClick={() => onCompose(idea)}
                         >
-                          Create post <ArrowUpRight size={15} />
+                          Turn into post <ArrowUpRight size={15} />
                         </Button>
                       </div>
                     </article>
