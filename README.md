@@ -6,6 +6,13 @@
 [![Self-hosted](https://img.shields.io/badge/deployment-self--hosted-green)](docs/self-hosting.md)
 
 beweft is an open-source, self-hosted social media manager in active development.
+
+## Why beweft
+
+- **Self-hosted & private**: your accounts, media and analytics stay on your server.
+- **Multi-brand workspaces** with per-channel schedules and recovery.
+- **Honest capabilities**: unavailable provider data is shown as unavailable, never faked.
+- **Agent-friendly**: documented API plus scoped Rust CLI/MCP.
 It gives one owner a workspace for multiple brands and their own social
 connections, with an original unicorn identity.
 
