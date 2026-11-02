@@ -15,7 +15,9 @@ This roadmap tracks progress toward Buffer-level functionality. It is continuous
 
 ## Completed (Recent)
 - [x] **Queue status filtering** (Nov 2 2026) - Filter by queued/sending/published/failed/uncertain/needs handoff
+- [x] **Queue bulk actions UI** (Nov 2 2026) - Clearer selection and actions
 - [x] **Templates copy polish** (Nov 2 2026) - Templates library naming
+- [x] **Calendar quick actions** (Nov 2 2026) - New post button in toolbar
 
 ## High Priority (Remaining)
 - [ ] **Content Planner ideas flow** - Stronger idea-to-post workflow with tags/groups
