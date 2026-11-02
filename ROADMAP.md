@@ -13,11 +13,14 @@ This roadmap tracks progress toward Buffer-level functionality. It is continuous
 - [ ] **Calendar enhancements** - Drag-and-drop, better month/week views, posting slots visualization
 - [ ] **Queue improvements** - Better filtering, bulk actions, clearer status indicators
 
+## Completed (Recent)
+- [x] **Queue status filtering** (Nov 2 2026) - Filter by queued/sending/published/failed/uncertain/needs handoff
+- [x] **Templates copy polish** (Nov 2 2026) - Templates library naming
+
 ## High Priority (Remaining)
 - [ ] **Content Planner ideas flow** - Stronger idea-to-post workflow with tags/groups
 - [ ] **Community/Inbox polish** - Make inbox more prominent and easier to use
 - [ ] **Analytics/Insights enhancements** - Add more visualizations, better empty states, export options
-- [ ] **Templates library** - Improve discoverability and usage
 - [ ] **Mobile responsiveness** - Better mobile composer and navigation
 - [ ] **Post preview improvements** - More accurate platform previews
 - [ ] **Media library UX** - Better organization, tagging, search
