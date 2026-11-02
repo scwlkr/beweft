@@ -93,7 +93,7 @@ export function Insights({
                 <div className="section-heading">
                   <h2>Publishing activity</h2>
                   <p>
-                    Local workflow counts. Provider metrics appear when supported connections sync.
+                    Local workflow counts. Provider metrics and community data appear when supported connections sync.
                   </p>
                 </div>
                 <div className="activity-counts">
