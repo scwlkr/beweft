@@ -22,7 +22,7 @@ This roadmap tracks progress toward Buffer-level functionality. It is continuous
 - [x] **Analytics/Insights copy polish** (Nov 2 2026) - Clearer labels and messaging
 
 ## High Priority (Remaining)
-- [ ] **Content Planner ideas flow** - Stronger idea-to-post workflow with tags/groups
+- [x] **Content Planner ideas flow** (Nov 2 2026) - Clearer "Turn into post" action
 - [ ] **Community/Inbox polish** - Make inbox more prominent and easier to use
 - [ ] **Analytics/Insights enhancements** - Add more visualizations, better empty states, export options
 - [ ] **Mobile responsiveness** - Better mobile composer and navigation
