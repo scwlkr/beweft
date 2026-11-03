@@ -27,7 +27,7 @@ This roadmap tracks progress toward Buffer-level functionality. It is continuous
 - [x] **Analytics/Insights enhancements** (Nov 2 2026) - Better empty states and messaging
 - [x] **Post preview improvements** (Nov 2 2026) - Clearer preview messaging
 - [x] **Mobile responsiveness** (Nov 2 2026) - Better mobile layouts for composer/toolbar
-- [ ] **Media library UX** - Better organization, tagging, search
+- [x] **Media library UX** (Nov 2 2026) - Search and filter by type/name/description
 
 ## Nice to Have
 - [ ] **AI assistance** - Post suggestions, caption improvements
