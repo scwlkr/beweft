@@ -1,5 +1,7 @@
-import { ArrowRight, CalendarDays, FileText, Lightbulb, Plus, Send } from "lucide-react";
+import { AlertTriangle, ArrowRight, CalendarDays, FileText, Lightbulb, Plus, Send } from "lucide-react";
 import { Button } from "../components/ui/button";
+import { State } from "../components/shared";
+import { Network } from "../components/brand";
 import type { Brand, Channel, Idea, Post, Publication } from "../api";
 import { zone } from "../navigation";
 
@@ -24,7 +26,19 @@ function formatTime(ts?: string | null) {
   }
 }
 
+function startOfWeek(d: Date) {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const day = (x.getDay() + 6) % 7;
+  x.setDate(x.getDate() - day);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+const dayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const dayKey = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
 export function Home({ brand, channels, posts, publications, media, ideas = [], onCompose, onGo }: Props) {
+  const attention = publications.filter((p) => ["failed", "uncertain", "manual_required"].includes(p.state));
   const queued = publications
     .filter((p) => !["published", "canceled", "fixture_complete", "rejected", "failed_terminal"].includes(p.state))
     .sort((a, b) => (a.scheduled_at || a.created_at).localeCompare(b.scheduled_at || b.created_at))
@@ -34,6 +48,15 @@ export function Home({ brand, channels, posts, publications, media, ideas = [], 
     .sort((a: any, b: any) => (b.updated_at || b.created_at).localeCompare(a.updated_at || a.created_at))
     .slice(0, 4);
   const ideaCount = ideas.length;
+  const weekStart = startOfWeek(new Date());
+  const weekDays = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(weekStart);
+    d.setDate(weekStart.getDate() + i);
+    return d;
+  });
+  const weekCounts = weekDays.map(
+    (d) => publications.filter((p) => p.scheduled_at && dayKey(new Date(p.scheduled_at)) === dayKey(d)).length,
+  );
 
   return (
     <div className="home-grid">
@@ -62,6 +85,40 @@ export function Home({ brand, channels, posts, publications, media, ideas = [], 
           </div>
         </div>
       </section>
+
+      {attention.length > 0 && (
+        <article className="card home-card home-attention">
+          <header className="card-header home-card-header">
+            <h3 className="card-title home-card-title">
+              <AlertTriangle size={18} />
+              Needs attention ({attention.length})
+            </h3>
+            <Button variant="ghost" size="sm" onClick={() => onGo("queue")}>
+              Review in queue <ArrowRight size={14} />
+            </Button>
+          </header>
+          <div className="card-content home-card-content">
+            <ul className="home-list">
+              {attention.slice(0, 4).map((p) => (
+                <li key={p.id} className="home-list-item">
+                  <div>
+                    <div className="home-list-title">{p.payload.title || p.payload.text.slice(0, 60) || "Untitled post"}</div>
+                    <div className="home-list-meta">
+                      {p.channel_name} · {p.scheduled_at ? formatTime(p.scheduled_at) : ""}
+                      {p.last_error ? ` — ${p.last_error.slice(0, 80)}` : ""}
+                    </div>
+                    <div className="home-list-meta"><State state={p.state} /></div>
+                  </div>
+                  <Network provider={p.provider} />
+                </li>
+              ))}
+            </ul>
+            {attention.length > 4 && (
+              <p className="home-empty">+{attention.length - 4} more in the queue.</p>
+            )}
+          </div>
+        </article>
+      )}
 
       <div className="home-cards">
         <article className="card home-card">
@@ -184,11 +241,20 @@ export function Home({ brand, channels, posts, publications, media, ideas = [], 
                 <div className="home-stat-label">Channels</div>
               </div>
             </div>
-            {publications.some((p) => ["failed", "uncertain", "manual_required"].includes(p.state)) && (
-              <Button variant="secondary" size="sm" onClick={() => onGo("queue")} style={{ marginTop: 10 }}>
-                Review needs attention <ArrowRight size={14} />
-              </Button>
-            )}
+            <div className="home-week" aria-label="Posts scheduled per day this week">
+              {weekDays.map((d, i) => (
+                <button
+                  key={dayKey(d)}
+                  className={`home-week-day${dayKey(d) === dayKey(new Date()) ? " today" : ""}`}
+                  onClick={() => onGo("calendar")}
+                  aria-label={`${dayNames[i]} ${d.getDate()}: ${weekCounts[i]} posts`}
+                >
+                  <span>{dayNames[i]}</span>
+                  <strong>{d.getDate()}</strong>
+                  <small>{weekCounts[i]} {weekCounts[i] === 1 ? "post" : "posts"}</small>
+                </button>
+              ))}
+            </div>
           </div>
         </article>
       </div>

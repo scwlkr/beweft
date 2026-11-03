@@ -2897,3 +2897,10 @@ fieldset.composer-editor {
 @media (max-width: 640px) {
   .analytics-filters { grid-template-columns: 1fr; }
 }
+.home-attention { border-color: color-mix(in srgb, var(--danger) 30%, var(--line)); }
+.home-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; margin-top: 12px; }
+.home-week-day { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 11px; min-width: 0; }
+.home-week-day span { color: var(--muted); font-size: 10px; }
+.home-week-day strong { font-size: 16px; }
+.home-week-day small { color: var(--muted); font-size: 10px; }
+.home-week-day.today { border-color: var(--accent); background: var(--accent-soft); }
