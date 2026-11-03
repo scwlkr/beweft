@@ -16,7 +16,7 @@ This roadmap tracks progress toward Buffer-level functionality. It is continuous
 - [x] **AI assistance** (Nov 3 2026) - Post suggestions and caption improvements in composer
 - [x] **Keyboard shortcuts** (Nov 3 2026) - Power-user navigation/composer actions
 - [x] **Calendar enhancements** (Nov 3 2026) - Drag-and-drop rescheduling, week/month views, posting slots visualization
-- [x] **Queue improvements** (Nov 3 2026) - Status/channel/sort filters, clearer bulk actions
+- [x] **Queue improvements** (Nov 3 2026) - Status/channel/sort filters, clearer bulk actions, select-all, improved empty states
 - [x] **Queue status filtering** (Nov 2 2026) - Filter by queued/sending/published/failed/uncertain/needs handoff
 - [x] **Queue bulk actions UI** (Nov 2 2026) - Clearer selection and actions
 - [x] **Templates copy polish** (Nov 2 2026) - Templates library naming
@@ -25,6 +25,7 @@ This roadmap tracks progress toward Buffer-level functionality. It is continuous
 - [x] **Analytics/Insights copy polish** (Nov 2 2026) - Clearer labels and messaging
 - [x] **Queue needs-attention badges** (Nov 3 2026) - Highlight failed/needs attention counts
 - [x] **Home ideas count** (Nov 3 2026) - Show real idea count on dashboard
+- [x] **Home quick actions** (Nov 3 2026) - Added View queue quick action
 - [x] **Calendar day dialog** (Nov 3 2026) - Richer day view with quick scheduling
 - [x] **Character limits** (Nov 3 2026) - Per-platform character counters in composer and preview
 - [x] **Dark mode polish** (Nov 3 2026) - Improved contrast and colors
@@ -39,10 +40,10 @@ This roadmap tracks progress toward Buffer-level functionality. It is continuous
 
 ## Nice to Have
 - [x] **AI assistance** (Nov 3 2026) - Post suggestions, caption improvements
-- [x] **Bulk scheduling** (Nov 2 2026) - CSV import UI placeholder
+- [x] **Bulk scheduling** (Nov 2 2026) - CSV import UI placeholder (now functional)
 - [x] **First comment scheduling** (where supported) (Nov 3 2026) - FB/IG/Threads first comment with post-publication follow-up
 - [x] **Link-in-bio** style features (Nov 3 2026) - Start Page with customizable links, public sharing
-- [ ] **Dark mode polish** (Nov 3 2026)
+- [x] **Dark mode polish** (Nov 3 2026)
 - [x] **Keyboard shortcuts** (Nov 3 2026)
 
 ## Notes
