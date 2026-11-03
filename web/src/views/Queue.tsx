@@ -192,6 +192,13 @@ export function Queue({
           >
             Reschedule
           </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setSelectedIds(new Set())}
+          >
+            Duplicate
+          </Button>
         </div>
       )}
       {filtered.length === 0 ? (
