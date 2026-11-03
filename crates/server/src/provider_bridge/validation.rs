@@ -38,6 +38,24 @@ impl ScheduleFormatValidator {
                 "X thread options are only supported on X channels",
             ));
         }
+        if let Some(comment) = payload["options"].get("first_comment") {
+            if !comment.is_string() {
+                return Err(ApiError::bad_code("provider_format_invalid", "First comment must be text"));
+            }
+            let text = comment.as_str().unwrap_or("");
+            if text.trim().is_empty() {
+                return Err(ApiError::bad_code("provider_format_invalid", "First comment must contain text"));
+            }
+            if !matches!(provider.as_str(), "facebook" | "instagram" | "threads") {
+                return Err(ApiError::bad_code("provider_format_invalid", "First comment is only supported for Facebook Pages, Instagram, and Threads"));
+            }
+            if provider == "threads" && text.chars().count() > 500 {
+                return Err(ApiError::bad_code("provider_format_invalid", "First comment exceeds Threads length limit"));
+            }
+            if matches!(provider.as_str(), "facebook" | "instagram") && text.len() > 10000 {
+                return Err(ApiError::bad_code("provider_format_invalid", "First comment exceeds length limit"));
+            }
+        }
         if !providers::known(&provider) {
             // Manual, fixture and legacy unknown channels keep their existing behavior.
             if payload["text"].as_str().unwrap_or("").trim().is_empty()

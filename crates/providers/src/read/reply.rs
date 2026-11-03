@@ -1,5 +1,116 @@
 use super::*;
 impl Adapter {
+    pub async fn post_comment(
+        &self,
+        c: &Channel,
+        post_id: &str,
+        text: &str,
+        idempotency_key: &str,
+    ) -> Result<Step> {
+        if text.trim().is_empty() || text.len() > 10000 {
+            return Err(invalid("Reply text is empty or too long"));
+        }
+        require_permission(c, "reply")?;
+        let id = segment(post_id);
+        let token = Some(c.tokens.access_token.as_str());
+        let request = match c.app.provider.as_str() {
+            "youtube" => self
+                .request(
+                    Method::POST,
+                    "https://www.googleapis.com/youtube/v3/comments?part=snippet",
+                    token,
+                )?
+                .json(&json!({"snippet":{"parentId":post_id,"textOriginal":text}})),
+            "facebook" => self
+                .request(
+                    Method::POST,
+                    &format!("https://graph.facebook.com/v23.0/{id}/comments"),
+                    token,
+                )?
+                .json(&json!({"message":text})),
+            "instagram" => self
+                .request(
+                    Method::POST,
+                    &format!("https://graph.instagram.com/v23.0/{id}/replies"),
+                    token,
+                )?
+                .json(&json!({"message":text})),
+            "threads" => {
+                if text.chars().count() > 500 {
+                    return Err(invalid("Threads reply text exceeds the supported length"));
+                }
+                let account = &c.identity.id;
+                let base = "https://graph.threads.net/v1.0";
+                let container = self
+                    .send(
+                        self.request(
+                            Method::POST,
+                            &format!("{base}/{account}/threads"),
+                            token,
+                        )?
+                        .form(&json!({"media_type":"TEXT","text":text,"reply_to_id":post_id})),
+                        true,
+                    )
+                    .await?;
+                let container_id = field(&container, "id")?;
+                let published = self
+                    .send(
+                        self.request(
+                            Method::POST,
+                            &format!("{base}/{account}/threads_publish"),
+                            token,
+                        )?
+                        .form(&[("creation_id", container_id.as_str())]),
+                        true,
+                    )
+                    .await?;
+                let id = field(&published, "id")?;
+                return Ok(Step::Published {
+                    external_id: id.clone(),
+                    external_url: published["permalink"]
+                        .as_str()
+                        .or_else(|| published["url"].as_str())
+                        .map(str::to_owned),
+                    receipt: json!({"id":id}),
+                });
+            }
+            _ => {
+                return Err(error(
+                    FailureKind::Unavailable,
+                    "First comment delivery is not implemented for this provider",
+                ));
+            }
+        };
+        let v = self.send(request, true).await?;
+        if c.app.provider == "bluesky" {
+            if let Some(uri) = v["uri"].as_str() {
+                let cid = field(&v, "cid")?;
+                let rkey = uri.rsplit('/').next().unwrap_or("");
+                if rkey.is_empty() {
+                    return Err(error(
+                        FailureKind::Uncertain,
+                        "Bluesky did not return a usable reply record key",
+                    ));
+                }
+                let url = Some(format!(
+                    "https://bsky.app/profile/{}/post/{}",
+                    c.identity.id, rkey
+                ));
+                return Ok(Step::Published {
+                    external_id: uri.to_owned(),
+                    external_url: url,
+                    receipt: json!({"uri":uri,"cid":cid}),
+                });
+            }
+        }
+        let id = field(&v, "id")?;
+        Ok(Step::Published {
+            external_id: id.clone(),
+            external_url: v["url"].as_str().map(str::to_owned),
+            receipt: json!({"id":id}),
+        })
+    }
+
     pub async fn reply(
         &self,
         c: &Channel,

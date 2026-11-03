@@ -38,26 +38,47 @@ export function ProviderOptions({
       reel !== null &&
       ["granted", "missing", "unknown"].includes(String(reel.status));
     if (!advertised)
-      return value.format === "reel" ? (
+      return (
         <section className="provider-options form-stack">
-          <p className="muted">
-            This draft is saved as a Reel, but this server does not advertise
-            Reel permission status. The Reel choice is retained until you change
-            it or update the server.
-          </p>
-          <Button
-            type="button"
-            variant="secondary"
-            onClick={() => {
-              const next = { ...value };
-              delete next.format;
-              onChange(next);
-            }}
+          <Field
+            label="First comment"
+            hint={`${Array.from(String(value.first_comment ?? "")).length}/10000 characters`}
           >
-            Change to text or image
-          </Button>
+            <textarea
+              rows={2}
+              value={String(value.first_comment ?? "")}
+              onChange={(e) => {
+                const v = e.target.value;
+                const next = { ...value };
+                if (v.trim()) next.first_comment = v;
+                else delete next.first_comment;
+                onChange(next);
+              }}
+              placeholder="Add a comment to post right after publishing"
+            />
+          </Field>
+          {value.format === "reel" && (
+            <p className="muted">
+              This draft is saved as a Reel, but this server does not advertise
+              Reel permission status. The Reel choice is retained until you change
+              it or update the server.
+            </p>
+          )}
+          {value.format === "reel" && (
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => {
+                const next = { ...value };
+                delete next.format;
+                onChange(next);
+              }}
+            >
+              Change to text or image
+            </Button>
+          )}
         </section>
-      ) : null;
+      );
     return (
       <section className="provider-options form-stack">
         <Field label="Facebook post format">
@@ -85,6 +106,23 @@ export function ProviderOptions({
                 : "Reported Reel permissions are present; account eligibility is not yet verified."}
           </p>
         )}
+        <Field
+          label="First comment"
+          hint={`${Array.from(String(value.first_comment ?? "")).length}/10000 characters`}
+        >
+          <textarea
+            rows={2}
+            value={String(value.first_comment ?? "")}
+            onChange={(e) => {
+              const v = e.target.value;
+              const next = { ...value };
+              if (v.trim()) next.first_comment = v;
+              else delete next.first_comment;
+              onChange(next);
+            }}
+            placeholder="Add a comment to post right after publishing"
+          />
+        </Field>
       </section>
     );
   }
@@ -335,16 +373,37 @@ export function ProviderOptions({
     );
   if (provider === "threads")
     return (
-      <Field label="Who can reply?">
-        <select
-          value={String(value.reply_control ?? "everyone")}
-          onChange={(e) => set("reply_control", e.target.value)}
-        >
-          <option value="everyone">Everyone</option>
-          <option value="accounts_you_follow">Accounts you follow</option>
-          <option value="mentioned_only">Mentioned accounts</option>
-        </select>
-      </Field>
+      <section className="provider-options form-stack">
+        <Field label="Who can reply?">
+          <select
+            value={String(value.reply_control ?? "everyone")}
+            onChange={(e) => set("reply_control", e.target.value)}
+          >
+            <option value="everyone">Everyone</option>
+            <option value="accounts_you_follow">Accounts you follow</option>
+            <option value="mentioned_only">Mentioned accounts</option>
+          </select>
+        </Field>
+        {(caps.reply || true) && (
+          <Field
+            label="First comment"
+            hint={`${Array.from(String(value.first_comment ?? "")).length}/500 characters`}
+          >
+            <textarea
+              rows={2}
+              value={String(value.first_comment ?? "")}
+              onChange={(e) => {
+                const v = e.target.value;
+                const next = { ...value };
+                if (v.trim()) next.first_comment = v;
+                else delete next.first_comment;
+                onChange(next);
+              }}
+              placeholder="Add a comment to post right after publishing"
+            />
+          </Field>
+        )}
+      </section>
     );
   if (provider === "pinterest")
     return (
