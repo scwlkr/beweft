@@ -183,7 +183,14 @@ export function Queue({
             size="sm"
             onClick={() => setSelectedIds(new Set())}
           >
-            Cancel selected
+            Move to front
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setSelectedIds(new Set())}
+          >
+            Reschedule
           </Button>
         </div>
       )}
