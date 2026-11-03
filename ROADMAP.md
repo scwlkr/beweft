@@ -41,7 +41,7 @@ This roadmap tracks progress toward Buffer-level functionality. It is continuous
 - [x] **AI assistance** (Nov 3 2026) - Post suggestions, caption improvements
 - [x] **Bulk scheduling** (Nov 2 2026) - CSV import UI placeholder
 - [x] **First comment scheduling** (where supported) (Nov 3 2026) - FB/IG/Threads first comment with post-publication follow-up
-- [ ] **Link-in-bio** style features
+- [x] **Link-in-bio** style features (Nov 3 2026) - Start Page with customizable links, public sharing
 - [ ] **Dark mode polish** (Nov 3 2026)
 - [x] **Keyboard shortcuts** (Nov 3 2026)
 
