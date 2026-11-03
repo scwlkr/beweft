@@ -12,6 +12,13 @@ export function PostPreview({
   text: string;
   media: Media[];
 }) {
+  const len = Array.from(text).length;
+  const limits: Record<string, number> = {
+    x: 280,
+    bluesky: 300,
+    mastodon: 500,
+  };
+  const limit = channel?.provider ? limits[channel.provider] : undefined;
   return (
     <aside className="composer-preview">
       <div className="eyebrow">POST PREVIEW</div>

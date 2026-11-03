@@ -283,9 +283,20 @@ export function Composer({
                 Use shared text
               </Button>
             )}
-            <span className="muted">
-              {Array.from(currentText).length} characters
-            </span>
+            {(() => {
+              const len = Array.from(currentText).length;
+              const limits: Record<string, number> = {
+                x: 280,
+                bluesky: 300,
+                mastodon: 500,
+              };
+              const limit = active?.provider ? limits[active.provider] : undefined;
+              return (
+                <span className={`muted ${limit && len > limit ? "warning-text" : ""}`} title={limit ? `${len} / ${limit}` : `${len} characters`}>
+                  {len}{limit ? ` / ${limit}` : ""} {limit && len > limit ? "• Too long" : "characters"}
+                </span>
+              );
+            })()}
           </div>
           {mediaOpen && (
             <div className="media-picker">

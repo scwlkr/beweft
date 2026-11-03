@@ -128,6 +128,11 @@ export function Queue({
             onClick={() => setView("attention")}
           >
             Needs attention
+            {publications.filter((p) => ["failed", "uncertain", "manual_required"].includes(p.state)).length > 0 && (
+              <span>
+                {publications.filter((p) => ["failed", "uncertain", "manual_required"].includes(p.state)).length}
+              </span>
+            )}
           </button>
           <button
             aria-pressed={view === "history"}
