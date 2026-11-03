@@ -421,6 +421,7 @@ export default function App() {
                       posts={posts}
                       publications={publications}
                       media={media}
+                      ideas={ideas}
                       onCompose={(initial) => setComposer(initial ?? null)}
                       onGo={(r) => {
                         go(r as any);

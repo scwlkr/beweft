@@ -1,6 +1,6 @@
 import { ArrowRight, CalendarDays, FileText, Lightbulb, Plus, Send } from "lucide-react";
 import { Button } from "../components/ui/button";
-import type { Brand, Channel, Post, Publication } from "../api";
+import type { Brand, Channel, Idea, Post, Publication } from "../api";
 import { zone } from "../navigation";
 
 type Props = {
@@ -9,6 +9,7 @@ type Props = {
   posts: Post[];
   publications: Publication[];
   media: any[];
+  ideas?: Idea[];
   onCompose: (initial?: Partial<Post>) => void;
   onGo: (route: string) => void;
 };
@@ -23,7 +24,7 @@ function formatTime(ts?: string | null) {
   }
 }
 
-export function Home({ brand, channels, posts, publications, media, onCompose, onGo }: Props) {
+export function Home({ brand, channels, posts, publications, media, ideas = [], onCompose, onGo }: Props) {
   const queued = publications
     .filter((p) => !["published", "canceled", "fixture_complete", "rejected", "failed_terminal"].includes(p.state))
     .sort((a, b) => (a.scheduled_at || a.created_at).localeCompare(b.scheduled_at || b.created_at))
@@ -32,7 +33,7 @@ export function Home({ brand, channels, posts, publications, media, onCompose, o
     .filter((p: any) => !(p.archived_at))
     .sort((a: any, b: any) => (b.updated_at || b.created_at).localeCompare(a.updated_at || a.created_at))
     .slice(0, 4);
-  const ideaCount = brand ? 0 : 0; // simplified - ideas come from elsewhere; just show counts
+  const ideaCount = ideas.length;
 
   return (
     <div className="home-grid">
@@ -129,11 +130,28 @@ export function Home({ brand, channels, posts, publications, media, onCompose, o
             </Button>
           </header>
           <div className="card-content home-card-content">
-            <p className="home-empty">Capture sparks in Ideas and turn them into posts when inspiration strikes.</p>
-            <Button variant="secondary" onClick={() => onGo("ideas")}>
-              <Lightbulb size={16} />
-              Go to Ideas
-            </Button>
+            {ideaCount === 0 ? (
+              <>
+                <p className="home-empty">Capture sparks in Ideas and turn them into posts when inspiration strikes.</p>
+                <Button variant="secondary" onClick={() => onGo("ideas")}>
+                  <Lightbulb size={16} />
+                  Go to Ideas
+                </Button>
+              </>
+            ) : (
+              <>
+                <div className="home-stats">
+                  <div className="home-stat">
+                    <div className="home-stat-value">{ideaCount}</div>
+                    <div className="home-stat-label">Saved ideas</div>
+                  </div>
+                </div>
+                <Button variant="secondary" onClick={() => onGo("ideas")}>
+                  <Lightbulb size={16} />
+                  View ideas
+                </Button>
+              </>
+            )}
           </div>
         </article>
 
