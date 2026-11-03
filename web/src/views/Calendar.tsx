@@ -43,11 +43,15 @@ export function Calendar({
   const [draggedId, setDraggedId] = useState<string | null>(null);
 
   useEffect(() => {
-    const ch = channels?.[0]?.id;
-    if (!ch) return;
-    api(`/schedules?channel_id=${ch}`, z.array(ScheduleSchema))
-      .then(setSchedules)
-      .catch(() => setSchedules([]));
+    const ids = (channels ?? []).map((c: any) => c.id).filter(Boolean);
+    if (ids.length === 0) { setSchedules([]); return; }
+    let cancelled = false;
+    Promise.all(
+      ids.map((id: string) =>
+        api(`/schedules?channel_id=${id}`, z.array(ScheduleSchema)).catch(() => [] as Schedule[]),
+      ),
+    ).then((all) => { if (!cancelled) setSchedules(all.flat()); });
+    return () => { cancelled = true; };
   }, [channels]);
   const start = new Date(month);
   start.setDate(1 - ((start.getDay() + 6) % 7));
@@ -182,7 +186,10 @@ export function Calendar({
           const jsDow = dow === 0 ? 7 : dow;
           const slots = schedules
             .filter((s) => s.days.includes(jsDow))
-            .map((s) => s.time.slice(0, 5));
+            .map((s) => ({
+              time: s.time.slice(0, 5),
+              channel: (channels ?? []).find((c: any) => c.id === s.channel_id)?.name ?? "",
+            }));
           const isOutsideMonth = view === "month" && d.getMonth() !== month.getMonth();
           const isToday = key === dateKey(new Date());
           return (
@@ -209,12 +216,12 @@ export function Calendar({
               <span className="day-number">{d.getDate()}</span>
               {slots.length > 0 && !isOutsideMonth && (
                 <div className="calendar-slots">
-                  {slots.slice(0, 2).map((t) => (
-                    <span key={t} className="calendar-slot">
-                      {t}
+                  {slots.slice(0, 2).map((s, i) => (
+                    <span key={`${s.time}-${s.channel}-${i}`} className="calendar-slot" title={s.channel ? `${s.channel} slot ${s.time}` : `Slot ${s.time}`}>
+                      {s.time}{s.channel ? ` · ${s.channel.slice(0, 8)}` : ""}
                     </span>
                   ))}
-                  {slots.length > 2 && <span className="calendar-slot">+{slots.length - 2}</span>}
+                  {slots.length > 2 && <span className="calendar-slot">+{slots.length - 2} slots</span>}
                 </div>
               )}
               {items.slice(0, view === "week" ? 6 : 3).map((p) => (
