@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   api,
   PublicationSchema,
+  PostSchema,
   type Channel,
   type Media,
   type Publication,
@@ -11,8 +12,9 @@ import {
   type ApiSession,
 } from "../api";
 import { Network } from "../components/brand";
-import { Empty, ExternalLink, State, Time } from "../components/shared";
+import { Empty, ExternalLink, Field, State, Time } from "../components/shared";
 import { Button } from "../components/ui/button";
+import { Dialog } from "../components/ui/dialog";
 
 import type { PendingMedia } from "../usePendingMedia";
 import type { usePendingSchedule } from "../usePendingSchedule";
@@ -57,6 +59,8 @@ export function Queue({
   const [sort, setSort] = useState<"newest" | "oldest">("newest");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Publication | null>(null);
+  const [bulkRescheduleOpen, setBulkRescheduleOpen] = useState(false);
+  const [bulkRescheduleAt, setBulkRescheduleAt] = useState("");
   const importRef = useRef<HTMLInputElement>(null);
   const history = ["published", "fixture_complete", "canceled"];
   const statusOptions = [
@@ -290,16 +294,63 @@ export function Queue({
           <Button
             variant="secondary"
             size="sm"
-            onClick={() => setSelectedIds(new Set())}
-            title="Reschedule selected (coming soon)"
+            onClick={() => {
+              const targets = filtered.filter(
+                (p) => selectedIds.has(p.id) && ["queued", "manual_required"].includes(p.state),
+              );
+              if (targets.length === 0) {
+                setSelectedIds(new Set());
+                return;
+              }
+              const now = new Date(Date.now() + 3600000);
+              const iso = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
+                .toISOString()
+                .slice(0, 16);
+              setBulkRescheduleAt(iso);
+              setBulkRescheduleOpen(true);
+            }}
+            title="Reschedule selected"
           >
             Reschedule
           </Button>
           <Button
             variant="secondary"
             size="sm"
-            onClick={() => setSelectedIds(new Set())}
-            title="Duplicate selected (coming soon)"
+            onClick={async () => {
+              const targets = filtered.filter(
+                (p) =>
+                  selectedIds.has(p.id) &&
+                  (p.state === "draft" || p.state === "queued" || true),
+              );
+              if (targets.length === 0) {
+                setSelectedIds(new Set());
+                return;
+              }
+              let done = 0;
+              for (const p of targets) {
+                try {
+                  await api("/posts", PostSchema, "POST", {
+                    brand_id: p.brand_id,
+                    title: p.payload.title ? `${p.payload.title} (copy)` : "",
+                    text: p.payload.text ?? "",
+                    media_ids: p.payload.media_ids ?? [],
+                    variants: channels
+                      .filter((c) => c.id === p.channel_id)
+                      .map((c) => ({ channel_id: c.id })),
+                    options: p.payload.options ?? {},
+                  });
+                  done++;
+                } catch {
+                  // continue
+                }
+              }
+              setSelectedIds(new Set());
+              await onRefresh();
+              if (done > 0) {
+                // message shown by action context not available; rely on refresh
+              }
+            }}
+            title="Duplicate selected as drafts"
           >
             Duplicate
           </Button>
@@ -465,6 +516,65 @@ export function Queue({
             </article>
           ))}
         </div>
+      )}
+      {bulkRescheduleOpen && (
+        <Dialog
+          open
+          onOpenChange={(v) => !v && !pending && setBulkRescheduleOpen(false)}
+          title="Reschedule selected"
+          description="Apply a new time to queued/manual posts in your selection."
+        >
+          <div className="form-stack">
+            <Field label="New scheduled time">
+              <input
+                type="datetime-local"
+                value={bulkRescheduleAt}
+                onChange={(e) => setBulkRescheduleAt(e.target.value)}
+              />
+            </Field>
+            <div className="inline-actions">
+              <Button
+                disabled={pending || !bulkRescheduleAt}
+                onClick={async () => {
+                  const targets = filtered.filter(
+                    (p) =>
+                      selectedIds.has(p.id) &&
+                      ["queued", "manual_required"].includes(p.state),
+                  );
+                  if (targets.length === 0) {
+                    setBulkRescheduleOpen(false);
+                    setSelectedIds(new Set());
+                    return;
+                  }
+                  const iso = new Date(bulkRescheduleAt).toISOString();
+                  let done = 0;
+                  for (const p of targets) {
+                    const ok = await action(
+                      () =>
+                        api(`/publications/${p.id}/reschedule`, PublicationSchema, "POST", {
+                          scheduled_at: iso,
+                        }),
+                      "Rescheduled",
+                    );
+                    if (ok) done++;
+                  }
+                  setBulkRescheduleOpen(false);
+                  setSelectedIds(new Set());
+                  await onRefresh();
+                }}
+              >
+                Apply
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => setBulkRescheduleOpen(false)}
+                disabled={pending}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        </Dialog>
       )}
       {selected && (
         <PublicationDetails

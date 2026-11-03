@@ -84,4 +84,3 @@ export const titles: Record<Route, [string, string]> = {
 export const routeFromHash = (): Route =>
   routes.find((r) => r.id === location.hash.slice(1))?.id ?? "home";
 export const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-import { Link2 } from "lucide-react";

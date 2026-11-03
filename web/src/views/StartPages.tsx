@@ -195,8 +195,8 @@ export function StartPages({
         </div>
         <Dialog
           open={creating}
+          onOpenChange={(v) => !v && setCreating(false)}
           title="Create Start Page"
-          onClose={() => setCreating(false)}
         >
           <div className="stack">
             <Field label="Slug">
@@ -229,12 +229,17 @@ export function StartPages({
               <Button variant="secondary" onClick={() => setCreating(false)}>
                 Cancel
               </Button>
-              <Submit
-                onClick={createPage}
+              <Button
+                type="submit"
                 disabled={pending || !slug.trim()}
+                onClick={(e) => {
+                  e.preventDefault();
+                  void createPage();
+                }}
               >
+                {pending && <span className="spin">⟳</span>}
                 Create
-              </Submit>
+              </Button>
             </div>
           </div>
         </Dialog>
@@ -296,7 +301,9 @@ export function StartPages({
           <h2 style={{ marginBottom: "1.5rem" }}>Links</h2>
           <div className="stack" style={{ marginBottom: "1.5rem" }}>
             {page.links.length === 0 ? (
-              <Empty message="Add your first link below" />
+              <Empty title="No links yet">
+                Add your first link below
+              </Empty>
             ) : (
               page.links
                 .sort((a, b) => a.position - b.position)
