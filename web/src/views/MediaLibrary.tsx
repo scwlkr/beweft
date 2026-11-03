@@ -1,6 +1,6 @@
 import type { MediaLimits } from "../lib/api-contract.generated";
-import { Play, Trash2, Upload } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Play, Search, Trash2, Upload, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
 import {
   api,
@@ -44,6 +44,8 @@ export function MediaLibrary({
   const selected = media.find((item) => item.id === selectedId);
   const [uploadError, setUploadError] = useState("");
   const [limit, setLimit] = useState<number | null>(null);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState<"all" | "image" | "video">("all");
   useEffect(() => {
     api("/media/limits", LimitsSchema)
       .then((data) => setLimit(data.max_upload_bytes))
@@ -53,6 +55,20 @@ export function MediaLibrary({
     limit === null
       ? "loading limits"
       : `${Math.floor(limit / 1024 / 1024)} MiB`;
+  const filtered = useMemo(
+    () =>
+      media.filter((m) => {
+        if (filter === "image" && !m.mime.startsWith("image/")) return false;
+        if (filter === "video" && !m.mime.startsWith("video/")) return false;
+        if (!search) return true;
+        const q = search.toLowerCase();
+        return (
+          m.name.toLowerCase().includes(q) ||
+          (m.alt_text || "").toLowerCase().includes(q)
+        );
+      }),
+    [media, search, filter],
+  );
   const upload = async (files: FileList | null) => {
     if (!files || limit === null) return;
     setUploadError("");
@@ -77,7 +93,7 @@ export function MediaLibrary({
     <>
       <div className="section-toolbar">
         <p className="muted">
-          {media.length} files · Images and videos · Upload limit {limitLabel}
+          {filtered.length} of {media.length} file{media.length === 1 ? "" : "s"} · Images and videos · Upload limit {limitLabel}
         </p>
         <Button
           disabled={pending || limit === null}
@@ -106,6 +122,27 @@ export function MediaLibrary({
           if (!pending) void upload(e.dataTransfer.files);
         }}
       >
+        <div className="view-toolbar">
+          <label className="search-box">
+            <Search size={17} />
+            <input
+              aria-label="Search media"
+              placeholder="Search media by name or description..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+            {search && (
+              <button aria-label="Clear search" onClick={() => setSearch("")}>
+                <X size={15} />
+              </button>
+            )}
+          </label>
+          <select value={filter} onChange={(e) => setFilter(e.target.value as any)}>
+            <option value="all">All types</option>
+            <option value="image">Images</option>
+            <option value="video">Videos</option>
+          </select>
+        </div>
         {media.length === 0 ? (
           <Empty
             title="Build your creative collection"
@@ -122,9 +159,13 @@ export function MediaLibrary({
             Drag photos and videos here, or choose files from your computer.
             Your media stays on your server.
           </Empty>
+        ) : filtered.length === 0 ? (
+          <Empty title="No media matches">
+            Try adjusting your search or filters.
+          </Empty>
         ) : (
           <div className="media-grid">
-            {media.map((m) => (
+            {filtered.map((m) => (
               <button
                 className="media-card"
                 key={m.id}
