@@ -23,6 +23,11 @@ This roadmap tracks progress toward Buffer-level functionality. It is continuous
 - [x] **Calendar quick actions** (Nov 2 2026) - New post button in toolbar
 - [x] **Calendar posting slots visualization** (Nov 2 2026) - Show channel posting schedule times on calendar
 - [x] **Analytics/Insights copy polish** (Nov 2 2026) - Clearer labels and messaging
+- [x] **Queue needs-attention badges** (Nov 3 2026) - Highlight failed/needs attention counts
+- [x] **Home ideas count** (Nov 3 2026) - Show real idea count on dashboard
+- [x] **Calendar day dialog** (Nov 3 2026) - Richer day view with quick scheduling
+- [x] **Character limits** (Nov 3 2026) - Per-platform character counters in composer and preview
+- [x] **Dark mode polish** (Nov 3 2026) - Improved contrast and colors
 
 ## High Priority (Remaining)
 - [x] **Content Planner ideas flow** (Nov 2 2026) - Clearer "Turn into post" action

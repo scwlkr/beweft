@@ -180,6 +180,11 @@ export function Home({ brand, channels, posts, publications, media, ideas = [], 
                 <div className="home-stat-label">Channels</div>
               </div>
             </div>
+            {publications.some((p) => ["failed", "uncertain", "manual_required"].includes(p.state)) && (
+              <Button variant="secondary" size="sm" onClick={() => onGo("queue")} style={{ marginTop: 10 }}>
+                Review needs attention <ArrowRight size={14} />
+              </Button>
+            )}
           </div>
         </article>
       </div>
