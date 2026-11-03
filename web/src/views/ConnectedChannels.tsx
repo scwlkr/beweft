@@ -1,4 +1,5 @@
-import { Pause, Play } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Pause, Play, Search } from "lucide-react";
+import { useState } from "react";
 import {
   api,
   ChannelSchema,
@@ -29,9 +30,44 @@ export function ConnectedChannels({
   platforms: ManualGuidance[];
   platformsReady: boolean;
 }) {
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<"all" | "healthy" | "attention">("all");
+  const direct = channels.filter((c) => !["manual", "fixture"].includes(c.provider));
+  const isAttention = (c: Channel) =>
+    String(c.connection_status ?? "unknown") !== "connected" || c.connection_error != null;
+  const healthyCount = direct.filter((c) => !isAttention(c)).length;
+  const attentionCount = direct.filter(isAttention).length;
+  const q = query.trim().toLowerCase();
+  const visible = channels.filter((c) => {
+    if (filter === "attention" && !isAttention(c)) return false;
+    if (filter === "healthy" && isAttention(c)) return false;
+    if (!q) return true;
+    return c.name.toLowerCase().includes(q) || c.provider.toLowerCase().includes(q) || String(c.connection_status ?? "").toLowerCase().includes(q);
+  });
   return (
-    <div className="channel-list">
-      {channels.map((c) => (
+    <>
+      <div className="connection-health" role="status">
+        <span className="chip ok"><CheckCircle2 size={14} /> {healthyCount} healthy</span>
+        <span className={`chip ${attentionCount ? "bad" : ""}`}><AlertTriangle size={14} /> {attentionCount} need attention</span>
+        <span className="chip">{channels.length} channels</span>
+        {attentionCount > 0 && <button type="button" className="text-link" onClick={() => setFilter("attention")}>Show only attention</button>}
+      </div>
+      <div className="channel-filters">
+        <label className="search-box">
+          <Search size={16} />
+          <input type="search" placeholder="Search channels…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search channels" />
+        </label>
+        <select value={filter} onChange={(e) => setFilter(e.target.value as typeof filter)} aria-label="Filter connection health">
+          <option value="all">All health states</option>
+          <option value="healthy">Healthy only</option>
+          <option value="attention">Needs attention only</option>
+        </select>
+      </div>
+      {visible.length === 0 ? (
+        <p className="home-empty">No channels match this filter.</p>
+      ) : (
+      <div className="channel-list">
+      {visible.map((c) => (
         <article className="channel-row" key={c.id}>
           <Network provider={c.provider} />
           <div>
@@ -161,6 +197,8 @@ export function ConnectedChannels({
           </Button>
         </article>
       ))}
-    </div>
+      </div>
+      )}
+    </>
   );
 }

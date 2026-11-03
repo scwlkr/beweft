@@ -2897,6 +2897,12 @@ fieldset.composer-editor {
 @media (max-width: 640px) {
   .analytics-filters { grid-template-columns: 1fr; }
 }
+.connection-health { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.connection-health .chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); }
+.connection-health .chip.ok { color: var(--success); background: var(--success-soft); border-color: transparent; }
+.connection-health .chip.bad { color: var(--danger); background: var(--danger-soft); border-color: transparent; }
+.channel-filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 16px; }
+.channel-filters select { width: auto; min-height: 38px; }
 .home-attention { border-color: color-mix(in srgb, var(--danger) 30%, var(--line)); }
 .home-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; margin-top: 12px; }
 .home-week-day { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 11px; min-width: 0; }
