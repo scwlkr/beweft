@@ -1,5 +1,5 @@
-import { ArrowDown, ArrowUp, CalendarDays, Copy, Image, Plus } from "lucide-react";
-import { useState } from "react";
+import { ArrowDown, ArrowUp, CalendarDays, Copy, FileUp, Image, Plus } from "lucide-react";
+import { useRef, useState } from "react";
 import { z } from "zod";
 import {
   api,
@@ -57,6 +57,7 @@ export function Queue({
   const [sort, setSort] = useState<"newest" | "oldest">("newest");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Publication | null>(null);
+  const importRef = useRef<HTMLInputElement>(null);
   const history = ["published", "fixture_complete", "canceled"];
   const statusOptions = [
     { value: "all", label: "All statuses" },
@@ -168,6 +169,16 @@ export function Queue({
           onChange={(e) => setSearch(e.target.value)}
           aria-label="Search posts"
         />
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => importRef.current?.click()}
+          title="Import from CSV (coming soon)"
+        >
+          <FileUp size={16} />
+          Import CSV
+        </Button>
+        <input ref={importRef} type="file" accept=".csv,text/csv" className="sr-only" />
       </div>
       {selectedIds.size > 0 && (
         <div className="bulk-actions">
