@@ -170,6 +170,14 @@ export function Queue({
           aria-label="Search posts"
         />
         <Button
+          size="sm"
+          onClick={onCompose}
+          title="Create a new post"
+        >
+          <Plus size={16} />
+          New post
+        </Button>
+        <Button
           variant="secondary"
           size="sm"
           onClick={() => importRef.current?.click()}
@@ -228,6 +236,51 @@ export function Queue({
             }}
           >
             Move to front
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={async () => {
+              const failed = filtered.filter(
+                (p) => selectedIds.has(p.id) && ["failed", "uncertain", "manual_required"].includes(p.state),
+              );
+              if (failed.length === 0) {
+                setSelectedIds(new Set());
+                return;
+              }
+              let done = 0;
+              for (const p of failed) {
+                const ok = await action(
+                  () => api(`/publications/${p.id}/retry`, PublicationSchema, "POST"),
+                  "Retrying publication",
+                );
+                if (ok) done++;
+              }
+              setSelectedIds(new Set());
+              await onRefresh();
+              if (done > 0) {
+                // Action already shows message; keep simple
+              }
+            }}
+            title="Retry failed/needs attention"
+          >
+            Retry
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              setSelectedIds(
+                new Set(
+                  filtered
+                    .filter((p) => ["failed", "uncertain", "manual_required"].includes(p.state))
+                    .map((p) => p.id),
+                ),
+              );
+            }}
+            title="Select all needing attention in current view"
+          >
+            Select failed
           </Button>
           <Button
             variant="secondary"
@@ -338,6 +391,20 @@ export function Queue({
                       : p.state === "uncertain"
                         ? "Reconcile outcome"
                         : "View details"}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      onEdit({
+                        title: p.payload.title ?? "",
+                        text: p.payload.text ?? "",
+                        id: undefined,
+                      } as any);
+                    }}
+                    title="Duplicate as draft"
+                  >
+                    Duplicate
                   </Button>
                   {p.external_url && (
                     <ExternalLink url={p.external_url}>View post</ExternalLink>
