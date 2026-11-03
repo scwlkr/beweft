@@ -404,7 +404,7 @@ export function Queue({
         <Empty
           title={
             view === "history"
-              ? "Your story starts here"
+              ? "Your published posts will appear here"
               : view === "attention"
                 ? "All clear for now"
                 : "A little space for your next big idea"
@@ -415,11 +415,15 @@ export function Queue({
                 <Plus size={17} />
                 Create your first post
               </Button>
+            ) : view === "attention" ? (
+              <Button variant="secondary" onClick={() => setView("upcoming")}>
+                View queue
+              </Button>
             ) : undefined
           }
         >
           {view === "history"
-            ? "Publishing outcomes and receipts will appear here after your first post."
+            ? "Publishing outcomes and receipts will appear here after your posts go live."
             : view === "attention"
               ? "Posts that need a handoff, reconnect, or reconciliation will appear here."
               : "Create a post, choose your channels, and find its place in the schedule."}
