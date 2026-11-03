@@ -258,6 +258,12 @@ export function Calendar({
           open
           onOpenChange={(v) => !v && setSelected(null)}
           title="Posts for this day"
+          description={new Date(`${selected}T00:00:00`).toLocaleDateString(undefined, {
+            weekday: "long",
+            month: "long",
+            day: "numeric",
+            year: "numeric",
+          })}
         >
           <div className="form-stack">
             {visible
@@ -275,16 +281,27 @@ export function Calendar({
               ))}
             {!visible.some(
               (p) => dateKey(new Date(p.scheduled_at)) === selected,
-            ) && <p className="muted">No posts scheduled for this day.</p>}
-            <Button
-              onClick={() => {
-                setSelected(null);
-                onCompose(`${selected}T09:00`);
-              }}
-            >
-              <Plus size={16} />
-              Create post
-            </Button>
+            ) && <p className="muted">Nothing scheduled for this day yet.</p>}
+            <div className="inline-actions">
+              <Button
+                onClick={() => {
+                  setSelected(null);
+                  onCompose(`${selected}T09:00`);
+                }}
+              >
+                <Plus size={16} />
+                Create post
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setSelected(null);
+                  onCompose(`${selected}T12:00`);
+                }}
+              >
+                Schedule for afternoon
+              </Button>
+            </div>
           </div>
         </Dialog>
       )}
