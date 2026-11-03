@@ -231,8 +231,14 @@ pub fn build_document() -> Value {
         {
             parameters.push(json!({"name":"brand_id","in":"query","required":method=="post","schema":{"type":"string","format":"uuid"}}));
         }
-        if method == "get" && ["/schedules", "/publications"].contains(&path) {
+        if method == "get" && ["/schedules", "/publications", "/analytics"].contains(&path) {
             parameters.push(json!({"name":"channel_id","in":"query","required":path=="/schedules","schema":{"type":"string","format":"uuid"}}));
+        }
+        if method == "get" && path == "/analytics" {
+            for name in ["from", "to"] {
+                parameters.push(json!({"name":name,"in":"query","required":false,"schema":{"type":"string","format":"date-time"}}));
+            }
+            parameters.push(json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":1000}}));
         }
         if method == "get" && ["/posts", "/media", "/publications"].contains(&path) {
             parameters.push(json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":10}}));

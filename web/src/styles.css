@@ -2878,3 +2878,22 @@ fieldset.composer-editor {
   border: 0;
   min-width: 0;
 }
+.analytics-filters {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  gap: 16px;
+  align-items: end;
+  margin-bottom: 22px;
+}
+.analytics-filters .view-toggle {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.top-posts .rank {
+  font-weight: 700;
+  color: var(--accent-text);
+}
+@media (max-width: 640px) {
+  .analytics-filters { grid-template-columns: 1fr; }
+}

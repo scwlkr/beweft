@@ -29,6 +29,7 @@ This roadmap tracks progress toward Buffer-level functionality. It is continuous
 - [x] **Calendar day dialog** (Nov 3 2026) - Richer day view with quick scheduling
 - [x] **Character limits** (Nov 3 2026) - Per-platform character counters in composer and preview
 - [x] **Dark mode polish** (Nov 3 2026) - Improved contrast and colors
+- [x] **Analytics filters, top posts & CSV export** (Nov 3 2026) - Server-side channel/date/limit filtering on `/analytics` (authorized channel scope, scheduled-time window), web channel picker + 7/30/90-day/all range, top-posts ranking by summed metric values, and CSV export with per-metric columns. Verified: `cargo check -p beweft-server` ✓, web `tsc -b` ✓, `vite build` ✓ (652.98 kB JS, 48.78 kB CSS), regenerated TS contract shows `channel_id/from/to/limit` on `GET /api/v1/analytics`.
 
 ## High Priority (Remaining)
 - [x] **Content Planner ideas flow** (Nov 2 2026) - Clearer "Turn into post" action

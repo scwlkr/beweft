@@ -2,6 +2,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import { api, type Brand, type Channel } from "../api";
 import { Analytics, Inbox, ItemSchema, type Result } from "./insight-contracts";
+
+export type AnalyticsRange = "7d" | "30d" | "90d" | "all";
+
+const RANGE_DAYS: Record<Exclude<AnalyticsRange, "all">, number> = {
+  "7d": 7,
+  "30d": 30,
+  "90d": 90,
+};
+
 export function useInsights(
   brand: Brand,
   channels: Channel[],
@@ -14,7 +23,9 @@ export function useInsights(
   const [busy, setBusy] = useState(false);
   const [reply, setReply] = useState<z.infer<typeof ItemSchema> | null>(null);
   const [syncResult, setSyncResult] = useState("");
-  const contextKey = `${brand.id}:${kind}`;
+  const [channelId, setChannelId] = useState("all");
+  const [range, setRange] = useState<AnalyticsRange>("30d");
+  const contextKey = `${brand.id}:${kind}:${channelId}:${range}`;
   const currentContext = useRef(contextKey);
   currentContext.current = contextKey;
   const generation = useRef(0);
@@ -29,8 +40,19 @@ export function useInsights(
     const request = ++generation.current;
     try {
       const schema = kind === "analytics" ? Analytics : Inbox;
+      const params = new URLSearchParams({ brand_id: brand.id });
+      if (kind === "analytics") {
+        if (channelId !== "all") params.set("channel_id", channelId);
+        if (range !== "all") {
+          const from = new Date(
+            Date.now() - RANGE_DAYS[range] * 86_400_000,
+          ).toISOString();
+          params.set("from", from);
+        }
+        params.set("limit", "500");
+      }
       const next = await api(
-        `/${kind}?brand_id=${brand.id}`,
+        `/${kind}?${params.toString()}`,
         schema as z.ZodType<Result>,
       );
       if (
@@ -47,7 +69,7 @@ export function useInsights(
       )
         setError((e as Error).message);
     }
-  }, [brand.id, kind, contextKey]);
+  }, [brand.id, channelId, kind, contextKey, range]);
   useEffect(() => {
     setResult(null);
     setError("");
@@ -105,5 +127,9 @@ export function useInsights(
     load,
     sync,
     connected,
+    channelId,
+    setChannelId,
+    range,
+    setRange,
   };
 }

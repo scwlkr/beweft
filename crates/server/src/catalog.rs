@@ -14,6 +14,9 @@ use uuid::Uuid;
 pub struct Filter {
     pub brand_id: Option<Uuid>,
     pub channel_id: Option<Uuid>,
+    pub from: Option<chrono::DateTime<chrono::Utc>>,
+    pub to: Option<chrono::DateTime<chrono::Utc>>,
+    pub limit: Option<i64>,
 }
 pub async fn create_brand(
     State(state): State<AppState>,

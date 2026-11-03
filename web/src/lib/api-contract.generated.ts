@@ -63,7 +63,7 @@ export type PublicationAttemptState = "sending" | "manual_required" | "published
 export type PublicationPayload = { "media_ids": Array<string>; "media_metadata"?: Array<MediaMetadata>; "options": Record<string, unknown>; "text": string; "title": string; };
 export type PublicationState = "queued" | "sending" | "manual_required" | "published" | "fixture_complete" | "failed" | "uncertain" | "canceled";
 export type PublicationSummary = { "brand_id": string; "channel_id": string; "channel_name": string; "created_at": string; "id": string; "post_id": string; "post_version": number; "provider": string; "scheduled_at": string; "scheduling_mode": SchedulingMode; "state": PublicationState; "updated_at": string; };
-export type ReconcileRequest = { "external_id"?: string | null; "external_url"?: string | null; "note": string; "observed_attempt_id"?: string | null; "observed_checkpoint_id"?: string | null; "provider_inspected"?: boolean | null; "resolution": Resolution; "sender_stopped"?: boolean | null; "thread_ids"?: Array<string> | null; "thread_root_definitively_ended"?: boolean | null; };
+export type ReconcileRequest = { "external_id"?: string | null; "external_url"?: string | null; "note": string; "observed_attempt_id"?: string | null; "observed_checkpoint_id"?: string | null; "provider_inspected"?: boolean | null; "remote_definitively_ended"?: boolean | null; "resolution": Resolution; "sender_stopped"?: boolean | null; "thread_ids"?: Array<string> | null; "thread_root_definitively_ended"?: boolean | null; };
 export type ReorderQueueRequest = { "channel_id": string; "publication_ids": Array<string>; };
 export type ReplacePublicationRequest = { "post_version": number; "publication_post_version": number; "scheduled_at": string; };
 export type ReplacedPublication = { "previous_publication_id": string; "publication": Publication; };
@@ -103,7 +103,7 @@ export type XUploadPhase = "upload" | "post_started";
 export type XUploadStatus = { "attempt_id": string; "checkpoint_id": string; "phase": XUploadPhase; "reason": string; "reset_allowed": boolean; };
 
 export interface ApiOperations {
-  "GET /api/v1/analytics": { request: undefined; response: { "data": Analytics; }; query: { "brand_id"?: string; } };
+  "GET /api/v1/analytics": { request: undefined; response: { "data": Analytics; }; query: { "brand_id"?: string; "channel_id"?: string; "from"?: string; "to"?: string; "limit"?: number; } };
   "POST /api/v1/auth/bootstrap": { request: BootstrapRequest; response: { "data": Owner; }; query: {  } };
   "POST /api/v1/auth/login": { request: LoginRequest; response: { "data": Owner; }; query: {  } };
   "POST /api/v1/auth/logout": { request: undefined; response: { "data": OkResponse; }; query: {  } };
