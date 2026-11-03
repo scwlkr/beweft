@@ -62,6 +62,21 @@ export function Queue({
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<"newest" | "oldest">("newest");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const exportCsv = () => {
+    const rows = [
+      ["id", "channel", "state", "scheduled_at", "text"].join(","),
+      ...filtered.map((p) =>
+        [p.id, p.channel_name, p.state, p.scheduled_at, JSON.stringify(p.payload.text)].join(","),
+      ),
+    ].join("\\n");
+    const blob = new Blob([rows], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "queue.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
   const [selected, setSelected] = useState<Publication | null>(null);
   const [bulkRescheduleOpen, setBulkRescheduleOpen] = useState(false);
   const [bulkRescheduleAt, setBulkRescheduleAt] = useState("");
@@ -179,6 +194,9 @@ export function Queue({
           <option value="newest">Newest first</option>
           <option value="oldest">Oldest first</option>
         </select>
+        <button type="button" className="text-link" onClick={exportCsv} title="Export queue as CSV">
+          <Download size={14} /> Export CSV
+        </button>
         <input
           type="search"
           placeholder="Search posts…"
