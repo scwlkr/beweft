@@ -190,12 +190,52 @@ export function Queue({
           variant="secondary"
           size="sm"
           onClick={() => importRef.current?.click()}
-          title="Import from CSV (coming soon)"
+          title="Import from CSV to create drafts"
         >
           <FileUp size={16} />
           Import CSV
         </Button>
-        <input ref={importRef} type="file" accept=".csv,text/csv" className="sr-only" />
+        <input
+          ref={importRef}
+          type="file"
+          accept=".csv,text/csv"
+          className="sr-only"
+          onChange={async (e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            try {
+              const text = await file.text();
+              const lines = text.split(/\r?\n/).filter((l) => l.trim());
+              if (lines.length === 0) return;
+              const headers = lines[0].toLowerCase().split(",").map((h) => h.trim().replace(/^"|"$/g, ""));
+              const textIdx = headers.findIndex((h) => h.includes("text") || h.includes("message") || h.includes("content") || h.includes("caption"));
+              const titleIdx = headers.findIndex((h) => h.includes("title"));
+              const count = Math.min(lines.length - 1, 50);
+              for (let i = 1; i <= count; i++) {
+                const parts = lines[i].split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map((p) => p.trim().replace(/^"|"$/g, ""));
+                const postText = textIdx >= 0 ? parts[textIdx] || "" : parts[0] || "";
+                const postTitle = titleIdx >= 0 ? parts[titleIdx] || "" : "";
+                if (!postText && !postTitle) continue;
+                try {
+                  await api("/posts", PostSchema, "POST", {
+                    brand_id: channels[0]?.brand_id ?? "",
+                    title: postTitle,
+                    text: postText,
+                    media_ids: [],
+                    variants: channels.slice(0, 1).map((c) => ({ channel_id: c.id })),
+                    options: {},
+                  });
+                } catch {
+                  // continue
+                }
+              }
+              e.target.value = "";
+              await onRefresh();
+            } catch {
+              e.target.value = "";
+            }
+          }}
+        />
       </div>
       {selectedIds.size > 0 && (
         <div className="bulk-actions">
@@ -317,11 +357,7 @@ export function Queue({
             variant="secondary"
             size="sm"
             onClick={async () => {
-              const targets = filtered.filter(
-                (p) =>
-                  selectedIds.has(p.id) &&
-                  (p.state === "draft" || p.state === "queued" || true),
-              );
+              const targets = filtered.filter((p) => selectedIds.has(p.id));
               if (targets.length === 0) {
                 setSelectedIds(new Set());
                 return;
@@ -334,9 +370,7 @@ export function Queue({
                     title: p.payload.title ? `${p.payload.title} (copy)` : "",
                     text: p.payload.text ?? "",
                     media_ids: p.payload.media_ids ?? [],
-                    variants: channels
-                      .filter((c) => c.id === p.channel_id)
-                      .map((c) => ({ channel_id: c.id })),
+                    variants: [{ channel_id: p.channel_id }],
                     options: p.payload.options ?? {},
                   });
                   done++;
@@ -346,9 +380,6 @@ export function Queue({
               }
               setSelectedIds(new Set());
               await onRefresh();
-              if (done > 0) {
-                // message shown by action context not available; rely on refresh
-              }
             }}
             title="Duplicate selected as drafts"
           >
