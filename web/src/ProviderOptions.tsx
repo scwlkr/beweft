@@ -384,25 +384,23 @@ export function ProviderOptions({
             <option value="mentioned_only">Mentioned accounts</option>
           </select>
         </Field>
-        {(caps.reply || true) && (
-          <Field
-            label="First comment"
-            hint={`${Array.from(String(value.first_comment ?? "")).length}/500 characters`}
-          >
-            <textarea
-              rows={2}
-              value={String(value.first_comment ?? "")}
-              onChange={(e) => {
-                const v = e.target.value;
-                const next = { ...value };
-                if (v.trim()) next.first_comment = v;
-                else delete next.first_comment;
-                onChange(next);
-              }}
-              placeholder="Add a comment to post right after publishing"
-            />
-          </Field>
-        )}
+        <Field
+          label="First comment"
+          hint={`${Array.from(String(value.first_comment ?? "")).length}/500 characters`}
+        >
+          <textarea
+            rows={2}
+            value={String(value.first_comment ?? "")}
+            onChange={(e) => {
+              const v = e.target.value;
+              const next = { ...value };
+              if (v.trim()) next.first_comment = v;
+              else delete next.first_comment;
+              onChange(next);
+            }}
+            placeholder="Add a comment to post right after publishing"
+          />
+        </Field>
       </section>
     );
   if (provider === "pinterest")
