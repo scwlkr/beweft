@@ -10,10 +10,13 @@ This roadmap tracks progress toward Buffer-level functionality. It is continuous
 - [x] **Content Planner copy** (Nov 2 2026) - Ideas renamed to Content planner
 
 ## In Progress
-- [ ] **Calendar enhancements** - Drag-and-drop, better month/week views, posting slots visualization
-- [ ] **Queue improvements** - Better filtering, bulk actions, clearer status indicators
+- [ ] Continue improving UX to match Buffer's polish
 
 ## Completed (Recent)
+- [x] **AI assistance** (Nov 3 2026) - Post suggestions and caption improvements in composer
+- [x] **Keyboard shortcuts** (Nov 3 2026) - Power-user navigation/composer actions
+- [x] **Calendar enhancements** (Nov 3 2026) - Drag-and-drop rescheduling, week/month views, posting slots visualization
+- [x] **Queue improvements** (Nov 3 2026) - Status/channel/sort filters, clearer bulk actions
 - [x] **Queue status filtering** (Nov 2 2026) - Filter by queued/sending/published/failed/uncertain/needs handoff
 - [x] **Queue bulk actions UI** (Nov 2 2026) - Clearer selection and actions
 - [x] **Templates copy polish** (Nov 2 2026) - Templates library naming
@@ -30,12 +33,12 @@ This roadmap tracks progress toward Buffer-level functionality. It is continuous
 - [x] **Media library UX** (Nov 2 2026) - Search and filter by type/name/description
 
 ## Nice to Have
-- [ ] **AI assistance** - Post suggestions, caption improvements
+- [x] **AI assistance** (Nov 3 2026) - Post suggestions, caption improvements
 - [x] **Bulk scheduling** (Nov 2 2026) - CSV import UI placeholder
 - [ ] **First comment scheduling** (where supported)
 - [ ] **Link-in-bio** style features
-- [ ] **Dark mode polish**
-- [ ] **Keyboard shortcuts**
+- [ ] **Dark mode polish** (Nov 3 2026)
+- [x] **Keyboard shortcuts** (Nov 3 2026)
 
 ## Notes
 - Focus on scheduling, publishing, queue management, analytics, account management, and responsive design (per objectives)

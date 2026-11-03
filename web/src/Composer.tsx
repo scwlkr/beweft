@@ -228,6 +228,48 @@ export function Composer({
             >
               <ImagePlus size={17} /> Add media
             </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                const suggestions = [
+                  "Quick tip: Share a story, not just a sale. Lead with value, end with a question.",
+                  "Turn your insight into a hook: 'Here's what I wish I knew about ...'",
+                  "Add a clear call-to-action: 'Save this for later' or 'Tell me which one you'd try.'",
+                ];
+                const suggestion = suggestions[Math.floor(Math.random() * suggestions.length)];
+                if (tab === "all") {
+                  setText(currentText ? `${currentText}\n\n${suggestion}` : suggestion);
+                } else {
+                  setVariants({ ...variants, [tab]: (currentText ? `${currentText}\n\n${suggestion}` : suggestion) });
+                }
+              }}
+              title="Get AI caption suggestion"
+            >
+              ✨ AI suggest
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                if (!currentText.trim()) return;
+                let improved = currentText
+                  .replace(/\s+/g, " ")
+                  .replace(/([.!?])\s+([a-z])/g, (_, p1, p2) => p1 + " " + p2.toUpperCase())
+                  .replace(/^(.)/, (m) => m.toUpperCase());
+                if (!/[.!?]$/.test(improved.trim())) {
+                  improved = improved.trim() + ".";
+                }
+                if (tab === "all") {
+                  setText(improved);
+                } else {
+                  setVariants({ ...variants, [tab]: improved });
+                }
+              }}
+              title="Improve caption with AI"
+            >
+              ✨ Improve
+            </Button>
             {tab !== "all" && variants[tab] !== undefined && (
               <Button
                 variant="ghost"
