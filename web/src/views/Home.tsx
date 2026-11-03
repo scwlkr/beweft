@@ -47,6 +47,10 @@ export function Home({ brand, channels, posts, publications, media, ideas = [], 
               <Plus size={18} />
               Create post
             </Button>
+            <Button variant="secondary" onClick={() => onGo("queue")}>
+              <Send size={18} />
+              View queue
+            </Button>
             <Button variant="secondary" onClick={() => onGo("calendar")}>
               <CalendarDays size={18} />
               View calendar
