@@ -415,6 +415,8 @@ export default function App() {
                       publications={publications}
                       channels={channels}
                       onCompose={(date) => setComposer({ composeDate: date })}
+                      action={action}
+                      onRefresh={load}
                     />
                   )}
                   {route === "ideas" && (

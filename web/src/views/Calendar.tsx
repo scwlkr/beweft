@@ -1,7 +1,7 @@
 import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { z } from "zod";
-import { api, ScheduleSchema, type Publication, type Schedule } from "../api";
+import { api, PublicationSchema, ScheduleSchema, type Publication, type Schedule } from "../api";
 import { Network } from "../components/brand";
 import { State, Time } from "../components/shared";
 import { Button } from "../components/ui/button";
@@ -17,16 +17,30 @@ export function Calendar({
   publications,
   onCompose,
   channels,
+  action,
+  onRefresh,
 }: {
   publications: Publication[];
   onCompose: (date: string) => void;
   channels?: any[];
+  action?: Action;
+  onRefresh?: () => Promise<void> | void;
 }) {
   const [month, setMonth] = useState(
     () => new Date(new Date().getFullYear(), new Date().getMonth(), 1),
   );
+  const [view, setView] = useState<"month" | "week">("month");
+  const [weekStart, setWeekStart] = useState(() => {
+    const now = new Date();
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const day = (d.getDay() + 6) % 7;
+    d.setDate(d.getDate() - day);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  });
   const [selected, setSelected] = useState<string | null>(null);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [draggedId, setDraggedId] = useState<string | null>(null);
 
   useEffect(() => {
     const ch = channels?.[0]?.id;
@@ -44,23 +58,75 @@ export function Calendar({
   });
   const dateKey = (d: Date) =>
     `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  const shift = (n: number) =>
-    setMonth(new Date(month.getFullYear(), month.getMonth() + n, 1));
+  const shift = (n: number) => {
+    if (view === "week") {
+      setWeekStart((prev) => {
+        const d = new Date(prev);
+        d.setDate(d.getDate() + n * 7);
+        return d;
+      });
+    } else {
+      setMonth(new Date(month.getFullYear(), month.getMonth() + n, 1));
+    }
+  };
+  const goToday = () => {
+    if (view === "week") {
+      const now = new Date();
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const day = (d.getDay() + 6) % 7;
+      d.setDate(d.getDate() - day);
+      d.setHours(0, 0, 0, 0);
+      setWeekStart(d);
+    } else {
+      setMonth(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
+    }
+  };
+  const weekDays = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(weekStart);
+    d.setDate(weekStart.getDate() + i);
+    return d;
+  });
   const visible = publications.filter((p) => p.state !== "canceled");
+
+  const reschedulePublication = async (pub: Publication, targetDate: string) => {
+    if (!action) return;
+    const currentTime = new Date(pub.scheduled_at);
+    const hours = String(currentTime.getHours()).padStart(2, "0");
+    const minutes = String(currentTime.getMinutes()).padStart(2, "0");
+    const iso = new Date(`${targetDate}T${hours}:${minutes}:00`).toISOString();
+    await action(
+      () =>
+        api(`/publications/${pub.id}/reschedule`, PublicationSchema, "POST", {
+          scheduled_at: iso,
+        }),
+      "Post rescheduled",
+    );
+    if (onRefresh) await onRefresh();
+  };
+
   return (
     <>
       <div className="calendar-toolbar">
         <div className="inline-actions">
           <h2>
-            {month.toLocaleDateString(undefined, {
-              month: "long",
-              year: "numeric",
-            })}
+            {view === "week"
+              ? `${weekDays[0].toLocaleDateString(undefined, {
+                  month: "short",
+                  day: "numeric",
+                })} – ${weekDays[6].toLocaleDateString(undefined, {
+                  month: "short",
+                  day: "numeric",
+                  year: "numeric",
+                })}`
+              : month.toLocaleDateString(undefined, {
+                  month: "long",
+                  year: "numeric",
+                })}
           </h2>
           <Button
             variant="ghost"
             size="icon"
-            aria-label="Previous month"
+            aria-label="Previous"
             onClick={() => shift(-1)}
           >
             <ChevronLeft size={18} />
@@ -68,22 +134,30 @@ export function Calendar({
           <Button
             variant="ghost"
             size="icon"
-            aria-label="Next month"
+            aria-label="Next"
             onClick={() => shift(1)}
           >
             <ChevronRight size={18} />
           </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() =>
-              setMonth(
-                new Date(new Date().getFullYear(), new Date().getMonth(), 1),
-              )
-            }
-          >
+          <Button variant="secondary" size="sm" onClick={goToday}>
             Today
           </Button>
+          <div className="view-toggle">
+            <Button
+              variant={view === "month" ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => setView("month")}
+            >
+              Month
+            </Button>
+            <Button
+              variant={view === "week" ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => setView("week")}
+            >
+              Week
+            </Button>
+          </div>
         </div>
         <div className="calendar-toolbar-actions">
           <Button size="sm" onClick={() => onCompose(dateKey(new Date()))}>
@@ -99,24 +173,41 @@ export function Calendar({
             {d}
           </div>
         ))}
-        {days.map((d) => {
+        {(view === "month" ? days : weekDays).map((d) => {
+          const key = dateKey(d);
           const items = visible.filter(
-            (p) => dateKey(new Date(p.scheduled_at)) === dateKey(d),
+            (p) => dateKey(new Date(p.scheduled_at)) === key,
           );
           const dow = d.getDay(); // 0 Sun
           const jsDow = dow === 0 ? 7 : dow;
           const slots = schedules
             .filter((s) => s.days.includes(jsDow))
             .map((s) => s.time.slice(0, 5));
+          const isOutsideMonth = view === "month" && d.getMonth() !== month.getMonth();
+          const isToday = key === dateKey(new Date());
           return (
             <button
-              key={dateKey(d)}
-              className={`calendar-day ${d.getMonth() !== month.getMonth() ? "outside" : ""} ${dateKey(d) === dateKey(new Date()) ? "today" : ""}`}
-              onClick={() => setSelected(dateKey(d))}
+              key={key}
+              className={`calendar-day ${isOutsideMonth ? "outside" : ""} ${isToday ? "today" : ""}`}
+              onClick={() => setSelected(key)}
+              onDragOver={(e) => {
+                if (draggedId && action) {
+                  e.preventDefault();
+                }
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (!draggedId || !action) return;
+                const pub = publications.find((p) => p.id === draggedId);
+                if (pub && ["queued", "manual_required"].includes(pub.state)) {
+                  void reschedulePublication(pub, key);
+                }
+                setDraggedId(null);
+              }}
               aria-label={`${d.toLocaleDateString()}, ${items.length} posts`}
             >
               <span className="day-number">{d.getDate()}</span>
-              {slots.length > 0 && d.getMonth() === month.getMonth() && (
+              {slots.length > 0 && !isOutsideMonth && (
                 <div className="calendar-slots">
                   {slots.slice(0, 2).map((t) => (
                     <span key={t} className="calendar-slot">
@@ -126,8 +217,21 @@ export function Calendar({
                   {slots.length > 2 && <span className="calendar-slot">+{slots.length - 2}</span>}
                 </div>
               )}
-              {items.slice(0, 3).map((p) => (
-                <div className={`calendar-post calendar-${p.state}`} key={p.id}>
+              {items.slice(0, view === "week" ? 6 : 3).map((p) => (
+                <div
+                  className={`calendar-post calendar-${p.state}`}
+                  key={p.id}
+                  draggable={["queued", "manual_required"].includes(p.state) && !!action}
+                  onDragStart={(e) => {
+                    if (!action) return;
+                    setDraggedId(p.id);
+                    try {
+                      e.dataTransfer.setData("text/plain", p.id);
+                    } catch {}
+                  }}
+                  onDragEnd={() => setDraggedId(null)}
+                  title="Drag to reschedule"
+                >
                   <span>
                     {new Date(p.scheduled_at).toLocaleTimeString(undefined, {
                       hour: "numeric",
@@ -139,7 +243,9 @@ export function Calendar({
                   </strong>
                 </div>
               ))}
-              {items.length > 3 && <small>+{items.length - 3} more</small>}
+              {items.length > (view === "week" ? 6 : 3) && (
+                <small>+{items.length - (view === "week" ? 6 : 3)} more</small>
+              )}
             </button>
           );
         })}

@@ -185,6 +185,7 @@ export function Queue({
           <span>{selectedIds.size} selected</span>
           <Button
             variant="ghost"
+            size="sm"
             onClick={() => setSelectedIds(new Set())}
           >
             Clear selection
@@ -192,7 +193,39 @@ export function Queue({
           <Button
             variant="secondary"
             size="sm"
-            onClick={() => setSelectedIds(new Set())}
+            onClick={async () => {
+              const targets = filtered.filter(
+                (p) =>
+                  selectedIds.has(p.id) &&
+                  p.state === "queued" &&
+                  p.scheduling_mode === "queue" &&
+                  channels.some((c) => c.id === p.channel_id),
+              );
+              if (targets.length === 0) {
+                setSelectedIds(new Set());
+                return;
+              }
+              const channelId = targets[0].channel_id;
+              const queue = allPublications
+                .filter(
+                  (x) =>
+                    x.channel_id === channelId &&
+                    x.state === "queued" &&
+                    x.scheduling_mode === "queue",
+                )
+                .sort((a, b) => a.scheduled_at.localeCompare(b.scheduled_at));
+              const others = queue.filter((x) => !targets.some((t) => t.id === x.id));
+              await action(
+                () =>
+                  api("/queue/reorder", z.array(PublicationSchema), "POST", {
+                    channel_id: channelId,
+                    publication_ids: [...targets.map((t) => t.id), ...others.map((o) => o.id)],
+                  }),
+                "Moved selected to front",
+              );
+              setSelectedIds(new Set());
+              await onRefresh();
+            }}
           >
             Move to front
           </Button>
@@ -200,6 +233,7 @@ export function Queue({
             variant="secondary"
             size="sm"
             onClick={() => setSelectedIds(new Set())}
+            title="Reschedule selected (coming soon)"
           >
             Reschedule
           </Button>
@@ -207,6 +241,7 @@ export function Queue({
             variant="secondary"
             size="sm"
             onClick={() => setSelectedIds(new Set())}
+            title="Duplicate selected (coming soon)"
           >
             Duplicate
           </Button>
