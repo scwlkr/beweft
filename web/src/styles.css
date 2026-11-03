@@ -2389,6 +2389,19 @@ code {
     border-left: 0;
     border-top: 1px solid var(--line);
   }
+  .view-toolbar {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .tabs {
+    width: 100%;
+    overflow-x: auto;
+  }
+  .section-toolbar {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
   .composer-preview .preview-card {
     max-width: 400px;
   }
