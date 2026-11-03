@@ -32,6 +32,7 @@ import { Insights } from "./views/Insights";
 import { MediaDetails, MediaLibrary } from "./views/MediaLibrary";
 import { Queue } from "./views/Queue";
 import { Settings } from "./views/Settings";
+import { StartPages } from "./views/StartPages";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 export default function App() {
   const workspace = useWorkspace();
@@ -623,3 +624,4 @@ type Action = (
   fn: () => Promise<unknown>,
   message?: string,
 ) => Promise<boolean>;
+import { StartPages } from "./views/StartPages";

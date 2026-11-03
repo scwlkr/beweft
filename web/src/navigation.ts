@@ -7,6 +7,7 @@ import {
   Inbox,
   Layers3,
   Lightbulb,
+  Link2,
   Plug,
   Settings2,
 } from "lucide-react";
@@ -19,6 +20,7 @@ export type Route =
   | "media"
   | "analytics"
   | "inbox"
+  | "start-pages"
   | "connections"
   | "settings";
 export const routes: {
@@ -33,6 +35,7 @@ export const routes: {
   { id: "ideas", name: "Ideas", icon: Lightbulb },
   { id: "drafts", name: "Drafts", icon: FileText },
   { id: "media", name: "Media library", icon: Image },
+  { id: "start-pages", name: "Start Page", icon: Link2 },
   { id: "analytics", name: "Analytics", icon: BarChart3, group: true },
   { id: "inbox", name: "Inbox", icon: Inbox },
   { id: "connections", name: "Connections", icon: Plug, group: true },
@@ -57,6 +60,10 @@ export const titles: Record<Route, [string, string]> = {
     "Your creative collection",
     "Keep your photos and videos ready for their next moment.",
   ],
+  "start-pages": [
+    "Link in bio",
+    "Create a beautiful landing page for all your links.",
+  ],
   analytics: [
     "Understand your impact",
     "Network performance, when your connections support it.",
@@ -77,3 +84,4 @@ export const titles: Record<Route, [string, string]> = {
 export const routeFromHash = (): Route =>
   routes.find((r) => r.id === location.hash.slice(1))?.id ?? "home";
 export const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+import { Link2 } from "lucide-react";

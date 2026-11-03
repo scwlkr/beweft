@@ -196,6 +196,12 @@ pub fn router(state: AppState) -> Router {
             "/inbox/{id}/replies/{request_id}/resolve",
             post(provider_bridge::resolve_reply),
         )
+        .route("/start-pages", get(start_pages::list).post(start_pages::create))
+        .route("/start-pages/{id}", patch(start_pages::update).delete(start_pages::delete))
+        .route("/start-pages/{id}/links", post(start_pages::create_link))
+        .route("/start-pages/{page_id}/links/{link_id}", patch(start_pages::update_link).delete(start_pages::delete_link))
+        .route("/public/start/{slug}", get(start_pages::get_public))
+        .route("/public/start/{slug}/click/{link_id}", post(start_pages::track_click))
         .fallback(|| async { error::ApiError::missing() });
     let web_dir = std::env::var("BEWEFT_WEB_DIR").unwrap_or_else(|_| "web/dist".into());
     Router::new()
@@ -270,3 +276,5 @@ pub async fn shutdown() {
         let _ = tokio::signal::ctrl_c().await;
     }
 }
+
+pub mod start_pages;

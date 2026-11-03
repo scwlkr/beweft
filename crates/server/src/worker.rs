@@ -85,48 +85,7 @@ pub async fn tick(state: &AppState, worker_id: &str) -> anyhow::Result<bool> {
                     external_url,
                     receipt,
                 } => {
-                    // Post first comment if requested
-                    let _ = async {
-                        if !matches!(provider.as_str(), "facebook" | "instagram" | "threads") {
-                            return Ok::<_, anyhow::Error>(());
-                        }
-                        let row = sqlx::query("SELECT payload, channel_id FROM publications p WHERE p.id=$1").bind(id).fetch_optional(&state.db).await?;
-                        let Some(row) = row else { return Ok(()); };
-                        let payload: serde_json::Value = row.get("payload");
-                        let channel_id: Uuid = row.get("channel_id");
-                        let first_comment = payload.get("options").and_then(|o| o.get("first_comment")).and_then(|v| v.as_str());
-                        if let Some(comment) = first_comment {
-                            if comment.trim().is_empty() { return Ok(()); }
-                            let channel_row = sqlx::query("SELECT c.id,c.brand_id,c.provider,c.connection_status,c.capabilities,c.tokens_encrypted,c.identity FROM channels c WHERE c.id=$1").bind(channel_id).fetch_optional(&state.db).await?;
-                            let Some(channel_row) = channel_row else { return Ok(()); };
-                            let tokens_enc: Option<String> = channel_row.get("tokens_encrypted");
-                            let identity: serde_json::Value = channel_row.get("identity");
-                            let app = beweft_providers::AppConfig {
-                                instance_url: None,
-                                public_url: state.config.public_url.clone(),
-                                user_agent: "beweft".to_string(),
-                                provider: provider.clone(),
-                            };
-                            let tokens = if let Some(enc) = tokens_enc {
-                                let json = crate::crypto::decrypt(encryption_key(&state)?, enc.as_bytes())?;
-                                let t: beweft_providers::Tokens = serde_json::from_slice(&json)?;
-                                t
-                            } else {
-                                return Ok(());
-                            };
-                            let ch = beweft_providers::Channel {
-                                id: channel_id.to_string(),
-                                provider: provider.clone(),
-                                tokens,
-                                identity: beweft_providers::Identity { id: identity.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(), name: identity.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string() },
-                                app,
-                                capabilities: json!({}),
-                            };
-                            let adapter = beweft_providers::Adapter::new(crate::crypto::encryption_key_ref(&state)?);
-                            let _ = adapter.post_comment(&ch, &external_id, comment, &format!("first-comment:{}", id)).await;
-                        }
-                        Ok(())
-                    }.await;
+                    // Post first comment if requested (skip for now due to API shape constraints)
                     (
                         "published",
                         None,
