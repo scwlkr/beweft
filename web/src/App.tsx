@@ -446,6 +446,7 @@ export default function App() {
                       action={action}
                       pending={pending}
                       onCompose={() => setComposer(null)}
+                      brandId={brand?.id}
                     />
                   )}
                   {route === "calendar" && (

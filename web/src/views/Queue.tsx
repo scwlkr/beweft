@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, CalendarDays, Copy, FileUp, Image, Plus } from "lucide-react";
+import { ArrowDown, ArrowUp, CalendarDays, Copy, Download, FileUp, Image, Plus } from "lucide-react";
 import { useRef, useState } from "react";
 import { z } from "zod";
 import {
@@ -37,6 +37,7 @@ export function Queue({
   action,
   pending,
   onCompose,
+  brandId,
 }: {
   publications: Publication[];
   allPublications: Publication[];
@@ -51,7 +52,10 @@ export function Queue({
   action: Action;
   pending: boolean;
   onCompose: () => void;
+  brandId?: string;
 }) {
+  const csvBrandId = brandId ?? channels[0]?.brand_id ?? "";
+  const brandChannels = channels.filter((c) => c.brand_id === csvBrandId);
   const [view, setView] = useState("upcoming");
   const [channel, setChannel] = useState("all");
   const [status, setStatus] = useState("all");
@@ -62,6 +66,10 @@ export function Queue({
   const [bulkRescheduleOpen, setBulkRescheduleOpen] = useState(false);
   const [bulkRescheduleAt, setBulkRescheduleAt] = useState("");
   const importRef = useRef<HTMLInputElement>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importChannel, setImportChannel] = useState("");
+  const [importResult, setImportResult] = useState("");
+  const [importing, setImporting] = useState(false);
   const history = ["published", "fixture_complete", "canceled"];
   const statusOptions = [
     { value: "all", label: "All statuses" },
@@ -189,53 +197,109 @@ export function Queue({
         <Button
           variant="secondary"
           size="sm"
-          onClick={() => importRef.current?.click()}
+          onClick={() => {
+            setImportChannel(brandChannels[0]?.id ?? "");
+            setImportResult("");
+            setImportOpen(true);
+          }}
           title="Import from CSV to create drafts"
         >
           <FileUp size={16} />
           Import CSV
         </Button>
-        <input
-          ref={importRef}
-          type="file"
-          accept=".csv,text/csv"
-          className="sr-only"
-          onChange={async (e) => {
-            const file = e.target.files?.[0];
-            if (!file) return;
-            try {
-              const text = await file.text();
-              const lines = text.split(/\r?\n/).filter((l) => l.trim());
-              if (lines.length === 0) return;
-              const headers = lines[0].toLowerCase().split(",").map((h) => h.trim().replace(/^"|"$/g, ""));
-              const textIdx = headers.findIndex((h) => h.includes("text") || h.includes("message") || h.includes("content") || h.includes("caption"));
-              const titleIdx = headers.findIndex((h) => h.includes("title"));
-              const count = Math.min(lines.length - 1, 50);
-              for (let i = 1; i <= count; i++) {
-                const parts = lines[i].split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map((p) => p.trim().replace(/^"|"$/g, ""));
-                const postText = textIdx >= 0 ? parts[textIdx] || "" : parts[0] || "";
-                const postTitle = titleIdx >= 0 ? parts[titleIdx] || "" : "";
-                if (!postText && !postTitle) continue;
-                try {
-                  await api("/posts", PostSchema, "POST", {
-                    brand_id: channels[0]?.brand_id ?? "",
-                    title: postTitle,
-                    text: postText,
-                    media_ids: [],
-                    variants: channels.slice(0, 1).map((c) => ({ channel_id: c.id })),
-                    options: {},
-                  });
-                } catch {
-                  // continue
-                }
-              }
-              e.target.value = "";
-              await onRefresh();
-            } catch {
-              e.target.value = "";
-            }
-          }}
-        />
+        {importOpen && (
+          <Dialog open onOpenChange={(v) => !v && !importing && setImportOpen(false)} title="Import CSV drafts" description="Create one draft per row. Use a header row with text (or message/content/caption) and an optional title column. Up to 50 rows per import. Rows are never published — review drafts before scheduling.">
+            <div className="form-stack">
+              <Field label="Target channel">
+                <select value={importChannel} onChange={(e) => setImportChannel(e.target.value)} disabled={importing}>
+                  {brandChannels.length === 0 && <option value="">No channels for this brand</option>}
+                  {brandChannels.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </Field>
+              <div className="inline-actions">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={importing}
+                  onClick={() => {
+                    const sample = "title,text\nHello world,\"First imported draft\"\n,Second draft without a title\n";
+                    const blob = new Blob([sample], { type: "text/csv;charset=utf-8" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url; a.download = "beweft-import-template.csv"; a.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                >
+                  <Download size={14} /> Download template
+                </Button>
+              </div>
+              <input
+                ref={importRef}
+                type="file"
+                accept=".csv,text/csv"
+                disabled={importing}
+                aria-label="CSV file to import"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = "";
+                  if (!file) return;
+                  if (!importChannel) { setImportResult("Pick a target channel first."); return; }
+                  if (!csvBrandId) { setImportResult("No brand selected — cannot import."); return; }
+                  setImporting(true);
+                  setImportResult("");
+                  let created = 0, skipped = 0;
+                  const failures: string[] = [];
+                  try {
+                    const text = await file.text();
+                    const lines = text.split(/\r?\n/).filter((l) => l.trim());
+                    if (lines.length === 0) { setImportResult("That CSV is empty."); setImporting(false); return; }
+                    const parseRow = (line: string) => line.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map((p) => p.trim().replace(/^"|"$/g, "").replaceAll('""', '"'));
+                    const headers = parseRow(lines[0]).map((h) => h.toLowerCase());
+                    const hasHeader = headers.some((h) => h.includes("text") || h.includes("message") || h.includes("content") || h.includes("caption") || h.includes("title"));
+                    const textIdx = headers.findIndex((h) => h.includes("text") || h.includes("message") || h.includes("content") || h.includes("caption"));
+                    const titleIdx = headers.findIndex((h) => h.includes("title"));
+                    const start = hasHeader ? 1 : 0;
+                    const count = Math.min(lines.length - start, 50);
+                    if (count <= 0) { setImportResult("No data rows found — the template includes a header row plus data rows."); setImporting(false); return; }
+                    for (let i = start; i < start + count; i++) {
+                      const parts = parseRow(lines[i]);
+                      const postText = hasHeader && textIdx >= 0 ? parts[textIdx] || "" : hasHeader ? "" : parts[0] || "";
+                      const postTitle = hasHeader && titleIdx >= 0 ? parts[titleIdx] || "" : "";
+                      if (!postText.trim() && !postTitle.trim()) { skipped++; continue; }
+                      try {
+                        await api("/posts", PostSchema, "POST", {
+                          brand_id: csvBrandId,
+                          title: postTitle,
+                          text: postText,
+                          media_ids: [],
+                          variants: [{ channel_id: importChannel }],
+                          options: {},
+                        });
+                        created++;
+                      } catch (err) {
+                        failures.push(`Row ${i + 1}: ${(err as Error).message}`);
+                      }
+                    }
+                    await onRefresh();
+                    setImportResult(
+                      `Imported ${created} draft${created === 1 ? "" : "s"}${skipped ? `, skipped ${skipped} empty row${skipped === 1 ? "" : "s"}` : ""}${failures.length ? `. ${failures.length} failed: ${failures.slice(0, 3).join("; ")}${failures.length > 3 ? "…" : ""}` : ""}.`,
+                    );
+                  } catch (err) {
+                    setImportResult(`Import failed: ${(err as Error).message}`);
+                  } finally {
+                    setImporting(false);
+                  }
+                }}
+              />
+              {importResult && <p className="availability-note" role="status">{importResult}</p>}
+              <div className="inline-actions">
+                <Button variant="secondary" disabled={importing} onClick={() => setImportOpen(false)}>Close</Button>
+              </div>
+            </div>
+          </Dialog>
+        )}
       </div>
       {selectedIds.size > 0 && (
         <div className="bulk-actions">
