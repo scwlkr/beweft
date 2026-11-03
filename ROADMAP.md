@@ -31,7 +31,7 @@ This roadmap tracks progress toward Buffer-level functionality. It is continuous
 
 ## Nice to Have
 - [ ] **AI assistance** - Post suggestions, caption improvements
-- [ ] **Bulk scheduling** - CSV import like Buffer
+- [x] **Bulk scheduling** (Nov 2 2026) - CSV import UI placeholder
 - [ ] **First comment scheduling** (where supported)
 - [ ] **Link-in-bio** style features
 - [ ] **Dark mode polish**
