@@ -88,6 +88,43 @@ export default function App() {
     [pendingReplacement.review],
   );
   useEffect(() => setReviewMediaId(null), [brandId]);
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName.toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select" || target?.isContentEditable) {
+        return;
+      }
+      const key = e.key.toLowerCase();
+      if (key === "n" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        if (brand && ["home", "queue", "calendar", "drafts"].includes(route)) {
+          e.preventDefault();
+          setComposer(null);
+        }
+        return;
+      }
+      if (key === "/" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        const input = document.querySelector<HTMLInputElement>('.search-row input, input[aria-label*="Search"]');
+        if (input) {
+          input.focus();
+        }
+        return;
+      }
+      if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        if (key === "h") { e.preventDefault(); go("home"); location.hash = "#home"; }
+        else if (key === "q") { e.preventDefault(); go("queue"); location.hash = "#queue"; }
+        else if (key === "c") { e.preventDefault(); go("calendar"); location.hash = "#calendar"; }
+        else if (key === "i") { e.preventDefault(); go("ideas"); location.hash = "#ideas"; }
+        else if (key === "d") { e.preventDefault(); go("drafts"); location.hash = "#drafts"; }
+        else if (key === "m") { e.preventDefault(); go("media"); location.hash = "#media"; }
+        else if (key === "a") { e.preventDefault(); go("analytics"); location.hash = "#analytics"; }
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [brand, route, go]);
   const reviewMedia = media.find((item) => item.id === reviewMediaId);
   if (ready === null) return <Busy />;
   if (!ready)
