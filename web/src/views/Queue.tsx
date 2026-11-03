@@ -243,6 +243,19 @@ export function Queue({
           <Button
             variant="ghost"
             size="sm"
+            onClick={() => {
+              if (selectedIds.size === filtered.length) {
+                setSelectedIds(new Set());
+              } else {
+                setSelectedIds(new Set(filtered.map((p) => p.id)));
+              }
+            }}
+          >
+            {selectedIds.size === filtered.length ? "Deselect all" : "Select all"}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => setSelectedIds(new Set())}
           >
             Clear selection
