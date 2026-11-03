@@ -33,7 +33,7 @@ export function ErrorNotice({ message }: { message: string }) {
 export function Busy() {
   return (
     <div className="loading" role="status">
-      <LoaderCircle className="spin" size={22} /> Loading your workspace…
+      <LoaderCircle className="spin" size={22} /> Loading…
     </div>
   );
 }
