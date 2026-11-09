@@ -94,9 +94,19 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
                 ));
             }
             if p.options
+                .get("license")
+                .is_some_and(|v| !matches!(v.as_str(), Some("youtube" | "creativeCommon")))
+            {
+                return Err(invalid("YouTube license must be youtube or creativeCommon"));
+            }
+            if p.options
                 .get("contains_synthetic_media")
                 .is_some_and(|v| !v.is_boolean())
                 || p.options.get("category_id").is_some_and(|v| !v.is_string())
+                || p.options.get("embeddable").is_some_and(|v| !v.is_boolean())
+                || p.options
+                    .get("notify_subscribers")
+                    .is_some_and(|v| !v.is_boolean())
             {
                 return Err(invalid("Invalid YouTube publishing options"));
             }

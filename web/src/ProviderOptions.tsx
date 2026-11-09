@@ -330,6 +330,33 @@ export function ProviderOptions({
             inputMode="numeric"
           />
         </Field>
+        <Field label="License">
+          <select
+            value={String(value.license ?? "youtube")}
+            onChange={(e) => set("license", e.target.value)}
+          >
+            <option value="youtube">Standard YouTube license</option>
+            <option value="creativeCommon">
+              Creative Commons – Attribution (reuse allowed)
+            </option>
+          </select>
+        </Field>
+        <label className="checkbox-label">
+          <input
+            type="checkbox"
+            checked={value.embeddable !== false}
+            onChange={(e) => set("embeddable", e.target.checked)}
+          />
+          Allow embedding on other sites
+        </label>
+        <label className="checkbox-label">
+          <input
+            type="checkbox"
+            checked={value.notify_subscribers !== false}
+            onChange={(e) => set("notify_subscribers", e.target.checked)}
+          />
+          Notify subscribers about this upload
+        </label>
         <label className="checkbox-label">
           <input
             type="checkbox"
