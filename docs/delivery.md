@@ -22,6 +22,9 @@ reusable templates, queued content replacement/priority, brand maintenance,
 owner sessions/password, provider configuration/recovery, Rust CLI/MCP and
 self-host operations. The current provider catalog and [setup guide](provider-setup.md)
 name supported formats and limits; fixture results do not prove live access.
+Ordinary Facebook Page video, Instagram Stories, Threads replies and Bluesky
+replies are implemented and fixture-tested; live Page and Stories eligibility
+and provider reply access remain unverified.
 
 Fresh reviews covered the consequential corrections. Integrated checks include
 real PostgreSQL, worker interruption/restart and multiple workers, scopes/CSRF,
@@ -35,14 +38,14 @@ checks are recorded in the orchestration record.
 
 ## Remaining feasible product work
 
-Ordinary Facebook Page video, Instagram Stories eligibility,
-Threads/Bluesky replies, LinkedIn organization opt-in, expanded Pinterest
-formats/reads, and Google Business Profile reviews, replies and insights
-remain local implementation work. Google Business Profile direct posting and
-shared Google grant handling are implemented and fixture-tested on this branch;
-provider project approval, eligibility and live publication remain unverified. Bluesky entryway-to-PDS onboarding
-and reconnect/queue migration are also unfinished. Do not classify missing code
-as an external account-approval block or claim universal inbox/analytics support.
+LinkedIn organization opt-in, expanded Pinterest formats/reads, and Google
+Business Profile reviews, replies and insights remain local implementation
+work. Google Business Profile direct posting and shared Google grant handling
+are implemented and fixture-tested on this branch; provider project approval,
+eligibility and live publication remain unverified. Bluesky entryway-to-PDS
+onboarding and reconnect/queue migration are also unfinished. Do not classify
+missing code as an external account-approval block or claim universal
+inbox/analytics support.
 
 ## External qualification
 
