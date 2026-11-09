@@ -1,4 +1,28 @@
 use super::*;
+
+const YOUTUBE_UPLOAD_URL: &str = "https://www.googleapis.com/upload/youtube/v3/videos";
+
+fn youtube_status(p: &Publication) -> Value {
+    json!({
+        "privacyStatus": p.options["privacy"],
+        "selfDeclaredMadeForKids": p.options["made_for_kids"],
+        "containsSyntheticMedia": p.options["contains_synthetic_media"].as_bool().unwrap_or(false),
+        "license": p.options.get("license").and_then(Value::as_str).unwrap_or("youtube"),
+        "embeddable": p.options.get("embeddable").and_then(Value::as_bool).unwrap_or(true),
+    })
+}
+
+fn youtube_insert_url(p: &Publication) -> String {
+    let notify_subscribers = p
+        .options
+        .get("notify_subscribers")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    format!(
+        "{YOUTUBE_UPLOAD_URL}?uploadType=resumable&part=snippet,status&notifySubscribers={notify_subscribers}"
+    )
+}
+
 impl Adapter {
     pub(super) async fn publish_youtube(
         &self,
@@ -15,9 +39,16 @@ impl Adapter {
         let token = Some(c.tokens.access_token.as_str());
         let stage = checkpoint_stage(cp);
         if stage.is_empty() {
-            let status = json!({"privacyStatus":p.options["privacy"],"selfDeclaredMadeForKids":p.options["made_for_kids"],"containsSyntheticMedia":p.options["contains_synthetic_media"].as_bool().unwrap_or(false)});
-            let body = json!({"snippet":{"title":p.title,"description":p.text,"categoryId":p.options["category_id"].as_str().unwrap_or("22")},"status":status});
-            let response=self.response(self.request(Method::POST,"https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",token)?.header("X-Upload-Content-Type",&p.media[0].mime).header("X-Upload-Content-Length",p.media[0].source.len()).json(&body),true).await?;
+            let body = json!({"snippet":{"title":p.title,"description":p.text,"categoryId":p.options["category_id"].as_str().unwrap_or("22")},"status":youtube_status(p)});
+            let response = self
+                .response(
+                    self.request(Method::POST, &youtube_insert_url(p), token)?
+                        .header("X-Upload-Content-Type", &p.media[0].mime)
+                        .header("X-Upload-Content-Length", p.media[0].source.len())
+                        .json(&body),
+                    true,
+                )
+                .await?;
             let session = response
                 .headers()
                 .get("location")
