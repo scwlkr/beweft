@@ -98,11 +98,12 @@ image is qualified and installed. Google Business Profile backend/web work, X
 thread publishing and the Google Business Profile community slice have landed;
 ordinary Facebook Page video, Instagram Stories, Threads replies and Bluesky
 replies are implemented and fixture-tested, with live eligibility and provider
-reply access remaining unverified. Additional local implementation still
-includes live provider qualification. Bluesky
-entryway to PDS onboarding now discovers the account PDS during connection and
-refuses silent origin moves; reconnect and queue migration remain explicit owner
-steps. Missing code is not an external approval block.
+reply access remaining unverified. Feasible local Buffer-parity implementation
+through #48 has landed on `main`; remaining unfinished local product work is
+live provider qualification and hosting. Bluesky entryway to PDS onboarding
+discovers the account PDS during connection and refuses silent origin moves;
+reconnect and queue migration remain explicit owner steps with a dedicated
+migrate UI. Missing code is not an external approval block.
 
 Hosting stays placeholders until a server/domain is selected. Operator-specific
 app registration, scopes, account eligibility, costs/consent and live provider

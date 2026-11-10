@@ -79,8 +79,9 @@ upgrades and physical host-reboot recovery remain unqualified.
   atomic metadata-version precondition. A concurrent edit from another device
   after the check can change the frozen description shown in the comparison.
 - #26: Bluesky video currently omits aspect ratio; playback can use a square card
-  with letterboxing. Bluesky entryway/PDS onboarding and explicit queue-migrate UI landed through #43; explicit
-  queue migration remains an owner step as stated above.
+  with letterboxing. Bluesky entryway/PDS onboarding landed through #42; the
+  explicit queue-migrate UI landed through #48. Queue migration remains an owner
+  step as stated above.
 
 Clean owned disposable fixtures and completed worktrees after use. Preserve
 active work, installation data/keys, unique history and necessary rollback

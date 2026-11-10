@@ -1,19 +1,17 @@
 # beweft project notes
 
-Status: the full build is active. The reviewed application stack through PR #23
-has landed on `main`, preserving its history. A healthy local Docker installation
-is running on loopback port 3000 with first-owner setup available. Current work,
-release qualification, remaining formats and review findings are in
+Status: feasible local Buffer-parity work through PR #48 has landed on `main`
+(`e831a28`). A healthy local Docker installation is running on loopback port
+3000 with first-owner setup available. Current delivery status, residual nits
+and review findings are in
 [the active delivery record](docs/orchestration-current.md).
 
 The practical local release checkpoint passed at about 16:17 America/Chicago
-on 2026-10-29, ahead of the 16:30 target. Core
-UI/API/worker use and a real schema-changing image upgrade/rollback passed;
-provider fixtures do not establish live account access or publication. Content/owner
-UI and Meta, Bluesky and LinkedIn media milestones are merged through #28; the
-combined installation image `beweft:release-bb359e3` is qualified and running.
-Google Business Profile backend/web and X threads have landed; live provider qualification remains open.
-The full intended product scope stays open until its feasible work is finished.
+on 2026-10-29. Core UI/API/worker use and a real schema-changing image
+upgrade/rollback passed; provider fixtures do not establish live account access
+or publication. The combined installation image `beweft:release-bb359e3` remains
+the qualified local image baseline. Live provider qualification and public
+HTTPS hosting remain open owner decisions.
 
 Owner decisions: original unicorn identity; self-host deployment uses placeholders
 until a server/domain is selected. No production deployment target is approved.

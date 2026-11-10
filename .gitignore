@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 .local/
+.audit/
 **/installation.env
 **/demo-state.json
 **/database.dump
