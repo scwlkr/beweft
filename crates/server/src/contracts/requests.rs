@@ -23,6 +23,10 @@ pub struct ProviderAppRequest {
 pub struct StartConnectionRequest {
     pub brand_id: Uuid,
     pub reconnect_channel_id: Option<Uuid>,
+    /// LinkedIn only: explicitly request organization destinations. Ignored for
+    /// other providers and forced on when reconnecting an organization channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_access: Option<bool>,
 }
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct CompleteConnectionRequest {

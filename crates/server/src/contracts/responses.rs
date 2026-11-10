@@ -356,6 +356,8 @@ pub struct ConnectionDestination {
     pub name: String,
     #[schema(required = true)]
     pub username: Option<String>,
+    /// True for a LinkedIn organization destination; false for a member profile.
+    pub organization: bool,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct ConnectionFlow {
@@ -363,6 +365,11 @@ pub struct ConnectionFlow {
     pub brand_id: Uuid,
     pub provider: String,
     pub destinations: Vec<ConnectionDestination>,
+    /// True when this flow explicitly requested LinkedIn organization access.
+    pub organization_access: bool,
+    /// Set only for an opted-in LinkedIn flow; explains the requested scopes.
+    #[schema(required = true)]
+    pub organization_note: Option<String>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct DisconnectResult {

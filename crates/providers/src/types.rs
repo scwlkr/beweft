@@ -7,6 +7,10 @@ pub struct AppConfig {
     /// Only server-admin configuration can supply this (Mastodon instance/PDS).
     #[serde(default)]
     pub instance_url: Option<String>,
+    /// Explicit per-flow opt-in for LinkedIn organization destinations. It is
+    /// not part of grant authority, so existing member grants stay valid.
+    #[serde(default)]
+    pub organization_access: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Tokens {
@@ -84,7 +88,26 @@ impl AppConfig {
                     .map(|s| s.trim_end_matches('/'))
     }
 }
+/// LinkedIn organization destinations are stored as a numeric organization
+/// URN. Member destinations stay as the raw OpenID `sub`; anything else is not
+/// a supported organization identity.
+pub fn linkedin_organization_id(identity: &str) -> Option<&str> {
+    let id = identity.strip_prefix("urn:li:organization:")?;
+    if id.is_empty()
+        || id.len() > 20
+        || !id.bytes().all(|b| b.is_ascii_digit())
+        || id.parse::<u64>().ok().filter(|id| *id > 0).is_none()
+    {
+        return None;
+    }
+    Some(id)
+}
+
 impl Channel {
+    pub fn is_linkedin_organization(&self) -> bool {
+        self.app.provider == "linkedin" && linkedin_organization_id(&self.identity.id).is_some()
+    }
+
     /// The selected parent is part of the encrypted credential, while the
     /// destination remains the stable location resource across parent changes.
     pub fn selection_key(&self) -> Result<String> {

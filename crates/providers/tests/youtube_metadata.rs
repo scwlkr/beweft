@@ -61,6 +61,7 @@ fn channel() -> Channel {
             client_id: "fixture-client".into(),
             client_secret: "fixture-secret".into(),
             instance_url: None,
+            organization_access: false,
         },
     }
 }

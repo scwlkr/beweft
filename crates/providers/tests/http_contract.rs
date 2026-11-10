@@ -130,6 +130,7 @@ fn channel(provider: &str) -> Channel {
             } else {
                 None
             },
+            organization_access: false,
         },
     }
 }

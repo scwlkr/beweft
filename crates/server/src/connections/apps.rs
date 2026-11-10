@@ -316,6 +316,8 @@ pub async fn save_app(
         client_id: client_id.clone(),
         client_secret: secret,
         instance_url: instance,
+        // Organization access is a per-flow opt-in, never saved with the app.
+        organization_access: false,
     };
     if matches!(provider.as_str(), "mastodon" | "bluesky") {
         tokio::time::timeout(std::time::Duration::from_secs(10), adapter_for(&app))

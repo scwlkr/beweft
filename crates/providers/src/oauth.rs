@@ -2,8 +2,8 @@ use crate::*;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
 
-pub fn scopes(provider: &str) -> Vec<String> {
-    match provider {
+pub fn scopes(app: &AppConfig) -> Vec<String> {
+    let mut scopes: Vec<String> = match app.provider.as_str() {
         "x" => vec![
             "tweet.read",
             "tweet.write",
@@ -50,7 +50,15 @@ pub fn scopes(provider: &str) -> Vec<String> {
     }
     .into_iter()
     .map(str::to_owned)
-    .collect()
+    .collect();
+    // Organization access is an explicit opt-in and never changes the default
+    // member grant. `r_organization_admin` is the read-only discovery scope;
+    // do not silently request the broader read/write administration scope.
+    if app.provider == "linkedin" && app.organization_access {
+        scopes.push("w_organization_social".into());
+        scopes.push("r_organization_admin".into());
+    }
+    scopes
 }
 fn auth_endpoint(app: &AppConfig) -> Result<String> {
     Ok(match app.provider.as_str() {
@@ -85,7 +93,7 @@ pub fn authorization_url(
     verifier: &str,
 ) -> Result<String> {
     let mut u = Url::parse(&auth_endpoint(app)?).map_err(|_| invalid("Invalid OAuth endpoint"))?;
-    let requested = scopes(&app.provider).join(
+    let requested = scopes(app).join(
         if matches!(
             app.provider.as_str(),
             "facebook" | "instagram" | "threads" | "pinterest"
@@ -154,4 +162,5 @@ fn parse_tokens(v: &Value, original: Option<&Tokens>) -> Result<Tokens> {
 
 mod google_business;
 mod identity;
+mod linkedin;
 mod tokens;

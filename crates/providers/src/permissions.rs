@@ -1,5 +1,5 @@
 use crate::*;
-fn required_scopes(provider: &str, action: &str) -> Vec<&'static str> {
+fn required_scopes(provider: &str, action: &str, organization: bool) -> Vec<&'static str> {
     match (provider, action) {
         ("x", "publish") => vec!["tweet.write"],
         ("x", "media") => vec!["tweet.write", "media.write"],
@@ -33,6 +33,7 @@ fn required_scopes(provider: &str, action: &str) -> Vec<&'static str> {
         ("threads", "metrics") => vec!["threads_manage_insights"],
         ("mastodon", "publish" | "media" | "reply") => vec!["write"],
         ("mastodon", "metrics" | "inbox") => vec!["read"],
+        ("linkedin", "publish" | "media") if organization => vec!["w_organization_social"],
         ("linkedin", "publish" | "media") => vec!["w_member_social"],
         ("pinterest", "publish" | "media") => vec!["pins:write"],
         _ => vec![],
@@ -48,22 +49,35 @@ pub fn grant_permissions(c: &Channel) -> Value {
     if c.app.provider == "instagram" {
         supported_actions.push("story");
     }
+    let organization = c.is_linkedin_organization();
     for action in supported_actions {
         actions.insert(
             action.into(),
-            action_permission(
+            action_permission_for(
                 &c.app.provider,
                 action,
                 &c.tokens.scopes,
                 c.tokens.scopes_known,
+                organization,
             ),
         );
     }
     json!({"source":if c.tokens.scopes_known {"provider_token_response"}else{"provider_did_not_report_scopes"},"reported_scopes":c.tokens.scopes,"actions":actions,"note":"Granted scopes do not prove format eligibility, provider app review, account access or successful publication."})
 }
 /// Reconstruct an action from already-reported scopes without reading or changing credentials.
+/// This default describes a member destination; use `grant_permissions` for a
+/// channel so LinkedIn organization scopes are applied.
 pub fn action_permission(provider: &str, action: &str, scopes: &[String], known: bool) -> Value {
-    let required = required_scopes(provider, action);
+    action_permission_for(provider, action, scopes, known, false)
+}
+fn action_permission_for(
+    provider: &str,
+    action: &str,
+    scopes: &[String],
+    known: bool,
+    organization: bool,
+) -> Value {
+    let required = required_scopes(provider, action, organization);
     let missing: Vec<_> = required
         .iter()
         .filter(|s| !scopes.iter().any(|g| g == **s))

@@ -34,6 +34,7 @@ fn channel(provider: &str) -> Channel {
             client_id: "client".into(),
             client_secret: "secret".into(),
             instance_url: Some("https://home.example".into()),
+            organization_access: false,
         },
         identity: Identity {
             parent: None,
