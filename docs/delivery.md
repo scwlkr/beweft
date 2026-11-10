@@ -38,15 +38,22 @@ checks are recorded in the orchestration record.
 
 ## Remaining feasible product work
 
-LinkedIn organization opt-in, expanded Pinterest formats/reads, and Google
-Business Profile reviews, replies and insights remain local implementation
-work. Google Business Profile direct posting and shared Google grant handling
-are implemented and fixture-tested on this branch; provider project approval,
-eligibility and live publication remain unverified. Bluesky entryway-to-PDS onboarding now discovers the account PDS during
-connection and refuses silent origin moves; reconnect/queue migration remains an
-explicit owner step that preserves or retires queues. Do not classify
-missing code as an external account-approval block or claim universal
-inbox/analytics support.
+LinkedIn organization opt-in, expanded Pinterest formats/reads and Google
+Business Profile reviews, replies and insights were local implementation work
+and have since landed through #39, #40 and #41; provider project approval,
+account role/eligibility and live publication remain unverified for each.
+Google Business Profile direct posting and shared Google grant handling are
+implemented and fixture-tested; provider project approval, eligibility and live
+publication remain unverified. Bluesky entryway-to-PDS onboarding now discovers
+the account PDS during connection and refuses silent origin moves; reconnect
+and queue migration remain an explicit owner step that preserves or retires
+queues. Do not classify missing code as an external account-approval block or
+claim universal inbox/analytics support.
+
+Truly unfinished local product work remains: Pinterest video Pins and provider
+reads, Queue/Calendar cohesion polish, Composer fullscreen/emoji, Bluesky
+explicit queue-migrate UI when not present, live provider qualification and
+hosting.
 
 ## External qualification
 
@@ -74,7 +81,8 @@ upgrades and physical host-reboot recovery remain unqualified.
   atomic metadata-version precondition. A concurrent edit from another device
   after the check can change the frozen description shown in the comparison.
 - #26: Bluesky video currently omits aspect ratio; playback can use a square card
-  with letterboxing. Entryway/PDS migration remains unfinished as stated above.
+  with letterboxing. Bluesky entryway/PDS onboarding landed through #42; explicit
+  queue migration remains an owner step as stated above.
 
 Clean owned disposable fixtures and completed worktrees after use. Preserve
 active work, installation data/keys, unique history and necessary rollback

@@ -12,7 +12,7 @@ UI/API/worker use and a real schema-changing image upgrade/rollback passed;
 provider fixtures do not establish live account access or publication. Content/owner
 UI and Meta, Bluesky and LinkedIn media milestones are merged through #28; the
 combined installation image `beweft:release-bb359e3` is qualified and running.
-Google Business Profile backend/web and X threads are the next active milestones.
+Google Business Profile backend/web and X threads have landed; live provider qualification remains open.
 The full intended product scope stays open until its feasible work is finished.
 
 Owner decisions: original unicorn identity; self-host deployment uses placeholders
