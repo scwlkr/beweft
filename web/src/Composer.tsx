@@ -1,5 +1,6 @@
 import { useComposer } from "./useComposer";
-import { Check, ImagePlus, Save, Send, X } from "lucide-react";
+import { Check, ImagePlus, Save, Send, Smile, X } from "lucide-react";
+import { useRef, useState } from "react";
 import {
   type ApiSession,
   type Brand,
@@ -118,6 +119,34 @@ export function Composer({
         ),
       ),
   );
+  const [fullscreen, setFullscreen] = useState(false);
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const textRef = useRef<HTMLTextAreaElement>(null);
+  const insertEmoji = (emoji: string) => {
+    const el = textRef.current;
+    const start = el?.selectionStart ?? currentText.length;
+    const end = el?.selectionEnd ?? currentText.length;
+    const next =
+      currentText.slice(0, start) + emoji + currentText.slice(end);
+    if (tab === "all") setText(next);
+    else setVariants({ ...variants, [tab]: next });
+    const pos = start + emoji.length;
+    requestAnimationFrame(() => {
+      const node = textRef.current;
+      if (node) {
+        node.focus();
+        node.setSelectionRange(pos, pos);
+      }
+    });
+  };
+  const EMOJIS = [
+    "😀","😃","😄","😁","😆","😅","😂","🤣","😊","🙂","😉","😍","🥰","😘","😎","🤩",
+    "🤔","🤗","🤫","🤐","😐","😑","😶","😏","😒","🙄","😬","🤥","😌","😔","😪","🤤",
+    "😴","😷","🤒","🤕","🤢","🤮","🤧","🥵","🥶","😵","🤯","🤠","🥳","🥸","😎","🤓",
+    "👍","👎","👏","🙌","🤝","🙏","💪","✌️","🤞","👌","🤌","👋","✋","🖐️","👊","✊",
+    "❤️","🧡","💛","💚","💙","💜","🖤","🤍","🤎","💔","❣️","💕","💞","💓","💗","💖",
+    "✨","⭐","🔥","💯","🎉","🎊","🚀","💡","📌","✅","❌","⚠️","📈","📉","💬","📝",
+  ];
   return (
     <Dialog
       open
@@ -127,6 +156,8 @@ export function Composer({
       title={post?.id ? "Edit post" : "Create a post"}
       description="One idea. A version that feels right on every channel."
       wide
+      fullscreen={fullscreen}
+      onToggleFullscreen={() => setFullscreen((value) => !value)}
     >
       <div className="composer-grid">
         <fieldset
@@ -210,6 +241,7 @@ export function Composer({
             {active ? `${active.name} text` : "Post text"}
           </label>
           <textarea
+            ref={textRef}
             id="post-text"
             className="compose-text"
             value={currentText}
@@ -227,6 +259,16 @@ export function Composer({
               onClick={() => setMediaOpen(!mediaOpen)}
             >
               <ImagePlus size={17} /> Add media
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-expanded={emojiOpen}
+              aria-controls="emoji-panel"
+              onClick={() => setEmojiOpen((value) => !value)}
+              title="Insert emoji"
+            >
+              <Smile size={17} /> Emoji
             </Button>
             <Button
               variant="ghost"
@@ -298,6 +340,28 @@ export function Composer({
               );
             })()}
           </div>
+          {emojiOpen && (
+            <div
+              id="emoji-panel"
+              className="emoji-grid"
+              role="group"
+              aria-label="Choose an emoji"
+              onKeyDown={(e) => {
+                if (e.key === "Escape") setEmojiOpen(false);
+              }}
+            >
+              {EMOJIS.map((emoji) => (
+                <button
+                  type="button"
+                  key={emoji}
+                  className="emoji-option"
+                  onClick={() => insertEmoji(emoji)}
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
+          )}
           {mediaOpen && (
             <div className="media-picker">
               <h3>Media library</h3>

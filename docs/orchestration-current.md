@@ -100,7 +100,7 @@ ordinary Facebook Page video, Instagram Stories, Threads replies and Bluesky
 replies are implemented and fixture-tested, with live eligibility and provider
 reply access remaining unverified. Additional local implementation still
 includes expanded Pinterest formats/reads (video Pins and provider reads),
-Composer fullscreen/emoji, Schedules posting-goal/DST preview, Bluesky explicit
+Schedules posting-goal/DST preview, Bluesky explicit
 queue-migrate UI when not present, and live provider qualification. Bluesky
 entryway to PDS onboarding now discovers the account PDS during connection and
 refuses silent origin moves; reconnect and queue migration remain explicit owner
