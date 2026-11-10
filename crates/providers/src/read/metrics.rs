@@ -155,6 +155,65 @@ impl Adapter {
                 }
                 Ok(out)
             }
+            "pinterest" => {
+                let end = chrono::Utc::now().date_naive();
+                let start = end - chrono::Duration::days(30);
+                let v = self
+                    .send(
+                        self.request(
+                            Method::GET,
+                            &format!(
+                                "https://api.pinterest.com/v5/pins/{}/analytics",
+                                segment(external_id)
+                            ),
+                            token,
+                        )?
+                        .query(&[
+                            ("start_date", start.format("%Y-%m-%d").to_string()),
+                            ("end_date", end.format("%Y-%m-%d").to_string()),
+                            (
+                                "metric_types",
+                                "IMPRESSION,SAVE,OUTBOUND_CLICK,PIN_CLICK,TOTAL_COMMENTS,TOTAL_REACTIONS".to_owned(),
+                            ),
+                        ]),
+                        false,
+                    )
+                    .await?;
+                let payload = v
+                    .get(external_id)
+                    .cloned()
+                    .or_else(|| {
+                        v.as_object()
+                            .and_then(|o| (o.len() == 1).then(|| o.values().next().cloned()))
+                            .flatten()
+                    })
+                    .unwrap_or_else(|| v.clone());
+                let mut out = metrics(
+                    &payload["lifetime_metrics"],
+                    &[
+                        "IMPRESSION",
+                        "SAVE",
+                        "OUTBOUND_CLICK",
+                        "PIN_CLICK",
+                        "TOTAL_COMMENTS",
+                        "TOTAL_REACTIONS",
+                    ],
+                );
+                if out.is_empty() {
+                    out = metrics(
+                        &payload["summary_metrics"],
+                        &[
+                            "IMPRESSION",
+                            "SAVE",
+                            "OUTBOUND_CLICK",
+                            "PIN_CLICK",
+                            "TOTAL_COMMENTS",
+                            "TOTAL_REACTIONS",
+                        ],
+                    );
+                }
+                Ok(out)
+            }
             _ => Err(error(
                 FailureKind::Unavailable,
                 "Metrics are not implemented for this provider",

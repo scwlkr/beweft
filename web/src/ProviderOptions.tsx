@@ -451,6 +451,13 @@ export function ProviderOptions({
             onChange={(e) => set("link", e.target.value)}
           />
         </Field>
+        <Field label="Cover image URL (required for video Pins)">
+          <input
+            type="url"
+            value={String(value.cover_image_url ?? "")}
+            onChange={(e) => set("cover_image_url", e.target.value)}
+          />
+        </Field>
       </section>
     );
   return null;

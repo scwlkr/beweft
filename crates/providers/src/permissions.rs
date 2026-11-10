@@ -36,6 +36,7 @@ fn required_scopes(provider: &str, action: &str, organization: bool) -> Vec<&'st
         ("linkedin", "publish" | "media") if organization => vec!["w_organization_social"],
         ("linkedin", "publish" | "media") => vec!["w_member_social"],
         ("pinterest", "publish" | "media") => vec!["pins:write"],
+        ("pinterest", "metrics") => vec!["pins:read"],
         _ => vec![],
     }
 }
