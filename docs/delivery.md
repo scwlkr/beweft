@@ -51,7 +51,7 @@ queues. Do not classify missing code as an external account-approval block or
 claim universal inbox/analytics support.
 
 Truly unfinished local product work remains: Pinterest video Pins and provider
-reads, Schedules posting-goal/DST preview, Bluesky
+reads, Bluesky
 explicit queue-migrate UI when not present, live provider qualification and
 hosting.
 

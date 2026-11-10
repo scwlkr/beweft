@@ -1979,6 +1979,17 @@ code {
 .schedule-rules {
   margin: 22px 0;
 }
+.posting-goal,
+.dst-preview {
+  margin: 16px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.posting-goal .field {
+  max-width: 220px;
+}
 .schedule-rule {
   display: flex;
   align-items: center;
