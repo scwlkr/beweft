@@ -105,12 +105,12 @@ pub fn capabilities() -> Vec<Capabilities> {
         Capabilities {
             id: "pinterest",
             name: "Pinterest",
-            formats: &["image", "carousel"],
+            formats: &["image", "carousel", "video"],
             oauth: true,
-            analytics: false,
+            analytics: true,
             inbox: false,
             reply: false,
-            reason: "Approved Pinterest app and board ID required. Image Pins and 2–5 image carousel Pins via public HTTPS media URLs; video Pins require Pinterest media upload registration and are not implemented.",
+            reason: "Approved Pinterest app and board ID required. Image Pins, 2–5 image carousel Pins via public HTTPS media URLs, and video Pins via Pinterest media upload registration. Pin analytics reads are supported; inbox and replies are not.",
         },
     ]
 }

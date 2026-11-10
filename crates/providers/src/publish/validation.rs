@@ -251,13 +251,37 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
             }
         }
         "pinterest" => {
+            let videos = p.media.iter().filter(|m| video(m)).count();
+            let images = p.media.iter().filter(|m| image(m)).count();
             if p.media.is_empty()
                 || p.media.len() > 5
-                || p.media.iter().any(|m| !image(m))
-                || p.options["board_id"].as_str().unwrap_or("").is_empty()
+                || images + videos != p.media.len()
             {
                 return Err(invalid(
-                    "Pinterest needs 1–5 images and a board ID",
+                    "Pinterest needs 1–5 images or one video and a board ID",
+                ));
+            }
+            if videos > 1 || (videos == 1 && p.media.len() != 1) {
+                return Err(invalid(
+                    "Pinterest video Pins require exactly one video attachment",
+                ));
+            }
+            if videos == 0 && p.media.iter().any(|m| !image(m)) {
+                return Err(invalid("Pinterest needs 1–5 images and a board ID"));
+            }
+            if p.options["board_id"].as_str().unwrap_or("").is_empty() {
+                return Err(invalid("Pinterest needs a board ID"));
+            }
+            if videos == 1
+                && p.options
+                    .get("cover_image_url")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty()
+            {
+                return Err(invalid(
+                    "Pinterest video Pins require a cover image URL",
                 ));
             }
             if p.options
@@ -265,6 +289,12 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
                 .is_some_and(|v| !v.is_string() && !v.is_null())
             {
                 return Err(invalid("Invalid Pinterest link"));
+            }
+            if p.options
+                .get("cover_image_url")
+                .is_some_and(|v| !v.is_string() && !v.is_null())
+            {
+                return Err(invalid("Invalid Pinterest cover image URL"));
             }
         }
         _ => return Err(invalid("No direct publishing adapter for this provider")),

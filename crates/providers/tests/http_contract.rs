@@ -96,6 +96,20 @@ async fn provider(State(state): State<Arc<Mutex<Fixture>>>, request: Request) ->
             return r;
         }
         "/v5/pins" => json!({"id":"pin-1"}),
+        "/v5/media" if method == "POST" => json!({
+            "media_id": "media-1",
+            "upload_url": "https://pinterest-media-upload.s3-accelerate.amazonaws.com/",
+            "upload_parameters": {"key": "uploads/test", "policy": "policy"}
+        }),
+        p if p == "/" && method == "POST" => {
+            return StatusCode::NO_CONTENT.into_response();
+        }
+        p if p.starts_with("/v5/media/") && method == "GET" => {
+            json!({"media_id": "media-1", "status": "succeeded"})
+        }
+        p if p.starts_with("/v5/pins/") && p.ends_with("/analytics") && method == "GET" => {
+            json!({"pin-1": {"lifetime_metrics": {"IMPRESSION": 5, "SAVE": 2}}})
+        }
         _ => {
             return (
                 StatusCode::NOT_FOUND,
