@@ -132,7 +132,7 @@ pub use validation::validate;
 mod bluesky;
 mod facebook;
 mod google_business;
-pub use google_business::{google_post_name_for_location, google_public_origin};
+pub use google_business::{google_post_name_for_location, google_public_origin, google_review_name_for_location};
 mod linkedin;
 mod mastodon;
 mod meta;

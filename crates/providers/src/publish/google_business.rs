@@ -283,6 +283,33 @@ pub fn google_post_name_for_location(name: &str, expected_location: &str) -> Res
     Ok(())
 }
 
+/// Validate a Google review resource name against the stable location.
+pub fn google_review_name_for_location(name: &str, expected_location: &str) -> Result<()> {
+    let (parent, review) = name
+        .split_once("/reviews/")
+        .ok_or_else(|| error(FailureKind::Uncertain, "Invalid saved Google review resource"))?;
+    let (account, location) = parent
+        .split_once("/locations/")
+        .ok_or_else(|| error(FailureKind::Uncertain, "Invalid saved Google review resource"))?;
+    google_resource(account, "accounts")
+        .map_err(|_| error(FailureKind::Uncertain, "Invalid saved Google account"))?;
+    google_resource(&format!("locations/{location}"), "locations")
+        .map_err(|_| error(FailureKind::Uncertain, "Invalid saved Google location"))?;
+    google_resource(&format!("reviews/{review}"), "reviews").map_err(|_| {
+        error(
+            FailureKind::Uncertain,
+            "Invalid saved Google review identifier",
+        )
+    })?;
+    if expected_location != format!("locations/{location}") {
+        return Err(error(
+            FailureKind::Uncertain,
+            "Saved Google review belongs to a different location",
+        ));
+    }
+    Ok(())
+}
+
 fn post_name(cp: &Value, c: &Channel) -> Result<String> {
     let name = field(cp, "name")?;
     google_post_name_for_location(&name, &c.identity.id)?;

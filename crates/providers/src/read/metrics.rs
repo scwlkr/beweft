@@ -1,4 +1,5 @@
 use super::*;
+use chrono::Datelike;
 impl Adapter {
     pub async fn metrics(&self, c: &Channel, external_id: &str) -> Result<Vec<Metric>> {
         require_permission(c, "metrics")?;
@@ -102,6 +103,57 @@ impl Adapter {
                     &v["posts"][0],
                     &["replyCount", "repostCount", "likeCount", "quoteCount"],
                 ))
+            }
+            "google_business" => {
+                crate::google_post_name_for_location(external_id, &c.identity.id)?;
+                let parent = c.selection_key()?;
+                let end = chrono::Utc::now().date_naive();
+                let start = end - chrono::Duration::days(30);
+                let body = json!({
+                    "localPostNames": [external_id],
+                    "basicRequest": {
+                        "metricRequests": [
+                            {"metric":"LOCAL_POST_VIEWS_SEARCH","options":["AGGREGATED_TOTAL"]},
+                            {"metric":"LOCAL_POST_ACTIONS_CALL_TO_ACTION","options":["AGGREGATED_TOTAL"]}
+                        ],
+                        "timeRange": {
+                            "startDate": {"year":start.year(),"month":start.month(),"day":start.day()},
+                            "endDate": {"year":end.year(),"month":end.month(),"day":end.day()}
+                        }
+                    }
+                });
+                let v = self
+                    .send(
+                        self.request(
+                            Method::POST,
+                            &format!("https://mybusiness.googleapis.com/v4/{parent}/localPosts:reportInsights"),
+                            token,
+                        )?
+                        .json(&body),
+                        false,
+                    )
+                    .await?;
+                let mut out = vec![];
+                for m in v["localPostMetrics"].as_array().unwrap_or(&vec![]) {
+                    if m["localPostName"].as_str() != Some(external_id) {
+                        continue;
+                    }
+                    for mv in m["metricValues"].as_array().unwrap_or(&vec![]) {
+                        let name = mv["metric"].as_str().unwrap_or("").to_owned();
+                        if name.is_empty() {
+                            continue;
+                        }
+                        let value = mv["totalValue"]["value"]
+                            .as_str()
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .or_else(|| mv["totalValue"]["value"].as_i64());
+                        if let Some(value) = value {
+                            out.push(Metric { name, value });
+                        }
+                        // Missing values are intentionally omitted rather than recorded as zero.
+                    }
+                }
+                Ok(out)
             }
             _ => Err(error(
                 FailureKind::Unavailable,
