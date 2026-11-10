@@ -100,9 +100,9 @@ Stories, Threads replies and Bluesky replies are implemented and fixture-tested;
 live Page and Stories eligibility and provider reply access remain unverified.
 Additional local implementation still includes X threads, LinkedIn organization
 opt-in, expanded Pinterest formats/reads, Google Business Profile direct support
-and safe Google grant-family handling. Bluesky entryway to PDS
-onboarding/reconnect migration must be implemented without silently moving
-existing grants or queues. Missing code is not an external approval block.
+and safe Google grant-family handling. Bluesky entryway to PDS onboarding now discovers the account PDS during
+connection and refuses silent origin moves; reconnect and queue migration
+remain explicit owner steps. Missing code is not an external approval block.
 
 Hosting stays placeholders until a server/domain is selected. Operator-specific
 app registration, scopes, account eligibility, costs/consent and live provider

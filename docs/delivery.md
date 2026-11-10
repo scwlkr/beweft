@@ -42,8 +42,9 @@ LinkedIn organization opt-in, expanded Pinterest formats/reads, and Google
 Business Profile reviews, replies and insights remain local implementation
 work. Google Business Profile direct posting and shared Google grant handling
 are implemented and fixture-tested on this branch; provider project approval,
-eligibility and live publication remain unverified. Bluesky entryway-to-PDS
-onboarding and reconnect/queue migration are also unfinished. Do not classify
+eligibility and live publication remain unverified. Bluesky entryway-to-PDS onboarding now discovers the account PDS during
+connection and refuses silent origin moves; reconnect/queue migration remains an
+explicit owner step that preserves or retires queues. Do not classify
 missing code as an external account-approval block or claim universal
 inbox/analytics support.
 

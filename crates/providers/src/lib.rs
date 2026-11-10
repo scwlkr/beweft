@@ -21,6 +21,29 @@ pub use catalog::*;
 pub use client::*;
 pub use deadline::*;
 pub use types::*;
+/// Discover a Bluesky account's PDS origin from a createSession/getSession
+/// response's DID document. Returns `None` when no DID document is present,
+/// so callers can preserve the configured origin for older fixtures.
+pub fn bluesky_pds_origin(value: &Value) -> Option<String> {
+    value
+        .get("didDoc")
+        .and_then(|doc| doc.get("service"))
+        .and_then(Value::as_array)
+        .and_then(|services| {
+            services.iter().find_map(|service| {
+                let id = service.get("id").and_then(Value::as_str)?;
+                if !id.ends_with("#atproto_pds") {
+                    return None;
+                }
+                service
+                    .get("serviceEndpoint")
+                    .and_then(Value::as_str)
+                    .filter(|endpoint| !endpoint.is_empty())
+                    .map(|endpoint| endpoint.trim_end_matches('/').to_owned())
+            })
+        })
+}
+
 pub fn instance_origin(app: &AppConfig) -> Result<String> {
     let value = app
         .instance_url

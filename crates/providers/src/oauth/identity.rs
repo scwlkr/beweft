@@ -128,6 +128,18 @@ impl Adapter {
             name: field(&v, "handle")?,
             username: Some(field(&v, "handle")?),
         };
+        // Discover the account's actual PDS from its DID document. An
+        // entryway such as bsky.social is not necessarily the account's PDS;
+        // never connect at a different origin than the configured, approved
+        // one and never silently move an existing grant or queue.
+        if let Some(discovered) = crate::bluesky_pds_origin(&v) {
+            let configured = instance_origin(app)?.trim_end_matches('/').to_owned();
+            if discovered != configured {
+                return Err(invalid(&format!(
+                    "This account uses a different PDS ({discovered}). Configure that origin, connect a new channel there, and migrate or retire queues explicitly; existing channels and queues are not moved."
+                )));
+            }
+        }
         Ok(Channel {
             app: app.clone(),
             identity,
