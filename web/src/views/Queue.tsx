@@ -19,6 +19,7 @@ import { Dialog } from "../components/ui/dialog";
 import type { PendingMedia } from "../usePendingMedia";
 import type { usePendingSchedule } from "../usePendingSchedule";
 import { PublicationDetails } from "./PublicationDetails";
+import { Calendar } from "./Calendar";
 type Action = (
   fn: () => Promise<unknown>,
   message?: string,
@@ -57,6 +58,8 @@ export function Queue({
   const csvBrandId = brandId ?? channels[0]?.brand_id ?? "";
   const brandChannels = channels.filter((c) => c.brand_id === csvBrandId);
   const [view, setView] = useState("upcoming");
+  const [surface, setSurface] = useState<"list" | "calendar">("list");
+  const [tagFilter, setTagFilter] = useState("");
   const [channel, setChannel] = useState("all");
   const [status, setStatus] = useState("all");
   const [search, setSearch] = useState("");
@@ -95,6 +98,31 @@ export function Queue({
     { value: "uncertain", label: "Uncertain" },
     { value: "manual_required", label: "Needs handoff" },
   ];
+  const tagMap = new Map(
+    publications.map((p) => {
+      const tags = new Set<string>();
+      const add = (value: unknown) => {
+        if (Array.isArray(value)) {
+          for (const item of value) {
+            if (typeof item === "string" && item.trim())
+              tags.add(item.trim());
+          }
+        }
+      };
+      add((p as { tags?: unknown }).tags);
+      add((p.payload as { tags?: unknown })?.tags);
+      add(p.payload?.options?.tags);
+      const post = posts.find((x) => x.id === p.post_id);
+      if (post) {
+        add((post as { tags?: unknown }).tags);
+        add(post.options?.tags);
+      }
+      return [p.id, [...tags]] as const;
+    }),
+  );
+  const knownTags = [
+    ...new Set(publications.flatMap((p) => tagMap.get(p.id) ?? [])),
+  ].sort((a, b) => a.localeCompare(b));
   const filtered = publications
     .filter(
       (p) =>
@@ -107,8 +135,12 @@ export function Queue({
         ? history.includes(p.state)
         : view === "attention"
           ? ["failed", "uncertain", "manual_required"].includes(p.state)
-          : !history.includes(p.state)),
-  ).sort((a, b) =>
+          : !history.includes(p.state)) &&
+        (tagFilter === "" ||
+          (tagFilter === "__untagged__"
+            ? (tagMap.get(p.id) ?? []).length === 0
+            : (tagMap.get(p.id) ?? []).includes(tagFilter))),
+    ).sort((a, b) =>
     sort === "newest"
       ? b.scheduled_at.localeCompare(a.scheduled_at)
       : a.scheduled_at.localeCompare(b.scheduled_at),
@@ -137,8 +169,38 @@ export function Queue({
       "Queue reordered",
     );
   };
+  if (surface === "calendar") {
+    return (
+      <>
+        <div className="view-toggle" role="group" aria-label="Queue surface" style={{ marginBottom: 12 }}>
+          <Button variant="secondary" size="sm" onClick={() => setSurface("list")}>
+            List
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => setSurface("calendar")}>
+            Calendar
+          </Button>
+        </div>
+        <Calendar
+          publications={publications}
+          channels={channels}
+          onCompose={() => onCompose()}
+          action={action}
+          onRefresh={onRefresh}
+          posts={posts}
+        />
+      </>
+    );
+  }
   return (
     <>
+      <div className="view-toggle" role="group" aria-label="Queue surface" style={{ marginBottom: 12 }}>
+        <Button variant="secondary" size="sm" onClick={() => setSurface("list")}>
+          List
+        </Button>
+        <Button variant="ghost" size="sm" onClick={() => setSurface("calendar")}>
+          Calendar
+        </Button>
+      </div>
       <div className="view-toolbar">
         <div className="tabs">
           <button
@@ -193,6 +255,15 @@ export function Queue({
         <select value={sort} onChange={(e) => setSort(e.target.value as "newest" | "oldest")} aria-label="Sort posts">
           <option value="newest">Newest first</option>
           <option value="oldest">Oldest first</option>
+        </select>
+        <select value={tagFilter} onChange={(e) => setTagFilter(e.target.value)} aria-label="Filter by tag">
+          <option value="">All tags</option>
+          <option value="__untagged__">Untagged</option>
+          {knownTags.map((tag) => (
+            <option key={tag} value={tag}>
+              {tag}
+            </option>
+          ))}
         </select>
         <button type="button" className="text-link" onClick={exportCsv} title="Export queue as CSV">
           <Download size={14} /> Export CSV
