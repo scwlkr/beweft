@@ -90,6 +90,7 @@ fn channel() -> Channel {
             client_id: "fixture".into(),
             client_secret: "fixture".into(),
             instance_url: None,
+            organization_access: false,
         },
     }
 }

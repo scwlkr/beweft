@@ -100,7 +100,7 @@ pub fn capabilities() -> Vec<Capabilities> {
             analytics: false,
             inbox: false,
             reply: false,
-            reason: "Member posts support text, JPEG/PNG images or one MP4 video. Organization publishing and restricted member reads are not implemented.",
+            reason: "Member posts support text, JPEG/PNG images or one MP4 video. Optional organization access requests w_organization_social and read-only r_organization_admin, and discovers only organizations where the member is an ADMINISTRATOR. Organization publishing is fixture-tested only; restricted member reads are not implemented.",
         },
         Capabilities {
             id: "pinterest",

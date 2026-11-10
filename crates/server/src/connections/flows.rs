@@ -73,17 +73,41 @@ pub async fn start(
     auth.owner_session()?;
     let brand = uuid(&body, "brand_id")?;
     auth.brand(brand)?;
+    let organization_access = match body.get("organization_access") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err(ApiError::bad("organization_access must be a boolean")),
+    };
+    if organization_access && provider != "linkedin" {
+        return Err(ApiError::bad(
+            "Organization access is only available for LinkedIn",
+        ));
+    }
     let reconnect = optional_reconnect_channel(&body)?;
+    let mut reconnect_organization = false;
     if let Some(id) = reconnect {
-        let row = sqlx::query("SELECT brand_id,provider FROM channels WHERE id=$1")
-            .bind(id)
-            .fetch_one(&state.db)
-            .await?;
+        let row = sqlx::query(
+            "SELECT brand_id,provider,connection_identity FROM channels WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
         if row.get::<Uuid, _>("brand_id") != brand || row.get::<String, _>("provider") != provider {
             return Err(ApiError::bad(
                 "Reconnect target must match the brand and provider",
             ));
         }
+        reconnect_organization = provider == "linkedin"
+            && row
+                .get::<Option<String>, _>("connection_identity")
+                .as_deref()
+                .and_then(providers::linkedin_organization_id)
+                .is_some();
+    }
+    if reconnect.is_some() && organization_access && !reconnect_organization {
+        return Err(ApiError::bad(
+            "A member reconnect cannot add organization access; start a new organization connection instead",
+        ));
     }
     let id = Uuid::new_v4();
     let state_token = crypto::random_secret();
@@ -95,7 +119,10 @@ pub async fn start(
         &provider,
     )?;
     lock_active_brand(&mut tx, brand).await?;
-    let app = super::apps::app_config_tx(&state, &mut tx, &provider).await?;
+    let mut app = super::apps::app_config_tx(&state, &mut tx, &provider).await?;
+    // Organization access is stored only for this flow; reconnecting an
+    // organization channel must request the organization scopes again.
+    app.organization_access = reconnect_organization || organization_access;
     let redirect = format!(
         "{}/api/v1/connections/{provider}/callback",
         state.config.public_url
@@ -389,10 +416,16 @@ pub async fn flow_destinations(
 ) -> Result<Json<Value>> {
     let (row, candidates) = flow(&state, &auth, &headers, id).await?;
     let destinations = candidates.iter().map(|c| {
-        Ok(json!({"id":c.selection_key().map_err(provider_error)?,"name":c.identity.name,"username":c.identity.username}))
+        Ok(json!({"id":c.selection_key().map_err(provider_error)?,"name":c.identity.name,"username":c.identity.username,"organization":c.is_linkedin_organization()}))
     }).collect::<Result<Vec<Value>>>()?;
+    let organization_access = candidates
+        .first()
+        .is_some_and(|c| c.app.provider == "linkedin" && c.app.organization_access);
+    let organization_note = organization_access.then_some(
+        "Organization access was requested with w_organization_social and read-only r_organization_admin. Only organizations where you are an ADMINISTRATOR are listed. Select your member profile to publish as yourself; provider app review still applies.",
+    );
     Ok(data(
-        json!({"id":id,"brand_id":row.get::<Uuid,_>("brand_id"),"provider":row.get::<String,_>("provider"),"destinations":destinations}),
+        json!({"id":id,"brand_id":row.get::<Uuid,_>("brand_id"),"provider":row.get::<String,_>("provider"),"destinations":destinations,"organization_access":organization_access,"organization_note":organization_note}),
     ))
 }
 pub async fn complete(

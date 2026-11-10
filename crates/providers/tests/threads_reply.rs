@@ -35,7 +35,7 @@ async fn threads_text_reply_happy_path() {
     let c = Channel {
         identity: Identity { parent: None, id: "account-1".into(), name: "Fixture".into(), username: None },
         tokens: Tokens { access_token: "fixture-only".into(), refresh_token: None, expires_at: None, scopes: vec![], scopes_known: false },
-        app: AppConfig { provider: "threads".into(), client_id: "fixture-client".into(), client_secret: "fixture-secret".into(), instance_url: None },
+        app: AppConfig { provider: "threads".into(), client_id: "fixture-client".into(), client_secret: "fixture-secret".into(), instance_url: None, organization_access: false },
     };
     let item = InboxItem { id: "post-1".into(), parent_id: None, author: "Fixture".into(), text: "hello".into(), url: None, created_at: None, reply_context: None };
     let step = adapter.reply(&c, &item, "Reply text", "request-1").await.unwrap();

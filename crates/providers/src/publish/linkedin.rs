@@ -94,6 +94,19 @@ fn headers(b: RequestBuilder) -> RequestBuilder {
         .header("X-Restli-Protocol-Version", "2.0.0")
 }
 
+/// The post author is derived from the stored destination identity. Only a
+/// validated organization URN is used as-is; member identities keep the
+/// existing `urn:li:person:{sub}` form.
+fn author(c: &Channel) -> Result<String> {
+    if c.identity.id.starts_with("urn:li:organization:") {
+        if linkedin_organization_id(&c.identity.id).is_none() {
+            return Err(invalid("LinkedIn organization identity is invalid"));
+        }
+        return Ok(c.identity.id.clone());
+    }
+    Ok(format!("urn:li:person:{}", c.identity.id))
+}
+
 impl Adapter {
     pub(super) async fn publish_linkedin(
         &self,
@@ -103,7 +116,7 @@ impl Adapter {
     ) -> Result<Step> {
         let token = Some(c.tokens.access_token.as_str());
         let stage = checkpoint_stage(cp);
-        let author = format!("urn:li:person:{}", c.identity.id);
+        let author = author(c)?;
         match stage {
             "" => {
                 return Ok(Step::Checkpoint(

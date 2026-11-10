@@ -4,6 +4,9 @@ impl Adapter {
         if app.provider == "google_business" {
             return self.google_business_identities(app, tokens).await;
         }
+        if app.provider == "linkedin" {
+            return self.linkedin_identities(app, tokens).await;
+        }
         let token = Some(tokens.access_token.as_str());
         let mut result = vec![];
         if app.provider == "facebook" {
@@ -60,7 +63,6 @@ impl Adapter {
                 "{}/api/v1/accounts/verify_credentials",
                 instance_origin(app)?
             ),
-            "linkedin" => "https://api.linkedin.com/v2/userinfo".into(),
             "pinterest" => "https://api.pinterest.com/v5/user_account".into(),
             _ => return Err(invalid("Unknown identity provider")),
         };
@@ -74,7 +76,6 @@ impl Adapter {
         };
         let id = match app.provider.as_str() {
             "instagram" => field(item, "user_id")?,
-            "linkedin" => field(item, "sub")?,
             "pinterest" => field(item, "username")?,
             _ => field(item, "id")?,
         };

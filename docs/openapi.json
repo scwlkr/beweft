@@ -271,6 +271,10 @@
           "name": {
             "type": "string"
           },
+          "organization": {
+            "description": "True for a LinkedIn organization destination; false for a member profile.",
+            "type": "boolean"
+          },
           "username": {
             "type": [
               "string",
@@ -281,7 +285,8 @@
         "required": [
           "id",
           "name",
-          "username"
+          "username",
+          "organization"
         ],
         "type": "object"
       },
@@ -301,6 +306,17 @@
             "format": "uuid",
             "type": "string"
           },
+          "organization_access": {
+            "description": "True when this flow explicitly requested LinkedIn organization access.",
+            "type": "boolean"
+          },
+          "organization_note": {
+            "description": "Set only for an opted-in LinkedIn flow; explains the requested scopes.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "provider": {
             "type": "string"
           }
@@ -309,7 +325,9 @@
           "id",
           "brand_id",
           "provider",
-          "destinations"
+          "destinations",
+          "organization_access",
+          "organization_note"
         ],
         "type": "object"
       },
@@ -1989,6 +2007,13 @@
               "null"
             ]
           },
+          "remote_definitively_ended": {
+            "description": "For a public Meta (Facebook/Instagram/Threads) boundary, affirm the remote operation definitively failed, stopped, or was canceled. An absent post or stopped local sender alone is not proof.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "resolution": {
             "$ref": "#/components/schemas/Resolution"
           },
@@ -2540,6 +2565,13 @@
           "brand_id": {
             "format": "uuid",
             "type": "string"
+          },
+          "organization_access": {
+            "description": "LinkedIn only: explicitly request organization destinations. Ignored for\nother providers and forced on when reconnecting an organization channel.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "reconnect_channel_id": {
             "format": "uuid",
@@ -3127,6 +3159,43 @@
             "schema": {
               "format": "uuid",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "channel_id",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "integer"
             }
           }
         ],

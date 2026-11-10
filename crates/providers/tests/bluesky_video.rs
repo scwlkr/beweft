@@ -158,6 +158,7 @@ fn channel() -> Channel {
             client_id: String::new(),
             client_secret: String::new(),
             instance_url: Some("https://pds.fixture".into()),
+            organization_access: false,
         },
     }
 }
