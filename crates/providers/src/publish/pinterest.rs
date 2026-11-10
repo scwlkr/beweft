@@ -6,12 +6,27 @@ impl Adapter {
         p: &Publication,
         _cp: &Value,
     ) -> Result<Step> {
+        let media_source = if p.media.len() == 1 {
+            json!({
+                "source_type": "image_url",
+                "url": public_media(&p.media[0])?
+            })
+        } else {
+            json!({
+                "source_type": "multiple_image_urls",
+                "items": p
+                    .media
+                    .iter()
+                    .map(|m| Ok(json!({"url": public_media(m)?})))
+                    .collect::<Result<Vec<_>>>()?
+            })
+        };
         let body = json!({
             "board_id": p.options["board_id"],
             "title": p.title,
             "description": p.text,
             "link": p.options["link"],
-            "media_source": {"source_type": "image_url", "url": public_media(&p.media[0])?}
+            "media_source": media_source
         });
         let v = self
             .send(
