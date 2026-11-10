@@ -309,3 +309,122 @@ async fn direct_adapters_preserve_http_shapes_stages_and_ambiguous_outcomes() {
     server.abort();
     let _ = server.await;
 }
+
+#[tokio::test]
+async fn pinterest_image_and_carousel_pins_build_media_source_shapes() {
+    assert_eq!(
+        std::env::var("BEWEFT_REQUIRE_PROVIDER_FIXTURES").as_deref(),
+        Ok("true")
+    );
+    assert_eq!(
+        std::env::var("BEWEFT_PROVIDER_TEST_SANDBOX").as_deref(),
+        Ok("1")
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let state = Arc::new(Mutex::new(Fixture {
+        session_origin: origin.clone(),
+        ..Default::default()
+    }));
+    let app = Router::new()
+        .fallback(any(provider))
+        .with_state(state.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let adapter = Adapter::fixture(&origin).unwrap();
+    let c = channel("pinterest");
+    let mut single = publication();
+    single.options = json!({"board_id":"fixture-board"});
+    single.media.push(picture());
+    assert!(matches!(
+        adapter.publish_step(&c, &single, None).await.unwrap(),
+        Step::Published { .. }
+    ));
+    {
+        let f = state.lock().unwrap();
+        let creates: Vec<_> = f
+            .requests
+            .iter()
+            .filter(|(path, _)| *path == "POST /v5/pins")
+            .collect();
+        assert_eq!(creates.len(), 1);
+        assert_eq!(creates[0].1["media_source"]["source_type"], "image_url");
+        assert_eq!(
+            creates[0].1["media_source"]["url"],
+            "https://media.example/fixture.jpg"
+        );
+        assert_eq!(creates[0].1["board_id"], "fixture-board");
+    }
+    let mut carousel = publication();
+    carousel.options = json!({"board_id":"fixture-board"});
+    carousel.media = vec![
+        Media {
+            name: "carousel-1.jpg".into(),
+            mime: "image/jpeg".into(),
+            source: MediaSource::Bytes(support::fixture_bytes(false)),
+            public_url: Some("https://media.example/carousel-1.jpg".into()),
+            alt_text: "Carousel frame 1".into(),
+        },
+        Media {
+            name: "carousel-2.jpg".into(),
+            mime: "image/jpeg".into(),
+            source: MediaSource::Bytes(support::fixture_bytes(false)),
+            public_url: Some("https://media.example/carousel-2.jpg".into()),
+            alt_text: "Carousel frame 2".into(),
+        },
+    ];
+    assert!(matches!(
+        adapter.publish_step(&c, &carousel, None).await.unwrap(),
+        Step::Published { .. }
+    ));
+    {
+        let f = state.lock().unwrap();
+        let creates: Vec<_> = f
+            .requests
+            .iter()
+            .filter(|(path, _)| *path == "POST /v5/pins")
+            .collect();
+        assert_eq!(creates.len(), 2);
+        assert_eq!(
+            creates[1].1["media_source"]["source_type"],
+            "multiple_image_urls"
+        );
+        let items = creates[1].1["media_source"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["url"], "https://media.example/carousel-1.jpg");
+        assert_eq!(items[1]["url"], "https://media.example/carousel-2.jpg");
+    }
+    let empty = Publication {
+        key: "k".into(),
+        text: "t".into(),
+        title: "T".into(),
+        media: vec![],
+        options: json!({"board_id":"fixture-board"}),
+    };
+    let before = state.lock().unwrap().requests.len();
+    assert!(adapter.publish_step(&c, &empty, None).await.is_err());
+    assert_eq!(state.lock().unwrap().requests.len(), before);
+    let mut six = carousel.clone();
+    six.media.extend((0..4).map(|i| Media {
+        name: format!("carousel-extra-{i}.jpg"),
+        mime: "image/jpeg".into(),
+        source: MediaSource::Bytes(support::fixture_bytes(false)),
+        public_url: Some(format!("https://media.example/carousel-extra-{i}.jpg")),
+        alt_text: String::new(),
+    }));
+    let before = state.lock().unwrap().requests.len();
+    assert!(adapter.publish_step(&c, &six, None).await.is_err());
+    assert_eq!(state.lock().unwrap().requests.len(), before);
+    let mut video = carousel.clone();
+    video.media = vec![Media {
+        name: "carousel-video.mp4".into(),
+        mime: "video/mp4".into(),
+        source: MediaSource::Bytes(support::fixture_bytes(true)),
+        public_url: Some("https://media.example/video.mp4".into()),
+        alt_text: String::new(),
+    }];
+    let before = state.lock().unwrap().requests.len();
+    assert!(adapter.publish_step(&c, &video, None).await.is_err());
+    assert_eq!(state.lock().unwrap().requests.len(), before);
+    server.abort();
+    let _ = server.await;
+}

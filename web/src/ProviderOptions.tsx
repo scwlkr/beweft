@@ -127,14 +127,18 @@ export function ProviderOptions({
     );
   }
   if (
-    (provider === "instagram" || provider === "threads") &&
+    (provider === "instagram" ||
+      provider === "threads" ||
+      provider === "pinterest") &&
     formats.includes("carousel")
   )
     return (
       <section className="provider-options form-stack">
         <p className="muted">
-          A carousel uses 2–10 attachments in their selected order. Use
-          supported JPEG images or MP4 videos; Threads also accepts PNG images.
+          A carousel uses{" "}
+          {provider === "pinterest" ? "2–5" : "2–10"} attachments in their
+          selected order. Use supported JPEG images or MP4 videos; Threads also
+          accepts PNG images. Pinterest carousel Pins use JPEG/PNG images.
           Stories require manual handoff.
         </p>
         {provider === "threads" && (

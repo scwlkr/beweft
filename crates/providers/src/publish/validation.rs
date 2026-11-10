@@ -251,11 +251,14 @@ pub fn validate(provider: &str, p: &Publication) -> Result<()> {
             }
         }
         "pinterest" => {
-            if p.media.len() != 1
-                || !image(&p.media[0])
+            if p.media.is_empty()
+                || p.media.len() > 5
+                || p.media.iter().any(|m| !image(m))
                 || p.options["board_id"].as_str().unwrap_or("").is_empty()
             {
-                return Err(invalid("Pinterest needs one image and a board ID"));
+                return Err(invalid(
+                    "Pinterest needs 1–5 images and a board ID",
+                ));
             }
             if p.options
                 .get("link")
