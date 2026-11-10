@@ -194,6 +194,39 @@ impl Adapter {
                     }
                 }
             }
+            "google_business" => {
+                let parent = c.selection_key()?;
+                let v = self
+                    .send(
+                        self.request(
+                            Method::GET,
+                            &format!("https://mybusiness.googleapis.com/v4/{parent}/reviews"),
+                            token,
+                        )?
+                        .query(&[("pageSize", "50")]),
+                        false,
+                    )
+                    .await?;
+                for r in v["reviews"].as_array().unwrap_or(&vec![]) {
+                    if let Some(name) = r["name"].as_str() {
+                        items.push(InboxItem {
+                            reply_context: None,
+                            id: name.into(),
+                            parent_id: None,
+                            author: r["reviewer"]["displayName"]
+                                .as_str()
+                                .unwrap_or("Google reviewer")
+                                .into(),
+                            text: r["comment"].as_str().unwrap_or("").into(),
+                            url: r["reviewReplyUrl"].as_str().map(str::to_owned),
+                            created_at: r["createTime"]
+                                .as_str()
+                                .or_else(|| r["updateTime"].as_str())
+                                .map(str::to_owned),
+                        });
+                    }
+                }
+            }
             _ => {
                 return Err(error(
                     FailureKind::Unavailable,

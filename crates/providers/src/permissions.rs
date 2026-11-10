@@ -7,7 +7,7 @@ fn required_scopes(provider: &str, action: &str, organization: bool) -> Vec<&'st
         ("youtube", "publish" | "media") => vec!["https://www.googleapis.com/auth/youtube.upload"],
         ("youtube", "reply" | "inbox") => vec!["https://www.googleapis.com/auth/youtube.force-ssl"],
         ("youtube", "metrics") => vec!["https://www.googleapis.com/auth/youtube.readonly"],
-        ("google_business", "publish" | "media") => {
+        ("google_business", "publish" | "media" | "inbox" | "reply" | "metrics") => {
             vec!["https://www.googleapis.com/auth/business.manage"]
         }
         ("facebook", "publish" | "media") => vec!["pages_manage_posts"],

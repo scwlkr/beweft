@@ -298,6 +298,27 @@ impl Adapter {
                     receipt: json!({"id":id}),
                 });
             }
+            "google_business" => {
+                crate::google_review_name_for_location(item_id, &c.identity.id)?;
+                let review = item_id.to_owned();
+                let v = self
+                    .send(
+                        self.request(
+                            Method::PUT,
+                            &format!("https://mybusiness.googleapis.com/v4/{review}/reply"),
+                            token,
+                        )?
+                        .json(&json!({"comment": text})),
+                        true,
+                    )
+                    .await?;
+                let _ = v;
+                return Ok(Step::Published {
+                    external_id: review.clone(),
+                    external_url: None,
+                    receipt: json!({"review": review}),
+                });
+            }
             // Threads replies need the same persisted container state machine as posts.
             _ => {
                 return Err(error(
