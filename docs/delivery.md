@@ -50,8 +50,7 @@ and queue migration remain an explicit owner step that preserves or retires
 queues. Do not classify missing code as an external account-approval block or
 claim universal inbox/analytics support.
 
-Truly unfinished local product work remains: Bluesky
-explicit queue-migrate UI when not present, live provider qualification and
+Truly unfinished local product work remains: live provider qualification and
 hosting.
 
 ## External qualification
@@ -80,7 +79,7 @@ upgrades and physical host-reboot recovery remain unqualified.
   atomic metadata-version precondition. A concurrent edit from another device
   after the check can change the frozen description shown in the comparison.
 - #26: Bluesky video currently omits aspect ratio; playback can use a square card
-  with letterboxing. Bluesky entryway/PDS onboarding landed through #42; explicit
+  with letterboxing. Bluesky entryway/PDS onboarding and explicit queue-migrate UI landed through #43; explicit
   queue migration remains an owner step as stated above.
 
 Clean owned disposable fixtures and completed worktrees after use. Preserve

@@ -109,6 +109,7 @@ export function Connections({
           brand={brand}
           provider={setup.provider}
           reconnectId={setup.reconnectId}
+          action={action}
           onClose={() => setSetup(null)}
           onSaved={async () => {
             await action(async () => {}, "Connection settings updated");
@@ -170,6 +171,7 @@ export function Connections({
           }}
           platforms={platforms}
           platformsReady={platformsReady}
+          onSetupProvider={(provider) => setSetup({ provider })}
         />
       )}
       {platformError && (
