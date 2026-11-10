@@ -14,6 +14,7 @@ import type { AcknowledgeRevocationRequest } from "../lib/api-contract.generated
 import { ErrorNotice, Field } from "../components/shared";
 import { Button } from "../components/ui/button";
 import { Dialog } from "../components/ui/dialog";
+import { BlueskyMigrate } from "./BlueskyMigrate";
 const RemovalStatus = z.object({
   provider: z.string(),
   revocation_id: z.string().uuid().nullable(),
@@ -29,12 +30,14 @@ export function ProviderSetup({
   provider,
   brand,
   reconnectId,
+  action,
   onClose,
   onSaved,
 }: {
   provider: Provider;
   brand: Brand;
   reconnectId?: string;
+  action?: (fn: () => Promise<unknown>, message?: string) => Promise<boolean>;
   onClose: () => void;
   onSaved: () => Promise<void>;
 }) {
@@ -54,6 +57,8 @@ export function ProviderSetup({
   const [saved, setSaved] = useState("");
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
+  const [migrateOrigin, setMigrateOrigin] = useState<string | null>(null);
+  const [showMigrate, setShowMigrate] = useState(false);
   // undefined means the current boundary has not been checked.
   const [removal, setRemoval] = useState<string | null | undefined>(undefined);
   const [removalBusy, setRemovalBusy] = useState(false);
@@ -254,7 +259,14 @@ export function ProviderSetup({
       }
     } catch (e) {
       if (current(session)) {
-        setError((e as Error).message);
+        const message = (e as Error).message;
+        const match = message.match(/different PDS \(([^)]+)\)/);
+        if (match) {
+          setMigrateOrigin(match[1]);
+          setInstance(match[1]);
+          setShowMigrate(true);
+        }
+        setError(message);
         setRemoval(undefined);
       }
     } finally {
@@ -302,6 +314,31 @@ export function ProviderSetup({
           </div>
         </dl>
         {error && <ErrorNotice message={error} />}
+        {showMigrate && id === "bluesky" && (
+          <BlueskyMigrate
+            channelId={reconnectId}
+            channelName={reconnectId ? "the reconnect target" : undefined}
+            action={
+              action ??
+              (async (fn, msg) => {
+                try {
+                  await fn();
+                  return true;
+                } catch {
+                  return false;
+                }
+              })
+            }
+            pending={busy}
+            discoveredOrigin={migrateOrigin ?? undefined}
+            onConfigureOrigin={() => {
+              if (migrateOrigin) setInstance(migrateOrigin);
+            }}
+            onConnectNewChannel={() => {
+              // The connect form below performs the new connection.
+            }}
+          />
+        )}
         <section
           className="form-stack detail-section"
           aria-label="Provider access removal"

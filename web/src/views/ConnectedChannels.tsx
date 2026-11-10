@@ -11,6 +11,7 @@ import type { UpdateChannelRequest } from "../lib/api-contract.generated";
 import { Network } from "../components/brand";
 import { Button } from "../components/ui/button";
 import { ChannelPermissions } from "./ChannelPermissions";
+import { BlueskyMigrate } from "./BlueskyMigrate";
 export function ConnectedChannels({
   channels,
   providers,
@@ -18,6 +19,7 @@ export function ConnectedChannels({
   action,
   onReconnect,
   onDisconnect,
+  onSetupProvider,
   platforms,
   platformsReady,
 }: {
@@ -27,6 +29,7 @@ export function ConnectedChannels({
   action: (fn: () => Promise<unknown>, message?: string) => Promise<boolean>;
   onReconnect: (provider: Provider, id: string) => void;
   onDisconnect: (channel: Channel) => void;
+  onSetupProvider?: (provider: Provider) => void;
   platforms: ManualGuidance[];
   platformsReady: boolean;
 }) {
@@ -68,6 +71,7 @@ export function ConnectedChannels({
       ) : (
       <div className="channel-list">
       {visible.map((c) => (
+        <div key={c.id}>
         <article className="channel-row" key={c.id}>
           <Network provider={c.provider} />
           <div>
@@ -196,6 +200,35 @@ export function ConnectedChannels({
             {c.paused ? "Resume" : "Pause"}
           </Button>
         </article>
+        {c.provider === "bluesky" &&
+          (c.connection_status === "reconnect_required" ||
+            String(c.connection_error ?? "").toLowerCase().includes("origin") ||
+            String(c.connection_error ?? "").toLowerCase().includes("pds")) && (
+            <BlueskyMigrate
+              channelId={c.id}
+              channelName={c.name}
+              action={action}
+              pending={pending}
+              discoveredOrigin={undefined}
+              onConfigureOrigin={() => {
+                const provider =
+                  providers.find((p) => p.id === c.provider) ?? {
+                    id: c.provider,
+                    name: c.provider,
+                  };
+                onSetupProvider?.(provider);
+              }}
+              onConnectNewChannel={() => {
+                const provider =
+                  providers.find((p) => p.id === c.provider) ?? {
+                    id: c.provider,
+                    name: c.provider,
+                  };
+                onSetupProvider?.(provider);
+              }}
+            />
+          )}
+        </div>
       ))}
       </div>
       )}
