@@ -1,5 +1,5 @@
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { X } from "lucide-react";
+import { Maximize2, Minimize2, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useContext } from "react";
 import { ApiFeedbackContext } from "../feedback";
@@ -11,6 +11,8 @@ export function Dialog({
   description,
   children,
   wide = false,
+  fullscreen = false,
+  onToggleFullscreen,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -18,6 +20,8 @@ export function Dialog({
   description?: string;
   children: ReactNode;
   wide?: boolean;
+  fullscreen?: boolean;
+  onToggleFullscreen?: () => void;
 }) {
   const apiError = useContext(ApiFeedbackContext);
   return (
@@ -25,7 +29,7 @@ export function Dialog({
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="dialog-overlay" />
         <DialogPrimitive.Content
-          className={`dialog-content ${wide ? "dialog-wide" : ""}`}
+          className={`dialog-content ${wide ? "dialog-wide" : ""} ${fullscreen ? "dialog-fullscreen" : ""}`}
           aria-describedby={description ? "dialog-description" : undefined}
         >
           <header className="dialog-heading">
@@ -37,12 +41,25 @@ export function Dialog({
                 </DialogPrimitive.Description>
               )}
             </div>
-            <DialogPrimitive.Close
-              className="button button-ghost button-icon"
-              aria-label="Close dialog"
-            >
-              <X size={19} />
-            </DialogPrimitive.Close>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              {onToggleFullscreen && (
+                <button
+                  type="button"
+                  className="button button-ghost button-icon"
+                  aria-label={fullscreen ? "Exit fullscreen" : "Fullscreen compose"}
+                  aria-pressed={fullscreen}
+                  onClick={onToggleFullscreen}
+                >
+                  {fullscreen ? <Minimize2 size={19} /> : <Maximize2 size={19} />}
+                </button>
+              )}
+              <DialogPrimitive.Close
+                className="button button-ghost button-icon"
+                aria-label="Close dialog"
+              >
+                <X size={19} />
+              </DialogPrimitive.Close>
+            </div>
           </header>
           {apiError && (
             <div className="dialog-api-error">

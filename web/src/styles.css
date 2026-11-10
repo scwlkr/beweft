@@ -1045,6 +1045,27 @@ code {
   width: min(1000px, calc(100vw - 40px));
   padding: 0;
 }
+.dialog-fullscreen {
+  width: calc(100vw - 16px);
+  height: calc(100dvh - 16px);
+  max-height: calc(100dvh - 16px);
+  top: 8px;
+  left: 8px;
+  transform: none;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+.dialog-fullscreen .composer-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+.dialog-fullscreen .composer-editor,
+.dialog-fullscreen .composer-preview {
+  overflow: auto;
+  min-height: 0;
+}
 .dialog-heading {
   display: flex;
   align-items: flex-start;
@@ -1196,6 +1217,32 @@ code {
 .editor-tools .muted {
   margin-left: auto;
   font-size: 10px;
+}
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(34px, 1fr));
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  max-height: 190px;
+  overflow: auto;
+  margin-top: 8px;
+  background: var(--surface);
+}
+.emoji-option {
+  font-size: 18px;
+  line-height: 1;
+  padding: 4px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+}
+.emoji-option:hover,
+.emoji-option:focus-visible {
+  background: var(--accent-soft);
+  border-color: var(--accent);
 }
 .schedule-choice {
   margin-top: 24px;
