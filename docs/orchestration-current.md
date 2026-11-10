@@ -56,7 +56,7 @@ print or commit secret values. The earlier dev database/media remain preserved.
 | Meta formats #24 / correction #28 | Merged at `6ae032d` after fresh review of frozen `394ea493`. Accepted Facebook Reel processing remains sending/uncertain and cannot become an ordinary cancelable queued item. The cumulative merge also landed #24 and #27. |
 | Content/owner UI #25 | Merged at `acf0892` after fresh review of frozen `800f225`. Audit-linked replacement recovery, templates, queued edits/priority, brand archive/restore, owner sessions/password, Meta and LinkedIn recovery are included. Seventeen focused browser scenarios and real API workflows passed. |
 | Bluesky video #26 | Merged at `1320d7e` after fresh review of explicit quota-rejection retry. Job/blob checkpoints, stable record identity, PDS compatibility guard and bounded notification reads are included. Replies are implemented and fixture-tested; live reply access remains unverified. |
-| LinkedIn media #27 | Member image/video stages and exact-ID owner recovery passed practical independent review at `899c370` and landed through cumulative #28. Organization opt-in/discovery remains unfinished. |
+| LinkedIn media #27 | Member image/video stages and exact-ID owner recovery passed practical independent review at `899c370` and landed through cumulative #28; organization opt-in/discovery landed through #39 and is fixture-tested. Provider organization access, role approval and live publication remain unverified. |
 
 Each consequential revision still receives a brand-new read-only reviewer.
 All implementation/review agents use `gpt-6.1-terra` at `max`, with at most three
@@ -94,15 +94,17 @@ posts, Buffer changes or unrelated services are authorized.
 ## Remaining full scope and cleanup
 
 The reviewed source milestones through #28 have landed and their combined local
-image is qualified and installed. Google Business Profile backend/web work and X
-thread publishing are now active. Ordinary Facebook Page video, Instagram
-Stories, Threads replies and Bluesky replies are implemented and fixture-tested;
-live Page and Stories eligibility and provider reply access remain unverified.
-Additional local implementation still includes X threads, LinkedIn organization
-opt-in, expanded Pinterest formats/reads, Google Business Profile direct support
-and safe Google grant-family handling. Bluesky entryway to PDS onboarding now discovers the account PDS during
-connection and refuses silent origin moves; reconnect and queue migration
-remain explicit owner steps. Missing code is not an external approval block.
+image is qualified and installed. Google Business Profile backend/web work, X
+thread publishing and the Google Business Profile community slice have landed;
+ordinary Facebook Page video, Instagram Stories, Threads replies and Bluesky
+replies are implemented and fixture-tested, with live eligibility and provider
+reply access remaining unverified. Additional local implementation still
+includes expanded Pinterest formats/reads (video Pins and provider reads),
+Queue/Calendar cohesion polish, Composer fullscreen/emoji, Bluesky explicit
+queue-migrate UI when not present, and live provider qualification. Bluesky
+entryway to PDS onboarding now discovers the account PDS during connection and
+refuses silent origin moves; reconnect and queue migration remain explicit owner
+steps. Missing code is not an external approval block.
 
 Hosting stays placeholders until a server/domain is selected. Operator-specific
 app registration, scopes, account eligibility, costs/consent and live provider
