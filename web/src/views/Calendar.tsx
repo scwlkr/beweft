@@ -1,7 +1,7 @@
 import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { z } from "zod";
-import { api, PublicationSchema, ScheduleSchema, type Publication, type Schedule } from "../api";
+import { api, PublicationSchema, ScheduleSchema, PostSchema, type Publication, type Schedule, type Post } from "../api";
 import { Network } from "../components/brand";
 import { State, Time } from "../components/shared";
 import { Button } from "../components/ui/button";
@@ -12,6 +12,43 @@ type Action = (
   message?: string,
 ) => Promise<boolean>;
 const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+function publicationTags(pub: Publication, posts: Post[]): string[] {
+  const tags = new Set<string>();
+  const add = (value: unknown) => {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (typeof item === "string" && item.trim()) tags.add(item.trim());
+      }
+    }
+  };
+  add((pub as { tags?: unknown }).tags);
+  add((pub.payload as { tags?: unknown })?.tags);
+  add(pub.payload?.options?.tags);
+  const post = posts.find((p) => p.id === pub.post_id);
+  if (post) {
+    add((post as { tags?: unknown }).tags);
+    add(post.options?.tags);
+  }
+  return [...tags];
+}
+function postTags(post: Post): string[] {
+  const tags = new Set<string>();
+  const add = (value: unknown) => {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (typeof item === "string" && item.trim()) tags.add(item.trim());
+      }
+    }
+  };
+  add((post as { tags?: unknown }).tags);
+  add(post.options?.tags);
+  return [...tags];
+}
+function tagMatches(tags: string[], filter: string) {
+  if (!filter) return true;
+  if (filter === "__untagged__") return tags.length === 0;
+  return tags.includes(filter);
+}
 const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 export function Calendar({
   publications,
@@ -19,17 +56,21 @@ export function Calendar({
   channels,
   action,
   onRefresh,
+  posts: postsProp,
 }: {
   publications: Publication[];
   onCompose: (date: string) => void;
   channels?: any[];
   action?: Action;
   onRefresh?: () => Promise<void> | void;
+  posts?: Post[];
 }) {
   const [month, setMonth] = useState(
     () => new Date(new Date().getFullYear(), new Date().getMonth(), 1),
   );
   const [view, setView] = useState<"month" | "week">("month");
+  const [layout, setLayout] = useState<"grid" | "agenda">("grid");
+  const [tagFilter, setTagFilter] = useState("");
   const [weekStart, setWeekStart] = useState(() => {
     const now = new Date();
     const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -40,6 +81,7 @@ export function Calendar({
   });
   const [selected, setSelected] = useState<string | null>(null);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [posts, setPosts] = useState<Post[]>(postsProp ?? []);
   const [draggedId, setDraggedId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -53,6 +95,16 @@ export function Calendar({
     ).then((all) => { if (!cancelled) setSchedules(all.flat()); });
     return () => { cancelled = true; };
   }, [channels]);
+  useEffect(() => {
+    if (postsProp) { setPosts(postsProp); return; }
+    const brandId = (channels ?? []).map((c: any) => c.brand_id).filter(Boolean)[0];
+    if (!brandId) { setPosts([]); return; }
+    let cancelled = false;
+    api(`/posts?brand_id=${encodeURIComponent(brandId)}`, z.array(PostSchema))
+      .then((data) => { if (!cancelled) setPosts(data); })
+      .catch(() => { if (!cancelled) setPosts([]); });
+    return () => { cancelled = true; };
+  }, [channels, postsProp]);
   const start = new Date(month);
   start.setDate(1 - ((start.getDay() + 6) % 7));
   const days = Array.from({ length: 42 }, (_, i) => {
@@ -90,7 +142,16 @@ export function Calendar({
     d.setDate(weekStart.getDate() + i);
     return d;
   });
-  const visible = publications.filter((p) => p.state !== "canceled");
+  const visible = publications.filter((p) => p.state !== "canceled" && tagMatches(publicationTags(p, posts), tagFilter));
+  const knownTags = [
+    ...new Set([
+      ...publications.flatMap((p) => publicationTags(p, posts)),
+      ...posts.flatMap((p) => postTags(p)),
+    ]),
+  ].sort((a, b) => a.localeCompare(b));
+  const drafts = posts.filter(
+    (p) => p.status === "draft" && tagMatches(postTags(p), tagFilter),
+  );
 
   const reschedulePublication = async (pub: Publication, targetDate: string) => {
     if (!action) return;
@@ -162,8 +223,33 @@ export function Calendar({
               Week
             </Button>
           </div>
+          <div className="view-toggle">
+            <Button
+              variant={layout === "grid" ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => setLayout("grid")}
+            >
+              Grid
+            </Button>
+            <Button
+              variant={layout === "agenda" ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => setLayout("agenda")}
+            >
+              Agenda
+            </Button>
+          </div>
         </div>
         <div className="calendar-toolbar-actions">
+          <select value={tagFilter} onChange={(e) => setTagFilter(e.target.value)} aria-label="Filter by tag">
+            <option value="">All tags</option>
+            <option value="__untagged__">Untagged</option>
+            {knownTags.map((tag) => (
+              <option key={tag} value={tag}>
+                {tag}
+              </option>
+            ))}
+          </select>
           <Button size="sm" onClick={() => onCompose(dateKey(new Date()))}>
             <Plus size={16} />
             New post
@@ -171,6 +257,41 @@ export function Calendar({
           <span className="muted">{zone}</span>
         </div>
       </div>
+      {layout === "agenda" ? (
+        <section className="calendar-agenda" aria-label="Agenda">
+          {(() => {
+            const visibleDays = view === "month" ? days : weekDays;
+            const dayKeys = new Set(visibleDays.map((d) => dateKey(d)));
+            const items = visible
+              .filter((p) => dayKeys.has(dateKey(new Date(p.scheduled_at))))
+              .sort((a, b) => a.scheduled_at.localeCompare(b.scheduled_at));
+            const grouped = new Map<string, Publication[]>();
+            for (const p of items) {
+              const key = dateKey(new Date(p.scheduled_at));
+              if (!grouped.has(key)) grouped.set(key, []);
+              grouped.get(key)!.push(p);
+            }
+            if (grouped.size === 0) {
+              return <p className="muted">No dated posts in this range.</p>;
+            }
+            return [...grouped.entries()].map(([key, postsForDay]) => (
+              <div className="agenda-day" key={key}>
+                <h3>{new Date(`${key}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</h3>
+                <ul className="agenda-list">
+                  {postsForDay.map((p) => (
+                    <li key={p.id} className={`agenda-item calendar-${p.state}`}>
+                      <Time value={p.scheduled_at} />
+                      <strong>{p.payload.title || p.payload.text || "Media post"}</strong>
+                      <span className="muted">{p.channel_name}</span>
+                      <State state={p.state} />
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ));
+          })()}
+        </section>
+      ) : (
       <div className="calendar-grid">
         {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => (
           <div className="calendar-weekday" key={d}>
@@ -257,9 +378,32 @@ export function Calendar({
           );
         })}
       </div>
+      )}
       <p className="muted calendar-hint">
         Select a day to see its posts or schedule something new. Click a day to add posts. Dates use your browser’s timezone.
       </p>
+      <section className="draft-tray" aria-label="Undated drafts">
+        <h3>Undated drafts</h3>
+        {drafts.length === 0 ? (
+          <p className="muted">No undated drafts.</p>
+        ) : (
+          <ul className="draft-tray-list">
+            {drafts.map((d) => (
+              <li key={d.id} className="draft-tray-item">
+                <strong>{d.title || d.text.slice(0, 60) || "Untitled draft"}</strong>
+                <span className="muted">{d.text.slice(0, 80)}</span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => onCompose(dateKey(new Date()))}
+                >
+                  Schedule
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
       {selected && (
         <Dialog
           open

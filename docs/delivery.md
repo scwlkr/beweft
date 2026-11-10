@@ -51,7 +51,7 @@ queues. Do not classify missing code as an external account-approval block or
 claim universal inbox/analytics support.
 
 Truly unfinished local product work remains: Pinterest video Pins and provider
-reads, Queue/Calendar cohesion polish, Composer fullscreen/emoji, Bluesky
+reads, Composer fullscreen/emoji, Schedules posting-goal/DST preview, Bluesky
 explicit queue-migrate UI when not present, live provider qualification and
 hosting.
 

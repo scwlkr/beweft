@@ -2910,3 +2910,77 @@ fieldset.composer-editor {
 .home-week-day strong { font-size: 16px; }
 .home-week-day small { color: var(--muted); font-size: 10px; }
 .home-week-day.today { border-color: var(--accent); background: var(--accent-soft); }
+
+.draft-tray {
+  margin-top: 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--surface);
+}
+.draft-tray h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+.draft-tray-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+.draft-tray-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+}
+.draft-tray-item:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.draft-tray-item strong {
+  font-size: 13px;
+}
+.draft-tray-item span {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.calendar-agenda {
+  display: grid;
+  gap: 16px;
+  margin-top: 8px;
+}
+.agenda-day h3 {
+  font-size: 14px;
+  margin: 0 0 6px;
+}
+.agenda-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+.agenda-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 12px;
+}
+.view-toggle {
+  display: inline-flex;
+  gap: 4px;
+  margin-right: 8px;
+}
